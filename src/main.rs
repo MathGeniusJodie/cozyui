@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, point_to_viewport};
 use alacritty_terminal::tty;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event as XEvent;
@@ -23,7 +23,7 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-const BG_SCALE: usize = 3;
+const BG_SCALE: usize = 2;
 const GLYPH_SCALE: usize = 2;
 const GLYPH_W: usize = 6;
 const GLYPH_H: usize = 12;
@@ -59,6 +59,9 @@ const BUTTON_SPRITES_PATH: &str = "assets/buttons-pressed.png";
 const BUTTON_W: usize = 20;
 const BUTTON_H: usize = 16;
 const BUTTON_PRESSED_OFFSET_X: isize = -3;
+const SCROLL_LINES: i32 = 3;
+const WHEEL_UP: u8 = 4;
+const WHEEL_DOWN: u8 = 5;
 const LIGHT_W: usize = 4;
 const LIGHT_H: usize = 5;
 const LIGHTS: [Light; 3] = [
@@ -577,12 +580,15 @@ fn render(
     let content = term.renderable_content();
 
     for indexed in content.display_iter {
+        let Some(point) = point_to_viewport(content.display_offset, indexed.point) else {
+            continue;
+        };
         let cell = indexed.cell;
         if cell.flags.contains(Flags::WIDE_CHAR_SPACER | Flags::HIDDEN) || cell.c == ' ' {
             continue;
         }
-        let x = art_x(SCREEN_SOURCE_X) + indexed.point.column.0 * cell_w;
-        let y = art_y(SCREEN_SOURCE_Y) + indexed.point.line.0 as usize * cell_h;
+        let x = art_x(SCREEN_SOURCE_X) + point.column.0 * cell_w;
+        let y = art_y(SCREEN_SOURCE_Y) + point.line * cell_h;
         let mut color = settings.text_color(palette);
         if cell.flags.contains(Flags::DIM) {
             color = settings.glow_color(palette);
@@ -600,15 +606,17 @@ fn render(
         fb.draw_glyph(atlas, cell.c, x, y, color);
     }
 
-    let cursor_x = art_x(SCREEN_SOURCE_X) + content.cursor.point.column.0 * cell_w;
-    let cursor_y = art_y(SCREEN_SOURCE_Y) + content.cursor.point.line.0 as usize * cell_h;
-    fb.fill_rect(
-        cursor_x,
-        cursor_y,
-        cell_w,
-        cell_h,
-        palette.color(COLOR_CURSOR),
-    );
+    if let Some(cursor_point) = point_to_viewport(content.display_offset, content.cursor.point) {
+        let cursor_x = art_x(SCREEN_SOURCE_X) + cursor_point.column.0 * cell_w;
+        let cursor_y = art_y(SCREEN_SOURCE_Y) + cursor_point.line * cell_h;
+        fb.fill_rect(
+            cursor_x,
+            cursor_y,
+            cell_w,
+            cell_h,
+            palette.color(COLOR_CURSOR),
+        );
+    }
 
     if let Some(index) = active_button {
         let button = BUTTON_TARGETS[index];
@@ -883,6 +891,25 @@ fn button_at(x: i16, y: i16) -> Option<usize> {
     })
 }
 
+fn key_scroll(keycode: u8, state: u16) -> Option<Scroll> {
+    let shift = state & 1 != 0;
+    if !shift {
+        return None;
+    }
+
+    match keycode {
+        110 => Some(Scroll::Top),
+        112 => Some(Scroll::PageUp),
+        115 => Some(Scroll::Bottom),
+        117 => Some(Scroll::PageDown),
+        _ => None,
+    }
+}
+
+fn scroll_display(term: &Arc<FairMutex<Term<UiEventProxy>>>, scroll: Scroll) {
+    term.lock().scroll_display(scroll);
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     tty::setup_env();
 
@@ -899,7 +926,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cell_w = (GLYPH_W * GLYPH_SCALE) as u16;
     let cell_h = (GLYPH_H * GLYPH_SCALE) as u16;
     let size = TermSize {
-        columns: SCREEN_W / (cell_w as usize),
+        columns: SCREEN_W / (cell_w as usize) - 1,
         lines: SCREEN_H / (cell_h as usize),
     };
     let window_size = WindowSize {
@@ -911,11 +938,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (ui_tx, ui_rx) = mpsc::channel();
     let proxy = UiEventProxy(ui_tx);
-    let term = Arc::new(FairMutex::new(Term::new(
-        Config::default(),
-        &size,
-        proxy.clone(),
-    )));
+    let config = Config {
+        scrolling_history: 10_000,
+        ..Config::default()
+    };
+    let term = Arc::new(FairMutex::new(Term::new(config, &size, proxy.clone())));
     let pty = tty::new(&tty::Options::default(), window_size, xwin.window as u64)?;
     let event_loop = EventLoop::new(term.clone(), proxy, pty, true, false)?;
     let pty_tx = event_loop.channel();
@@ -956,12 +983,43 @@ fn main() -> Result<(), Box<dyn Error>> {
                     xwin.draw(&fb)?;
                 }
                 XEvent::KeyPress(event) => {
-                    if let Some(bytes) = key_bytes(event.detail, event.state.into()) {
+                    if let Some(scroll) = key_scroll(event.detail, event.state.into()) {
+                        scroll_display(&term, scroll);
+                    } else if let Some(bytes) = key_bytes(event.detail, event.state.into()) {
+                        scroll_display(&term, Scroll::Bottom);
                         let _ = pty_tx.send(Msg::Input(bytes));
                     }
                 }
-                XEvent::ButtonPress(event) => {
-                    if event.detail == ButtonIndex::M1.into() {
+                XEvent::ButtonPress(event) => match event.detail {
+                    WHEEL_UP => {
+                        scroll_display(&term, Scroll::Delta(SCROLL_LINES));
+                        render(
+                            &mut fb,
+                            &mode_images,
+                            &atlas,
+                            &button_sprites,
+                            active_button,
+                            settings,
+                            &palette,
+                            &term,
+                        );
+                        xwin.draw(&fb)?;
+                    }
+                    WHEEL_DOWN => {
+                        scroll_display(&term, Scroll::Delta(-SCROLL_LINES));
+                        render(
+                            &mut fb,
+                            &mode_images,
+                            &atlas,
+                            &button_sprites,
+                            active_button,
+                            settings,
+                            &palette,
+                            &term,
+                        );
+                        xwin.draw(&fb)?;
+                    }
+                    detail if detail == ButtonIndex::M1.into() => {
                         active_button = button_at(event.event_x, event.event_y);
                         render(
                             &mut fb,
@@ -975,7 +1033,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         );
                         xwin.draw(&fb)?;
                     }
-                }
+                    _ => {}
+                },
                 XEvent::ButtonRelease(event) => {
                     if event.detail == ButtonIndex::M1.into() {
                         let released_button = button_at(event.event_x, event.event_y);
