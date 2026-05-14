@@ -12,3 +12,9 @@ Run it from an X11 session:
 ```sh
 cargo run
 ```
+
+## todo
+* icon theme
+* file browser app
+* todo app
+* statusbar
