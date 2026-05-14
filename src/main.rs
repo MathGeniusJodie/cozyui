@@ -41,6 +41,15 @@ const ART_CROP_X: usize = 19;
 const ART_CROP_Y: usize = 17;
 
 const COLOR_CURSOR: usize = 0;
+const COLOR_LIGHT_OFF: usize = 2;
+const COLOR_LIGHT_OFF_CORE: usize = 1;
+const COLOR_LIGHT_OFF_TOP: usize = 4;
+const COLOR_LIGHT_RED: usize = 9;
+const COLOR_LIGHT_RED_CORE: usize = 8;
+const COLOR_LIGHT_RED_TOP: usize = 8;
+const COLOR_LIGHT_GREEN: usize = 7;
+const COLOR_LIGHT_GREEN_CORE: usize = 6;
+const COLOR_LIGHT_GREEN_TOP: usize = 6;
 const COLOR_ORANGE_TEXT: usize = 8;
 const COLOR_ORANGE_GLOW: usize = 3;
 const COLOR_GREEN_TEXT: usize = 6;
@@ -50,6 +59,25 @@ const BUTTON_SPRITES_PATH: &str = "assets/buttons-pressed.png";
 const BUTTON_W: usize = 20;
 const BUTTON_H: usize = 16;
 const BUTTON_PRESSED_OFFSET_X: isize = -3;
+const LIGHT_W: usize = 4;
+const LIGHT_H: usize = 5;
+const LIGHTS: [Light; 3] = [
+    Light {
+        x: 155,
+        y: 222,
+        kind: LightKind::Brightness,
+    },
+    Light {
+        x: 164,
+        y: 222,
+        kind: LightKind::Color,
+    },
+    Light {
+        x: 173,
+        y: 222,
+        kind: LightKind::Contrast,
+    },
+];
 const BUTTON_TARGETS: [Button; 3] = [
     Button {
         x: 160,
@@ -73,6 +101,27 @@ struct Button {
     x: usize,
     y: usize,
     action: ButtonAction,
+}
+
+#[derive(Clone, Copy)]
+struct Light {
+    x: usize,
+    y: usize,
+    kind: LightKind,
+}
+
+#[derive(Clone, Copy)]
+enum LightKind {
+    Brightness,
+    Color,
+    Contrast,
+}
+
+#[derive(Clone, Copy)]
+enum LightState {
+    Off,
+    Red,
+    Green,
 }
 
 #[derive(Clone, Copy)]
@@ -132,6 +181,29 @@ impl DisplaySettings {
         match self.text_mode {
             TextMode::Green => palette.color(COLOR_GREEN_GLOW),
             TextMode::Orange => palette.color(COLOR_ORANGE_GLOW),
+        }
+    }
+
+    fn light_state(&self, kind: LightKind) -> LightState {
+        match kind {
+            LightKind::Brightness => {
+                if self.high_brightness {
+                    LightState::Green
+                } else {
+                    LightState::Off
+                }
+            }
+            LightKind::Color => match self.text_mode {
+                TextMode::Green => LightState::Green,
+                TextMode::Orange => LightState::Red,
+            },
+            LightKind::Contrast => {
+                if self.high_contrast {
+                    LightState::Red
+                } else {
+                    LightState::Off
+                }
+            }
         }
     }
 }
@@ -350,6 +422,16 @@ impl Framebuffer {
         }
     }
 
+    fn fill_source_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: Rgba) {
+        self.fill_rect(
+            x * BG_SCALE,
+            y * BG_SCALE,
+            w * BG_SCALE,
+            h * BG_SCALE,
+            color,
+        );
+    }
+
     fn draw_glyph(&mut self, atlas: &GlyphAtlas, ch: char, x: usize, y: usize, color: Rgba) {
         for gy in 0..GLYPH_H {
             for gx in 0..GLYPH_W {
@@ -487,6 +569,7 @@ fn render(
     term: &Arc<FairMutex<Term<UiEventProxy>>>,
 ) {
     fb.clear_scaled(mode_images.for_settings(settings), BG_SCALE);
+    draw_lights(fb, settings, palette);
 
     let cell_w = GLYPH_W * GLYPH_SCALE;
     let cell_h = GLYPH_H * GLYPH_SCALE;
@@ -541,6 +624,36 @@ fn render(
             BG_SCALE,
         );
     }
+}
+
+fn draw_lights(fb: &mut Framebuffer, settings: DisplaySettings, palette: &Palette) {
+    for light in LIGHTS {
+        draw_light(fb, light, settings.light_state(light.kind), palette);
+    }
+}
+
+fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState, palette: &Palette) {
+    let (shell, core, top) = match state {
+        LightState::Off => (
+            palette.color(COLOR_LIGHT_OFF),
+            palette.color(COLOR_LIGHT_OFF_CORE),
+            palette.color(COLOR_LIGHT_OFF_TOP),
+        ),
+        LightState::Red => (
+            palette.color(COLOR_LIGHT_RED),
+            palette.color(COLOR_LIGHT_RED_CORE),
+            palette.color(COLOR_LIGHT_RED_TOP),
+        ),
+        LightState::Green => (
+            palette.color(COLOR_LIGHT_GREEN),
+            palette.color(COLOR_LIGHT_GREEN_CORE),
+            palette.color(COLOR_LIGHT_GREEN_TOP),
+        ),
+    };
+
+    fb.fill_source_rect(light.x, light.y, LIGHT_W, LIGHT_H, shell);
+    fb.fill_source_rect(light.x, light.y, LIGHT_W, 1, top);
+    fb.fill_source_rect(light.x + 1, light.y + 2, LIGHT_W - 2, LIGHT_H - 3, core);
 }
 
 fn decode_png(path: &str) -> Result<Vec<Rgba>, Box<dyn Error>> {
