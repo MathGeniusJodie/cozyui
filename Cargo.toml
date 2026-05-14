@@ -1,0 +1,9 @@
+[package]
+name = "cozyui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+png = "0.17"
+x11rb = "0.13"
