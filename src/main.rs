@@ -14,6 +14,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 mod puter;
+mod toodle;
 
 const PALETTE_PATH: &str = "na16-1x.png";
 
@@ -148,6 +149,10 @@ impl Framebuffer {
         }
     }
 
+    pub(crate) fn clear(&mut self, color: Rgba) {
+        self.pixels.fill(color);
+    }
+
     pub(crate) fn clear_scaled(&mut self, image: &Image, scale: usize) {
         for y in 0..self.height {
             for x in 0..self.width {
@@ -180,7 +185,23 @@ impl Framebuffer {
         for y in 0..height {
             for x in 0..width {
                 let color = image.at(src_x + x, src_y + y);
+                if color.a == 0 {
+                    continue;
+                }
                 self.fill_rect(dest_x + x * scale, dest_y + y * scale, scale, scale, color);
+            }
+        }
+    }
+
+    fn blit_from(&mut self, src: &Framebuffer, dest_x: usize, dest_y: usize) {
+        for y in 0..src.height {
+            for x in 0..src.width {
+                let px = dest_x + x;
+                let py = dest_y + y;
+                if px >= self.width || py >= self.height {
+                    continue;
+                }
+                self.pixels[py * self.width + px] = src.pixels[y * src.width + x];
             }
         }
     }
@@ -347,53 +368,213 @@ fn color_distance(a: Rgba, b: Rgba) -> u32 {
     (dr * dr + dg * dg + db * db) as u32
 }
 
+const WIDGET_GAP: usize = 16;
+
+#[derive(Clone, Copy)]
+struct Rect {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+}
+
+impl Rect {
+    fn contains(self, x: i16, y: i16) -> bool {
+        let x = x.max(0) as usize;
+        let y = y.max(0) as usize;
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+
+    fn local(self, x: i16, y: i16) -> (i16, i16) {
+        (x - self.x as i16, y - self.y as i16)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FocusedWidget {
+    Puter,
+    Toodle,
+}
+
+struct App {
+    puter: puter::Puter,
+    toodle: toodle::Toodle,
+    puter_rect: Rect,
+    toodle_rect: Rect,
+    focus: FocusedWidget,
+    puter_pressed: bool,
+}
+
+impl App {
+    fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
+        let puter = puter::Puter::load(palette)?;
+        let toodle = toodle::Toodle::load(palette)?;
+        let puter_rect = Rect {
+            x: 0,
+            y: 0,
+            w: puter.width(),
+            h: puter.height(),
+        };
+        let toodle_rect = Rect {
+            x: puter.width() + WIDGET_GAP,
+            y: 0,
+            w: toodle.width(),
+            h: toodle.height(),
+        };
+
+        Ok(Self {
+            puter,
+            toodle,
+            puter_rect,
+            toodle_rect,
+            focus: FocusedWidget::Toodle,
+            puter_pressed: false,
+        })
+    }
+
+    fn width(&self) -> usize {
+        self.toodle_rect.x + self.toodle_rect.w
+    }
+
+    fn height(&self) -> usize {
+        self.puter_rect.h.max(self.toodle_rect.h)
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Rgba {
+        palette.color(palette_color::BLACK)
+    }
+
+    fn start(&mut self, window_id: u64) -> Result<(), Box<dyn Error>> {
+        self.puter.start_terminal(window_id)
+    }
+
+    fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
+        fb.clear(self.fill_color(palette));
+
+        let mut puter_fb = Framebuffer::new(
+            self.puter_rect.w,
+            self.puter_rect.h,
+            self.puter.fill_color(palette),
+        );
+        self.puter.render(&mut puter_fb, palette);
+        fb.blit_from(&puter_fb, self.puter_rect.x, self.puter_rect.y);
+
+        let mut toodle_fb = Framebuffer::new(
+            self.toodle_rect.w,
+            self.toodle_rect.h,
+            self.toodle.fill_color(palette),
+        );
+        self.toodle.render(&mut toodle_fb, palette);
+        fb.blit_from(&toodle_fb, self.toodle_rect.x, self.toodle_rect.y);
+    }
+
+    fn drain_events(&self) -> bool {
+        self.puter.drain_terminal_events()
+    }
+
+    fn handle_key_press(&mut self, keycode: u8, state: u16) -> Result<(), Box<dyn Error>> {
+        match self.focus {
+            FocusedWidget::Puter => {
+                self.puter.handle_key_press(keycode, state);
+                Ok(())
+            }
+            FocusedWidget::Toodle => self.toodle.handle_key_press(keycode, state),
+        }
+    }
+
+    fn click(&mut self, x: i16, y: i16) -> Result<(), Box<dyn Error>> {
+        self.puter_pressed = false;
+        if self.puter_rect.contains(x, y) {
+            let (x, y) = self.puter_rect.local(x, y);
+            self.focus = FocusedWidget::Puter;
+            self.puter_pressed = true;
+            self.puter.press_button(x, y);
+            return Ok(());
+        }
+
+        if self.toodle_rect.contains(x, y) {
+            let (x, y) = self.toodle_rect.local(x, y);
+            self.focus = FocusedWidget::Toodle;
+            self.toodle.click(x, y)?;
+        }
+
+        Ok(())
+    }
+
+    fn release(&mut self, x: i16, y: i16) {
+        if self.puter_pressed {
+            let (x, y) = self.puter_rect.local(x, y);
+            self.puter.release_button(x, y);
+            self.puter_pressed = false;
+        }
+    }
+
+    fn scroll_up(&self, x: i16, y: i16) {
+        if self.puter_rect.contains(x, y) {
+            self.puter.scroll_up();
+        }
+    }
+
+    fn scroll_down(&self, x: i16, y: i16) {
+        if self.puter_rect.contains(x, y) {
+            self.puter.scroll_down();
+        }
+    }
+
+    fn shutdown(&mut self) {
+        self.puter.shutdown_terminal();
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let palette = Palette::load(PALETTE_PATH)?;
-    let mut puter = puter::Puter::load(&palette)?;
-    let width = puter.width();
-    let height = puter.height();
-    let mut fb = Framebuffer::new(width, height, puter.fill_color(&palette));
+    let mut app = App::load(&palette)?;
+    let width = app.width();
+    let height = app.height();
+    let mut fb = Framebuffer::new(width, height, app.fill_color(&palette));
     let xwin = XWindow::open(width, height)?;
-    puter.start_terminal(xwin.window as u64)?;
-    puter.render(&mut fb, &palette);
+    app.start(xwin.window as u64)?;
+    app.render(&mut fb, &palette);
     xwin.draw(&fb)?;
 
     let mut last_draw = Instant::now();
     let mut running = true;
     while running {
-        running = puter.drain_terminal_events();
+        running = app.drain_events();
 
         while let Some(event) = xwin.conn.poll_for_event()? {
             match event {
                 XEvent::Expose(_) => {
-                    puter.render(&mut fb, &palette);
+                    app.render(&mut fb, &palette);
                     xwin.draw(&fb)?;
                 }
                 XEvent::KeyPress(event) => {
-                    puter.handle_key_press(event.detail, event.state.into());
+                    app.handle_key_press(event.detail, event.state.into())?;
+                    app.render(&mut fb, &palette);
+                    xwin.draw(&fb)?;
                 }
                 XEvent::ButtonPress(event) => match event.detail {
                     WHEEL_UP => {
-                        puter.scroll_up();
-                        puter.render(&mut fb, &palette);
+                        app.scroll_up(event.event_x, event.event_y);
+                        app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
                     }
                     WHEEL_DOWN => {
-                        puter.scroll_down();
-                        puter.render(&mut fb, &palette);
+                        app.scroll_down(event.event_x, event.event_y);
+                        app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
                     }
                     detail if detail == ButtonIndex::M1.into() => {
-                        puter.press_button(event.event_x, event.event_y);
-                        puter.render(&mut fb, &palette);
+                        app.click(event.event_x, event.event_y)?;
+                        app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
                     }
                     _ => {}
                 },
                 XEvent::ButtonRelease(event) => {
                     if event.detail == ButtonIndex::M1.into() {
-                        puter.release_button(event.event_x, event.event_y);
-                        puter.render(&mut fb, &palette);
+                        app.release(event.event_x, event.event_y);
+                        app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
                     }
                 }
@@ -403,7 +584,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         if last_draw.elapsed() >= Duration::from_millis(16) {
-            puter.render(&mut fb, &palette);
+            app.render(&mut fb, &palette);
             xwin.draw(&fb)?;
             last_draw = Instant::now();
         }
@@ -411,6 +592,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::thread::sleep(Duration::from_millis(4));
     }
 
-    puter.shutdown_terminal();
+    app.shutdown();
     Ok(())
 }
