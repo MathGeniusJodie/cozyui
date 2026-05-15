@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::palette_color;
 use crate::{Framebuffer, Image, Palette, Rgba, decode_png_with_size};
 
-const SCALE: usize = 1;
+const SCALE: usize = 2;
 const GLYPH_SCALE: usize = 1;
 const GLYPH_W: usize = 6;
 const GLYPH_H: usize = 12;
@@ -313,49 +313,82 @@ fn page_color(page: usize) -> PageColor {
 }
 
 fn swap_page_color(color: Rgba, page_color: PageColor, palette: &Palette) -> Rgba {
-    let role = match (color.r, color.g, color.b, color.a) {
-        (_, _, _, 0) => return color,
-        (245, 237, 186, _) => PageColorRole::Light,
-        (215, 155, 125, _) | (228, 148, 58, _) | (100, 125, 52, _) => PageColorRole::Body,
-        (210, 100, 113, _) | (154, 99, 72, _) | (192, 199, 65, _) => PageColorRole::Bright,
-        (157, 48, 59, _) | (23, 67, 75, _) => PageColorRole::Dark,
-        (126, 196, 193, _) | (140, 143, 174, _) => PageColorRole::Rule,
-        (52, 133, 157, _) | (112, 55, 127, _) | (88, 69, 99, _) => PageColorRole::RuleDark,
-        _ => return color,
+    let Some(source_color) = source_palette_color(color) else {
+        return color;
     };
 
-    palette.color(match (page_color, role) {
-        (PageColor::Pink, PageColorRole::Light) => palette_color::CREAM,
-        (PageColor::Pink, PageColorRole::Body) => palette_color::PEACH,
-        (PageColor::Pink, PageColorRole::Bright) => palette_color::ROSE,
-        (PageColor::Pink, PageColorRole::Dark) => palette_color::CRIMSON,
-        (PageColor::Pink, PageColorRole::Rule) => palette_color::LAVENDER,
-        (PageColor::Pink, PageColorRole::RuleDark) => palette_color::PURPLE,
-
-        (PageColor::Yellow, PageColorRole::Light) => palette_color::CREAM,
-        (PageColor::Yellow, PageColorRole::Body) => palette_color::CREAM,
-        (PageColor::Yellow, PageColorRole::Bright) => palette_color::PEACH,
-        (PageColor::Yellow, PageColorRole::Dark) => palette_color::BROWN,
-        (PageColor::Yellow, PageColorRole::Rule) => palette_color::CYAN,
-        (PageColor::Yellow, PageColorRole::RuleDark) => palette_color::BLUE,
-
-        (PageColor::Green, PageColorRole::Light) => palette_color::LIME,
-        (PageColor::Green, PageColorRole::Body) => palette_color::LIME,
-        (PageColor::Green, PageColorRole::Bright) => palette_color::LIME,
-        (PageColor::Green, PageColorRole::Dark) => palette_color::PINE,
-        (PageColor::Green, PageColorRole::Rule) => palette_color::LAVENDER,
-        (PageColor::Green, PageColorRole::RuleDark) => palette_color::GUNMETAL,
-    })
+    palette.color(mapped_page_color(page_color, source_color))
 }
 
-#[derive(Clone, Copy)]
-enum PageColorRole {
-    Light,
-    Body,
-    Bright,
-    Dark,
-    Rule,
-    RuleDark,
+fn source_palette_color(color: Rgba) -> Option<usize> {
+    match (color.r, color.g, color.b, color.a) {
+        (_, _, _, 0) => None,
+        (140, 143, 174, _) => Some(palette_color::LAVENDER),
+        (88, 69, 99, _) => Some(palette_color::GUNMETAL),
+        (62, 33, 55, _) => Some(palette_color::PLUM),
+        (154, 99, 72, _) => Some(palette_color::BROWN),
+        (215, 155, 125, _) => Some(palette_color::PEACH),
+        (245, 237, 186, _) => Some(palette_color::CREAM),
+        (192, 199, 65, _) => Some(palette_color::LIME),
+        (100, 125, 52, _) => Some(palette_color::GREEN),
+        (228, 148, 58, _) => Some(palette_color::ORANGE),
+        (157, 48, 59, _) => Some(palette_color::CRIMSON),
+        (210, 100, 113, _) => Some(palette_color::ROSE),
+        (112, 55, 127, _) => Some(palette_color::PURPLE),
+        (126, 196, 193, _) => Some(palette_color::CYAN),
+        (52, 133, 157, _) => Some(palette_color::BLUE),
+        (23, 67, 75, _) => Some(palette_color::PINE),
+        (31, 14, 28, _) => Some(palette_color::BLACK),
+        _ => None,
+    }
+}
+
+fn mapped_page_color(page_color: PageColor, source_color: usize) -> usize {
+    match page_color {
+        PageColor::Pink => match source_color {
+            palette_color::LIME => palette_color::CRIMSON,
+            palette_color::PINE => palette_color::ROSE,
+            _ => source_color,
+        },
+        PageColor::Yellow => match source_color {
+            palette_color::LAVENDER => palette_color::CYAN,
+            palette_color::GUNMETAL => palette_color::GUNMETAL,
+            palette_color::PLUM => palette_color::PLUM,
+            palette_color::BROWN => palette_color::BROWN,
+            palette_color::PEACH => palette_color::CREAM,
+            palette_color::CREAM => palette_color::CREAM,
+            palette_color::LIME => palette_color::ROSE,
+            palette_color::GREEN => palette_color::GREEN,
+            palette_color::ORANGE => palette_color::ORANGE,
+            palette_color::CRIMSON => palette_color::BROWN,
+            palette_color::ROSE => palette_color::ORANGE,
+            palette_color::PURPLE => palette_color::PURPLE,
+            palette_color::CYAN => palette_color::CYAN,
+            palette_color::BLUE => palette_color::BLUE,
+            palette_color::PINE => palette_color::ROSE,
+            palette_color::BLACK => palette_color::BLACK,
+            _ => source_color,
+        },
+        PageColor::Green => match source_color {
+            palette_color::LAVENDER => palette_color::LAVENDER,
+            palette_color::GUNMETAL => palette_color::GUNMETAL,
+            palette_color::PLUM => palette_color::PLUM,
+            palette_color::BROWN => palette_color::BROWN,
+            palette_color::PEACH => palette_color::LIME,
+            palette_color::CREAM => palette_color::CREAM,
+            palette_color::LIME => palette_color::GUNMETAL,
+            palette_color::GREEN => palette_color::GREEN,
+            palette_color::ORANGE => palette_color::GREEN,
+            palette_color::CRIMSON => palette_color::PINE,
+            palette_color::ROSE => palette_color::GREEN,
+            palette_color::PURPLE => palette_color::PURPLE,
+            palette_color::CYAN => palette_color::CYAN,
+            palette_color::BLUE => palette_color::BLUE,
+            palette_color::PINE => palette_color::LAVENDER,
+            palette_color::BLACK => palette_color::BLACK,
+            _ => source_color,
+        },
+    }
 }
 
 struct GlyphAtlas {
