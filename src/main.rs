@@ -23,8 +23,8 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-const BG_SCALE: usize = 2;
-const GLYPH_SCALE: usize = 2;
+const BG_SCALE: usize = 1;
+const GLYPH_SCALE: usize = 1;
 const GLYPH_W: usize = 6;
 const GLYPH_H: usize = 12;
 
