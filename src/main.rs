@@ -40,20 +40,40 @@ const HIGH_CONTRAST_PATH: &str = "puter_hc.png";
 const ART_CROP_X: usize = 19;
 const ART_CROP_Y: usize = 17;
 
-const COLOR_CURSOR: usize = 0;
-const COLOR_LIGHT_OFF: usize = 2;
-const COLOR_LIGHT_OFF_CORE: usize = 1;
-const COLOR_LIGHT_OFF_TOP: usize = 4;
-const COLOR_LIGHT_RED: usize = 9;
-const COLOR_LIGHT_RED_CORE: usize = 8;
-const COLOR_LIGHT_RED_TOP: usize = 8;
-const COLOR_LIGHT_GREEN: usize = 7;
-const COLOR_LIGHT_GREEN_CORE: usize = 6;
-const COLOR_LIGHT_GREEN_TOP: usize = 6;
-const COLOR_ORANGE_TEXT: usize = 8;
-const COLOR_ORANGE_GLOW: usize = 3;
-const COLOR_GREEN_TEXT: usize = 6;
-const COLOR_GREEN_GLOW: usize = 7;
+#[allow(dead_code)]
+mod palette_color {
+    pub(super) const LAVENDER_GRAY: usize = 0;
+    pub(super) const DARK_PLUM: usize = 1;
+    pub(super) const DEEP_PURPLE: usize = 2;
+    pub(super) const RUSSET_BROWN: usize = 3;
+    pub(super) const PEACH: usize = 4;
+    pub(super) const CREAM: usize = 5;
+    pub(super) const YELLOW_GREEN: usize = 6;
+    pub(super) const OLIVE_GREEN: usize = 7;
+    pub(super) const ORANGE: usize = 8;
+    pub(super) const CRIMSON: usize = 9;
+    pub(super) const ROSE: usize = 10;
+    pub(super) const PURPLE: usize = 11;
+    pub(super) const AQUA: usize = 12;
+    pub(super) const TEAL: usize = 13;
+    pub(super) const DARK_TEAL: usize = 14;
+    pub(super) const NEAR_BLACK_PLUM: usize = 15;
+}
+
+const COLOR_CURSOR: usize = palette_color::LAVENDER_GRAY;
+const COLOR_LIGHT_OFF: usize = palette_color::DEEP_PURPLE;
+const COLOR_LIGHT_OFF_CORE: usize = palette_color::DARK_PLUM;
+const COLOR_LIGHT_OFF_TOP: usize = palette_color::PEACH;
+const COLOR_LIGHT_RED: usize = palette_color::CRIMSON;
+const COLOR_LIGHT_RED_CORE: usize = palette_color::ORANGE;
+const COLOR_LIGHT_RED_TOP: usize = palette_color::ORANGE;
+const COLOR_LIGHT_GREEN: usize = palette_color::OLIVE_GREEN;
+const COLOR_LIGHT_GREEN_CORE: usize = palette_color::YELLOW_GREEN;
+const COLOR_LIGHT_GREEN_TOP: usize = palette_color::YELLOW_GREEN;
+const COLOR_ORANGE_TEXT: usize = palette_color::ORANGE;
+const COLOR_ORANGE_GLOW: usize = palette_color::RUSSET_BROWN;
+const COLOR_GREEN_TEXT: usize = palette_color::YELLOW_GREEN;
+const COLOR_GREEN_GLOW: usize = palette_color::OLIVE_GREEN;
 
 const BUTTON_SPRITES_PATH: &str = "assets/buttons-pressed.png";
 const BUTTON_W: usize = 20;
