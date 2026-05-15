@@ -37,6 +37,13 @@ const CURSOR_W: usize = 5;
 const CURSOR_H: usize = 10;
 const CURSOR_BLINK: Duration = Duration::from_millis(500);
 
+#[derive(Clone, Copy)]
+enum PageColor {
+    Pink,
+    Yellow,
+    Green,
+}
+
 pub(crate) struct Toodle {
     pages: [Image; 3],
     checkboxes: Image,
@@ -82,16 +89,22 @@ impl Toodle {
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
-        fb.draw_scaled_region(
-            &self.pages[self.page],
-            0,
-            0,
-            0,
-            0,
-            self.pages[self.page].width,
-            self.pages[self.page].height,
-            SCALE,
-        );
+
+        for visual_page in (0..self.pages.len()).rev() {
+            let logical_page = (self.page + visual_page) % self.pages.len();
+            self.render_page(fb, palette, logical_page, visual_page);
+        }
+    }
+
+    fn render_page(
+        &self,
+        fb: &mut Framebuffer,
+        palette: &Palette,
+        logical_page: usize,
+        visual_page: usize,
+    ) {
+        let page_image = &self.pages[visual_page];
+        draw_page_image(fb, page_image, page_color(logical_page), palette);
         fb.draw_scaled_region(
             &self.checkboxes,
             0,
@@ -105,10 +118,11 @@ impl Toodle {
 
         let text_color = palette.color(palette_color::GUNMETAL);
         let focus_color = palette.color(palette_color::CYAN);
+        let is_top_page = visual_page == 0;
         for line in 0..LINE_COUNT {
-            let todo = &self.todos[self.page].items[line];
+            let todo = &self.todos[logical_page].items[line];
             if todo.checked {
-                self.draw_check(fb, line);
+                self.draw_check(fb, logical_page, line);
             }
 
             draw_text(
@@ -122,7 +136,7 @@ impl Toodle {
                 MAX_TEXT_CHARS,
             );
 
-            if self.focused_line == Some(line) && cursor_visible() {
+            if is_top_page && self.focused_line == Some(line) && cursor_visible() {
                 let cursor_x = TEXT_X + todo.text.chars().count().min(MAX_TEXT_CHARS) * GLYPH_W;
                 fb.fill_rect(
                     cursor_x * SCALE,
@@ -186,10 +200,10 @@ impl Toodle {
         self.save_current_page()
     }
 
-    fn draw_check(&self, fb: &mut Framebuffer, line: usize) {
+    fn draw_check(&self, fb: &mut Framebuffer, page: usize, line: usize) {
         fb.draw_scaled_region(
             &self.checks,
-            (self.page + line) % CHECK_VARIANTS * CHECK_SPRITE_W,
+            (page + line) % CHECK_VARIANTS * CHECK_SPRITE_W,
             0,
             (CHECK_X - 1) * SCALE,
             (CHECK_Y[line] - 4) * SCALE,
@@ -269,6 +283,79 @@ impl TodoItem {
             self.text.clone()
         }
     }
+}
+
+fn draw_page_image(fb: &mut Framebuffer, image: &Image, page_color: PageColor, palette: &Palette) {
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let color = image.at(x, y);
+            if color.a == 0 {
+                continue;
+            }
+
+            fb.fill_rect(
+                x * SCALE,
+                y * SCALE,
+                SCALE,
+                SCALE,
+                swap_page_color(color, page_color, palette),
+            );
+        }
+    }
+}
+
+fn page_color(page: usize) -> PageColor {
+    match page % 3 {
+        0 => PageColor::Pink,
+        1 => PageColor::Yellow,
+        _ => PageColor::Green,
+    }
+}
+
+fn swap_page_color(color: Rgba, page_color: PageColor, palette: &Palette) -> Rgba {
+    let role = match (color.r, color.g, color.b, color.a) {
+        (_, _, _, 0) => return color,
+        (245, 237, 186, _) => PageColorRole::Light,
+        (215, 155, 125, _) | (228, 148, 58, _) | (100, 125, 52, _) => PageColorRole::Body,
+        (210, 100, 113, _) | (154, 99, 72, _) | (192, 199, 65, _) => PageColorRole::Bright,
+        (157, 48, 59, _) | (23, 67, 75, _) => PageColorRole::Dark,
+        (126, 196, 193, _) | (140, 143, 174, _) => PageColorRole::Rule,
+        (52, 133, 157, _) | (112, 55, 127, _) | (88, 69, 99, _) => PageColorRole::RuleDark,
+        _ => return color,
+    };
+
+    palette.color(match (page_color, role) {
+        (PageColor::Pink, PageColorRole::Light) => palette_color::CREAM,
+        (PageColor::Pink, PageColorRole::Body) => palette_color::PEACH,
+        (PageColor::Pink, PageColorRole::Bright) => palette_color::ROSE,
+        (PageColor::Pink, PageColorRole::Dark) => palette_color::CRIMSON,
+        (PageColor::Pink, PageColorRole::Rule) => palette_color::LAVENDER,
+        (PageColor::Pink, PageColorRole::RuleDark) => palette_color::PURPLE,
+
+        (PageColor::Yellow, PageColorRole::Light) => palette_color::CREAM,
+        (PageColor::Yellow, PageColorRole::Body) => palette_color::CREAM,
+        (PageColor::Yellow, PageColorRole::Bright) => palette_color::PEACH,
+        (PageColor::Yellow, PageColorRole::Dark) => palette_color::BROWN,
+        (PageColor::Yellow, PageColorRole::Rule) => palette_color::CYAN,
+        (PageColor::Yellow, PageColorRole::RuleDark) => palette_color::BLUE,
+
+        (PageColor::Green, PageColorRole::Light) => palette_color::LIME,
+        (PageColor::Green, PageColorRole::Body) => palette_color::LIME,
+        (PageColor::Green, PageColorRole::Bright) => palette_color::LIME,
+        (PageColor::Green, PageColorRole::Dark) => palette_color::PINE,
+        (PageColor::Green, PageColorRole::Rule) => palette_color::LAVENDER,
+        (PageColor::Green, PageColorRole::RuleDark) => palette_color::GUNMETAL,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum PageColorRole {
+    Light,
+    Body,
+    Bright,
+    Dark,
+    Rule,
+    RuleDark,
 }
 
 struct GlyphAtlas {
