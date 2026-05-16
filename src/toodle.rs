@@ -2,7 +2,6 @@ use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::palette_color;
 use crate::{Framebuffer, Image, Palette, Rgba, decode_png_with_size};
@@ -21,6 +20,8 @@ const CHECKBOXES_PATH: &str = "assets/checkboxes.png";
 const CHECKS_PATH: &str = "assets/checks.png";
 const ERASER_PATH: &str = "assets/eraser.png";
 const GOLDSTAR_PATH: &str = "assets/goldstar.png";
+const PENCIL_PATH: &str = "assets/toodle_pencil.png";
+const PENCIL_SHADOW_PATH: &str = "assets/toodle_pencil_shadow.png";
 const FONT_PATH: &str = "glyphs/0000-007F.png";
 
 const TODO_FILES: [&str; 3] = ["toodle_top.txt", "toodle_second.txt", "toodle_third.txt"];
@@ -30,7 +31,7 @@ const ERASER_X: usize = 0;
 const ERASER_Y: usize = 21;
 const GOLDSTAR_Y: usize = 24;
 const LINE_Y: [usize; LINE_COUNT] = [73, 95, 117, 139, 161, 183];
-const TEXT_X: usize = 34;
+const TEXT_X: usize = 32;
 const TEXT_Y_OFFSET: usize = 2;
 const CHECK_X: usize = 10;
 const CHECK_Y: [usize; LINE_COUNT] = [71, 93, 115, 137, 159, 181];
@@ -41,9 +42,9 @@ const CHECK_SPRITE_H: usize = 16;
 const PAGE_CURL_X: usize = 140;
 const PAGE_CURL_Y: usize = 168;
 const MAX_TEXT_CHARS: usize = 22;
-const CURSOR_W: usize = 5;
-const CURSOR_H: usize = 10;
-const CURSOR_BLINK: Duration = Duration::from_millis(500);
+const LINE_CLICK_OFFSET_Y: usize = 6;
+const PENCIL_TIP_X: usize = 0;
+const PENCIL_TIP_Y: usize = 24;
 
 #[derive(Clone, Copy)]
 enum PageColor {
@@ -58,6 +59,8 @@ pub(crate) struct Toodle {
     checks: Image,
     eraser: Image,
     goldstar: Image,
+    pencil: Image,
+    pencil_shadow: Image,
     font: GlyphAtlas,
     todos: [TodoPage; 3],
     done_count: usize,
@@ -78,6 +81,8 @@ impl Toodle {
             checks: Image::load(CHECKS_PATH, palette)?,
             eraser: Image::load(ERASER_PATH, palette)?,
             goldstar: Image::load(GOLDSTAR_PATH, palette)?,
+            pencil: Image::load(PENCIL_PATH, palette)?,
+            pencil_shadow: Image::load(PENCIL_SHADOW_PATH, palette)?,
             font: GlyphAtlas::load()?,
             todos: [
                 TodoPage::load(TODO_FILES[0])?,
@@ -122,6 +127,7 @@ impl Toodle {
             SCALE,
         );
         self.draw_goldstar(fb, palette);
+        self.draw_focused_pencil(fb, palette);
     }
 
     fn render_page(
@@ -150,8 +156,6 @@ impl Toodle {
         } else {
             text_color
         };
-        let focus_color = palette.color(palette_color::PLUM);
-        let is_top_page = visual_page == 0;
         for line in 0..LINE_COUNT {
             let todo = &self.todos[logical_page].items[line];
             if todo.checked {
@@ -172,17 +176,6 @@ impl Toodle {
                 },
                 MAX_TEXT_CHARS,
             );
-
-            if is_top_page && self.focused_line == Some(line) && cursor_visible() {
-                let cursor_x = TEXT_X + todo.text.chars().count().min(MAX_TEXT_CHARS) * GLYPH_W;
-                fb.fill_rect(
-                    (PAGE_OFFSET_X + cursor_x) * SCALE,
-                    (LINE_Y[line] - TEXT_Y_OFFSET) * SCALE,
-                    CURSOR_W * SCALE,
-                    CURSOR_H * SCALE,
-                    focus_color,
-                );
-            }
         }
     }
 
@@ -369,6 +362,40 @@ impl Toodle {
         );
     }
 
+    fn draw_pencil_cursor(&self, fb: &mut Framebuffer, palette: &Palette, x: usize, y: usize) {
+        let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X) * SCALE;
+        let dest_y = y.saturating_sub(PENCIL_TIP_Y) * SCALE;
+
+        draw_swapped_scaled_image(
+            fb,
+            &self.pencil_shadow,
+            dest_x,
+            dest_y,
+            page_color(self.page),
+            palette,
+        );
+        fb.draw_scaled_region(
+            &self.pencil,
+            0,
+            0,
+            dest_x,
+            dest_y,
+            self.pencil.width,
+            self.pencil.height,
+            SCALE,
+        );
+    }
+
+    fn draw_focused_pencil(&self, fb: &mut Framebuffer, palette: &Palette) {
+        let Some(line) = self.focused_line else {
+            return;
+        };
+
+        let todo = &self.todos[self.page].items[line];
+        let cursor_x = TEXT_X + todo.text.chars().count().min(MAX_TEXT_CHARS) * GLYPH_W;
+        self.draw_pencil_cursor(fb, palette, cursor_x, LINE_Y[line] - TEXT_Y_OFFSET);
+    }
+
     fn eraser_at(&self, x: i16, y: i16) -> bool {
         let x = x.max(0) as usize / SCALE;
         let y = y.max(0) as usize / SCALE;
@@ -453,6 +480,24 @@ impl TodoItem {
 }
 
 fn draw_page_image(fb: &mut Framebuffer, image: &Image, page_color: PageColor, palette: &Palette) {
+    draw_swapped_scaled_image(
+        fb,
+        image,
+        PAGE_OFFSET_X * SCALE,
+        0,
+        page_color,
+        palette,
+    );
+}
+
+fn draw_swapped_scaled_image(
+    fb: &mut Framebuffer,
+    image: &Image,
+    dest_x: usize,
+    dest_y: usize,
+    page_color: PageColor,
+    palette: &Palette,
+) {
     for y in 0..image.height {
         for x in 0..image.width {
             let color = image.at(x, y);
@@ -461,8 +506,8 @@ fn draw_page_image(fb: &mut Framebuffer, image: &Image, page_color: PageColor, p
             }
 
             fb.fill_rect(
-                (PAGE_OFFSET_X + x) * SCALE,
-                y * SCALE,
+                dest_x + x * SCALE,
+                dest_y + y * SCALE,
                 SCALE,
                 SCALE,
                 swap_page_color(color, page_color, palette),
@@ -652,16 +697,9 @@ fn checkbox_at(x: usize, y: usize) -> Option<usize> {
 }
 
 fn line_at(y: usize) -> Option<usize> {
-    LINE_Y
-        .iter()
-        .position(|&line_y| y >= line_y - 17 && y < line_y + 4)
-}
-
-fn cursor_visible() -> bool {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    (elapsed.as_millis() / CURSOR_BLINK.as_millis()) % 2 == 0
+    LINE_Y.iter().position(|&line_y| {
+        y >= line_y - 17 + LINE_CLICK_OFFSET_Y && y < line_y + 4 + LINE_CLICK_OFFSET_Y
+    })
 }
 
 enum EditKey {
