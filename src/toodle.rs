@@ -42,6 +42,9 @@ const CHECK_SPRITE_H: usize = 16;
 const PAGE_CURL_X: usize = 140;
 const PAGE_CURL_Y: usize = 168;
 const MAX_TEXT_CHARS: usize = 22;
+const LAST_LINE_MAX_TEXT_CHARS: usize = 18;
+const PENULTIMATE_LINE_SHADOW_MAX_CHARS: usize = 17;
+const LAST_LINE_SHADOW_MAX_CHARS: usize = 14;
 const LINE_CLICK_OFFSET_Y: usize = 6;
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
@@ -174,7 +177,7 @@ impl Toodle {
                 } else {
                     text_color
                 },
-                MAX_TEXT_CHARS,
+                max_text_chars(line),
             );
         }
     }
@@ -231,7 +234,7 @@ impl Toodle {
         match edit_key(keycode, state) {
             EditKey::Insert(ch) => {
                 let text = &mut self.todos[self.page].items[line].text;
-                if text.chars().count() < MAX_TEXT_CHARS {
+                if text.chars().count() < max_text_chars(line) {
                     text.push(ch);
                 }
             }
@@ -362,18 +365,28 @@ impl Toodle {
         );
     }
 
-    fn draw_pencil_cursor(&self, fb: &mut Framebuffer, palette: &Palette, x: usize, y: usize) {
+    fn draw_pencil_cursor(
+        &self,
+        fb: &mut Framebuffer,
+        palette: &Palette,
+        line: usize,
+        x: usize,
+        y: usize,
+    ) {
         let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X) * SCALE;
         let dest_y = y.saturating_sub(PENCIL_TIP_Y) * SCALE;
 
-        draw_swapped_scaled_image(
-            fb,
-            &self.pencil_shadow,
-            dest_x,
-            dest_y,
-            page_color(self.page),
-            palette,
-        );
+        if self.should_draw_pencil_shadow(line) {
+            draw_pencil_shadow(
+                fb,
+                &self.pencil_shadow,
+                dest_x,
+                dest_y,
+                page_color(self.page),
+                palette,
+                line == LINE_COUNT - 1,
+            );
+        }
         fb.draw_scaled_region(
             &self.pencil,
             0,
@@ -392,8 +405,17 @@ impl Toodle {
         };
 
         let todo = &self.todos[self.page].items[line];
-        let cursor_x = TEXT_X + todo.text.chars().count().min(MAX_TEXT_CHARS) * GLYPH_W;
-        self.draw_pencil_cursor(fb, palette, cursor_x, LINE_Y[line] - TEXT_Y_OFFSET);
+        let cursor_x = TEXT_X + todo.text.chars().count().min(max_text_chars(line)) * GLYPH_W;
+        self.draw_pencil_cursor(fb, palette, line, cursor_x, LINE_Y[line] - TEXT_Y_OFFSET);
+    }
+
+    fn should_draw_pencil_shadow(&self, line: usize) -> bool {
+        let char_count = self.todos[self.page].items[line].text.chars().count();
+        match line {
+            line if line == LINE_COUNT - 2 => char_count <= PENULTIMATE_LINE_SHADOW_MAX_CHARS,
+            line if line == LINE_COUNT - 1 => char_count <= LAST_LINE_SHADOW_MAX_CHARS,
+            _ => true,
+        }
     }
 
     fn eraser_at(&self, x: i16, y: i16) -> bool {
@@ -516,6 +538,33 @@ fn draw_swapped_scaled_image(
     }
 }
 
+fn draw_pencil_shadow(
+    fb: &mut Framebuffer,
+    image: &Image,
+    dest_x: usize,
+    dest_y: usize,
+    page_color: PageColor,
+    palette: &Palette,
+    last_line_focused: bool,
+) {
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let color = image.at(x, y);
+            if color.a == 0 {
+                continue;
+            }
+
+            fb.fill_rect(
+                dest_x + x * SCALE,
+                dest_y + y * SCALE,
+                SCALE,
+                SCALE,
+                swap_pencil_shadow_color(color, page_color, palette, last_line_focused),
+            );
+        }
+    }
+}
+
 fn page_color(page: usize) -> PageColor {
     match page % 3 {
         0 => PageColor::Pink,
@@ -528,6 +577,23 @@ fn swap_page_color(color: Rgba, page_color: PageColor, palette: &Palette) -> Rgb
     let Some(source_color) = source_palette_color(color) else {
         return color;
     };
+
+    palette.color(mapped_page_color(page_color, source_color))
+}
+
+fn swap_pencil_shadow_color(
+    color: Rgba,
+    page_color: PageColor,
+    palette: &Palette,
+    last_line_focused: bool,
+) -> Rgba {
+    let Some(mut source_color) = source_palette_color(color) else {
+        return color;
+    };
+
+    if last_line_focused && source_color == palette_color::LIME {
+        source_color = palette_color::ROSE;
+    }
 
     palette.color(mapped_page_color(page_color, source_color))
 }
@@ -700,6 +766,14 @@ fn line_at(y: usize) -> Option<usize> {
     LINE_Y.iter().position(|&line_y| {
         y >= line_y - 17 + LINE_CLICK_OFFSET_Y && y < line_y + 4 + LINE_CLICK_OFFSET_Y
     })
+}
+
+fn max_text_chars(line: usize) -> usize {
+    if line == LINE_COUNT - 1 {
+        LAST_LINE_MAX_TEXT_CHARS
+    } else {
+        MAX_TEXT_CHARS
+    }
 }
 
 enum EditKey {
