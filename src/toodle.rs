@@ -31,7 +31,7 @@ const ERASER_X: usize = 0;
 const ERASER_Y: usize = 21;
 const GOLDSTAR_Y: usize = 24;
 const LINE_Y: [usize; LINE_COUNT] = [73, 95, 117, 139, 161, 183];
-const TEXT_X: usize = 32;
+const TEXT_X: usize = 31;
 const TEXT_Y_OFFSET: usize = 2;
 const CHECK_X: usize = 10;
 const CHECK_Y: [usize; LINE_COUNT] = [71, 93, 115, 137, 159, 181];
@@ -43,9 +43,11 @@ const PAGE_CURL_X: usize = 140;
 const PAGE_CURL_Y: usize = 168;
 const MAX_TEXT_CHARS: usize = 22;
 const LAST_LINE_MAX_TEXT_CHARS: usize = 18;
+const WRAPPED_FIRST_LINE_OFFSET_Y: usize = 2;
+const WRAPPED_SECOND_LINE_OFFSET_Y: usize = 7;
 const PENULTIMATE_LINE_SHADOW_MAX_CHARS: usize = 17;
 const LAST_LINE_SHADOW_MAX_CHARS: usize = 14;
-const LINE_CLICK_OFFSET_Y: usize = 6;
+const LINE_CLICK_OFFSET_Y: usize = 9;
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
 
@@ -130,7 +132,7 @@ impl Toodle {
             SCALE,
         );
         self.draw_goldstar(fb, palette);
-        self.draw_focused_pencil(fb, palette);
+        self.draw_focused_pencil(fb);
     }
 
     fn render_page(
@@ -152,6 +154,9 @@ impl Toodle {
             self.checkboxes.height,
             SCALE,
         );
+        if visual_page == 0 {
+            self.draw_focused_pencil_shadow(fb, palette);
+        }
 
         let text_color = palette.color(palette_color::BLACK);
         let completed_text_color = if self.eraser_hovered {
@@ -165,7 +170,7 @@ impl Toodle {
                 self.draw_check(fb, palette, logical_page, line);
             }
 
-            draw_text(
+            draw_todo_text(
                 fb,
                 &self.font,
                 &todo.text,
@@ -177,7 +182,7 @@ impl Toodle {
                 } else {
                     text_color
                 },
-                max_text_chars(line),
+                text_chars_per_row(line),
             );
         }
     }
@@ -304,9 +309,8 @@ impl Toodle {
             }
 
             if changed_pages[page_index] {
-                page.items = std::array::from_fn(|index| {
-                    remaining.get(index).cloned().unwrap_or_default()
-                });
+                page.items =
+                    std::array::from_fn(|index| remaining.get(index).cloned().unwrap_or_default());
             }
         }
 
@@ -365,13 +369,14 @@ impl Toodle {
         );
     }
 
-    fn draw_pencil_cursor(
+    fn draw_pencil_shadow_cursor(
         &self,
         fb: &mut Framebuffer,
         palette: &Palette,
         line: usize,
         x: usize,
         y: usize,
+        pencil_on_second_line: bool,
     ) {
         let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X) * SCALE;
         let dest_y = y.saturating_sub(PENCIL_TIP_Y) * SCALE;
@@ -384,9 +389,15 @@ impl Toodle {
                 dest_y,
                 page_color(self.page),
                 palette,
-                line == LINE_COUNT - 1,
+                pencil_on_second_line,
             );
         }
+    }
+
+    fn draw_pencil_cursor(&self, fb: &mut Framebuffer, x: usize, y: usize) {
+        let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X) * SCALE;
+        let dest_y = y.saturating_sub(PENCIL_TIP_Y) * SCALE;
+
         fb.draw_scaled_region(
             &self.pencil,
             0,
@@ -399,14 +410,42 @@ impl Toodle {
         );
     }
 
-    fn draw_focused_pencil(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let Some(line) = self.focused_line else {
+    fn draw_focused_pencil_shadow(&self, fb: &mut Framebuffer, palette: &Palette) {
+        let Some((line, cursor_x, cursor_y, pencil_on_second_line)) =
+            self.focused_pencil_position()
+        else {
             return;
         };
 
+        self.draw_pencil_shadow_cursor(
+            fb,
+            palette,
+            line,
+            cursor_x,
+            cursor_y,
+            line == LINE_COUNT - 1 || pencil_on_second_line,
+        );
+    }
+
+    fn draw_focused_pencil(&self, fb: &mut Framebuffer) {
+        let Some((_, cursor_x, cursor_y, _)) = self.focused_pencil_position() else {
+            return;
+        };
+
+        self.draw_pencil_cursor(fb, cursor_x, cursor_y);
+    }
+
+    fn focused_pencil_position(&self) -> Option<(usize, usize, usize, bool)> {
+        let line = self.focused_line?;
         let todo = &self.todos[self.page].items[line];
-        let cursor_x = TEXT_X + todo.text.chars().count().min(max_text_chars(line)) * GLYPH_W;
-        self.draw_pencil_cursor(fb, palette, line, cursor_x, LINE_Y[line] - TEXT_Y_OFFSET);
+        let char_count = todo.text.chars().count();
+        let (cursor_x, cursor_y) = pencil_cursor_position(line, char_count);
+        Some((
+            line,
+            cursor_x,
+            cursor_y,
+            char_count > text_chars_per_row(line),
+        ))
     }
 
     fn should_draw_pencil_shadow(&self, line: usize) -> bool {
@@ -502,14 +541,7 @@ impl TodoItem {
 }
 
 fn draw_page_image(fb: &mut Framebuffer, image: &Image, page_color: PageColor, palette: &Palette) {
-    draw_swapped_scaled_image(
-        fb,
-        image,
-        PAGE_OFFSET_X * SCALE,
-        0,
-        page_color,
-        palette,
-    );
+    draw_swapped_scaled_image(fb, image, PAGE_OFFSET_X * SCALE, 0, page_color, palette);
 }
 
 fn draw_swapped_scaled_image(
@@ -545,7 +577,7 @@ fn draw_pencil_shadow(
     dest_y: usize,
     page_color: PageColor,
     palette: &Palette,
-    last_line_focused: bool,
+    pencil_on_second_line: bool,
 ) {
     for y in 0..image.height {
         for x in 0..image.width {
@@ -559,7 +591,7 @@ fn draw_pencil_shadow(
                 dest_y + y * SCALE,
                 SCALE,
                 SCALE,
-                swap_pencil_shadow_color(color, page_color, palette, last_line_focused),
+                swap_pencil_shadow_color(color, page_color, palette, pencil_on_second_line),
             );
         }
     }
@@ -585,13 +617,13 @@ fn swap_pencil_shadow_color(
     color: Rgba,
     page_color: PageColor,
     palette: &Palette,
-    last_line_focused: bool,
+    pencil_on_second_line: bool,
 ) -> Rgba {
     let Some(mut source_color) = source_palette_color(color) else {
         return color;
     };
 
-    if last_line_focused && source_color == palette_color::LIME {
+    if pencil_on_second_line && source_color == palette_color::LIME {
         source_color = palette_color::ROSE;
     }
 
@@ -709,6 +741,50 @@ fn draw_text(
     }
 }
 
+fn draw_todo_text(
+    fb: &mut Framebuffer,
+    atlas: &GlyphAtlas,
+    text: &str,
+    x: usize,
+    y: usize,
+    scale: usize,
+    color: Rgba,
+    chars_per_row: usize,
+) {
+    if text.chars().count() <= chars_per_row {
+        draw_text(fb, atlas, text, x, y, scale, color, chars_per_row);
+        return;
+    }
+
+    let first_line = text.chars().take(chars_per_row).collect::<String>();
+    let second_line = text
+        .chars()
+        .skip(chars_per_row)
+        .take(chars_per_row)
+        .collect::<String>();
+
+    draw_text(
+        fb,
+        atlas,
+        &first_line,
+        x,
+        y - WRAPPED_FIRST_LINE_OFFSET_Y * SCALE,
+        scale,
+        color,
+        chars_per_row,
+    );
+    draw_text(
+        fb,
+        atlas,
+        &second_line,
+        x,
+        y + WRAPPED_SECOND_LINE_OFFSET_Y * SCALE,
+        scale,
+        color,
+        chars_per_row,
+    );
+}
+
 fn draw_tinted_scaled_region(
     fb: &mut Framebuffer,
     image: &Image,
@@ -768,11 +844,29 @@ fn line_at(y: usize) -> Option<usize> {
     })
 }
 
-fn max_text_chars(line: usize) -> usize {
+fn text_chars_per_row(line: usize) -> usize {
     if line == LINE_COUNT - 1 {
         LAST_LINE_MAX_TEXT_CHARS
     } else {
         MAX_TEXT_CHARS
+    }
+}
+
+fn max_text_chars(line: usize) -> usize {
+    text_chars_per_row(line) * 2
+}
+
+fn pencil_cursor_position(line: usize, char_count: usize) -> (usize, usize) {
+    let chars_per_row = text_chars_per_row(line);
+    let base_y = LINE_Y[line] - TEXT_Y_OFFSET;
+
+    if char_count <= chars_per_row {
+        (TEXT_X + char_count.min(chars_per_row) * GLYPH_W, base_y)
+    } else {
+        (
+            TEXT_X + (char_count - chars_per_row).min(chars_per_row) * GLYPH_W,
+            base_y + WRAPPED_SECOND_LINE_OFFSET_Y,
+        )
     }
 }
 
