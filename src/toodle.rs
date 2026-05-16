@@ -20,13 +20,15 @@ const THIRD_PAGE_PATH: &str = "assets/toodle_page.png";
 const CHECKBOXES_PATH: &str = "assets/checkboxes.png";
 const CHECKS_PATH: &str = "assets/checks.png";
 const ERASER_PATH: &str = "assets/eraser.png";
+const GOLDSTAR_PATH: &str = "assets/goldstar.png";
 const FONT_PATH: &str = "glyphs/0000-007F.png";
 
 const TODO_FILES: [&str; 3] = ["toodle_top.txt", "toodle_second.txt", "toodle_third.txt"];
 const DONE_TODOS_PATH: &str = "toodle_done.txt";
 const PAGE_OFFSET_X: usize = 14;
 const ERASER_X: usize = 0;
-const ERASER_Y: usize = 16;
+const ERASER_Y: usize = 21;
+const GOLDSTAR_Y: usize = 24;
 const LINE_Y: [usize; LINE_COUNT] = [73, 95, 117, 139, 161, 183];
 const TEXT_X: usize = 34;
 const TEXT_Y_OFFSET: usize = 2;
@@ -55,8 +57,10 @@ pub(crate) struct Toodle {
     checkboxes: Image,
     checks: Image,
     eraser: Image,
+    goldstar: Image,
     font: GlyphAtlas,
     todos: [TodoPage; 3],
+    done_count: usize,
     page: usize,
     focused_line: Option<usize>,
     eraser_hovered: bool,
@@ -73,12 +77,14 @@ impl Toodle {
             checkboxes: Image::load(CHECKBOXES_PATH, palette)?,
             checks: Image::load(CHECKS_PATH, palette)?,
             eraser: Image::load(ERASER_PATH, palette)?,
+            goldstar: Image::load(GOLDSTAR_PATH, palette)?,
             font: GlyphAtlas::load()?,
             todos: [
                 TodoPage::load(TODO_FILES[0])?,
                 TodoPage::load(TODO_FILES[1])?,
                 TodoPage::load(TODO_FILES[2])?,
             ],
+            done_count: done_todo_count(DONE_TODOS_PATH)?,
             page: 0,
             focused_line: None,
             eraser_hovered: false,
@@ -115,6 +121,7 @@ impl Toodle {
             self.eraser.height,
             SCALE,
         );
+        self.draw_goldstar(fb, palette);
     }
 
     fn render_page(
@@ -308,6 +315,7 @@ impl Toodle {
         }
 
         if !archived.is_empty() {
+            let archived_count = archived.len();
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -315,6 +323,7 @@ impl Toodle {
             for todo in archived {
                 writeln!(file, "{todo}")?;
             }
+            self.done_count += archived_count;
         }
 
         for (page_index, changed) in changed_pages.into_iter().enumerate() {
@@ -324,6 +333,40 @@ impl Toodle {
         }
 
         Ok(())
+    }
+
+    fn draw_goldstar(&self, fb: &mut Framebuffer, palette: &Palette) {
+        let star_x = PAGE_OFFSET_X + self.pages[0].width - self.goldstar.width;
+        fb.draw_scaled_region(
+            &self.goldstar,
+            0,
+            0,
+            star_x * SCALE,
+            GOLDSTAR_Y * SCALE,
+            self.goldstar.width,
+            self.goldstar.height,
+            SCALE,
+        );
+
+        let count = self.done_count.to_string();
+        let text_scale = GLYPH_SCALE * SCALE;
+        let text_w = count.chars().count() * GLYPH_W * text_scale;
+        let text_h = GLYPH_H * text_scale;
+        let star_w = self.goldstar.width * SCALE;
+        let star_h = self.goldstar.height * SCALE;
+        let text_x = star_x * SCALE + star_w.saturating_sub(text_w) / 2;
+        let text_y = GOLDSTAR_Y * SCALE + star_h.saturating_sub(text_h) / 2;
+
+        draw_text(
+            fb,
+            &self.font,
+            &count,
+            text_x,
+            text_y,
+            text_scale,
+            palette.color(palette_color::BLACK),
+            count.chars().count(),
+        );
     }
 
     fn eraser_at(&self, x: i16, y: i16) -> bool {
@@ -337,6 +380,14 @@ impl Toodle {
 #[derive(Clone)]
 struct TodoPage {
     items: [TodoItem; LINE_COUNT],
+}
+
+fn done_todo_count(path: &str) -> Result<usize, Box<dyn Error>> {
+    if !Path::new(path).exists() {
+        return Ok(0);
+    }
+
+    Ok(fs::read_to_string(path)?.lines().count())
 }
 
 impl TodoPage {
