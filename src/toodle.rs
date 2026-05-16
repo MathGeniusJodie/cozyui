@@ -24,7 +24,7 @@ const TODO_FILES: [&str; 3] = ["toodle_top.txt", "toodle_second.txt", "toodle_th
 const LINE_Y: [usize; LINE_COUNT] = [73, 95, 117, 139, 161, 183];
 const TEXT_X: usize = 34;
 const TEXT_Y_OFFSET: usize = 2;
-const CHECK_X: usize = 14;
+const CHECK_X: usize = 10;
 const CHECK_Y: [usize; LINE_COUNT] = [71, 93, 115, 137, 159, 181];
 const CHECK_W: usize = 13;
 const CHECK_H: usize = 13;
@@ -116,8 +116,8 @@ impl Toodle {
             SCALE,
         );
 
-        let text_color = palette.color(palette_color::GUNMETAL);
-        let focus_color = palette.color(palette_color::CYAN);
+        let text_color = palette.color(palette_color::BLACK);
+        let focus_color = palette.color(palette_color::PLUM);
         let is_top_page = visual_page == 0;
         for line in 0..LINE_COUNT {
             let todo = &self.todos[logical_page].items[line];
@@ -384,7 +384,7 @@ fn mapped_page_color(page_color: PageColor, source_color: usize) -> usize {
             palette_color::PURPLE => palette_color::PURPLE,
             palette_color::CYAN => palette_color::CYAN,
             palette_color::BLUE => palette_color::BLUE,
-            palette_color::PINE => palette_color::LAVENDER,
+            palette_color::PINE => palette_color::BROWN,
             palette_color::BLACK => palette_color::BLACK,
             _ => source_color,
         },
