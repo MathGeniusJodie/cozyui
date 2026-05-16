@@ -1,5 +1,6 @@
 use std::error::Error;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,9 +19,14 @@ const SECOND_PAGE_PATH: &str = "assets/toodle_2nd.png";
 const THIRD_PAGE_PATH: &str = "assets/toodle_page.png";
 const CHECKBOXES_PATH: &str = "assets/checkboxes.png";
 const CHECKS_PATH: &str = "assets/checks.png";
+const ERASER_PATH: &str = "assets/eraser.png";
 const FONT_PATH: &str = "glyphs/0000-007F.png";
 
 const TODO_FILES: [&str; 3] = ["toodle_top.txt", "toodle_second.txt", "toodle_third.txt"];
+const DONE_TODOS_PATH: &str = "toodle_done.txt";
+const PAGE_OFFSET_X: usize = 14;
+const ERASER_X: usize = 0;
+const ERASER_Y: usize = 16;
 const LINE_Y: [usize; LINE_COUNT] = [73, 95, 117, 139, 161, 183];
 const TEXT_X: usize = 34;
 const TEXT_Y_OFFSET: usize = 2;
@@ -48,10 +54,12 @@ pub(crate) struct Toodle {
     pages: [Image; 3],
     checkboxes: Image,
     checks: Image,
+    eraser: Image,
     font: GlyphAtlas,
     todos: [TodoPage; 3],
     page: usize,
     focused_line: Option<usize>,
+    eraser_hovered: bool,
 }
 
 impl Toodle {
@@ -64,6 +72,7 @@ impl Toodle {
             ],
             checkboxes: Image::load(CHECKBOXES_PATH, palette)?,
             checks: Image::load(CHECKS_PATH, palette)?,
+            eraser: Image::load(ERASER_PATH, palette)?,
             font: GlyphAtlas::load()?,
             todos: [
                 TodoPage::load(TODO_FILES[0])?,
@@ -72,11 +81,12 @@ impl Toodle {
             ],
             page: 0,
             focused_line: None,
+            eraser_hovered: false,
         })
     }
 
     pub(crate) fn width(&self) -> usize {
-        self.pages[0].width * SCALE
+        (PAGE_OFFSET_X + self.pages[0].width) * SCALE
     }
 
     pub(crate) fn height(&self) -> usize {
@@ -94,6 +104,17 @@ impl Toodle {
             let logical_page = (self.page + visual_page) % self.pages.len();
             self.render_page(fb, palette, logical_page, visual_page);
         }
+
+        fb.draw_scaled_region(
+            &self.eraser,
+            0,
+            0,
+            ERASER_X * SCALE,
+            ERASER_Y * SCALE,
+            self.eraser.width,
+            self.eraser.height,
+            SCALE,
+        );
     }
 
     fn render_page(
@@ -109,7 +130,7 @@ impl Toodle {
             &self.checkboxes,
             0,
             0,
-            0,
+            PAGE_OFFSET_X * SCALE,
             0,
             self.checkboxes.width,
             self.checkboxes.height,
@@ -117,29 +138,38 @@ impl Toodle {
         );
 
         let text_color = palette.color(palette_color::BLACK);
+        let completed_text_color = if self.eraser_hovered {
+            palette.color(palette_color::GUNMETAL)
+        } else {
+            text_color
+        };
         let focus_color = palette.color(palette_color::PLUM);
         let is_top_page = visual_page == 0;
         for line in 0..LINE_COUNT {
             let todo = &self.todos[logical_page].items[line];
             if todo.checked {
-                self.draw_check(fb, logical_page, line);
+                self.draw_check(fb, palette, logical_page, line);
             }
 
             draw_text(
                 fb,
                 &self.font,
                 &todo.text,
-                TEXT_X * SCALE,
+                (PAGE_OFFSET_X + TEXT_X) * SCALE,
                 (LINE_Y[line] - TEXT_Y_OFFSET) * SCALE,
                 GLYPH_SCALE * SCALE,
-                text_color,
+                if todo.checked {
+                    completed_text_color
+                } else {
+                    text_color
+                },
                 MAX_TEXT_CHARS,
             );
 
             if is_top_page && self.focused_line == Some(line) && cursor_visible() {
                 let cursor_x = TEXT_X + todo.text.chars().count().min(MAX_TEXT_CHARS) * GLYPH_W;
                 fb.fill_rect(
-                    cursor_x * SCALE,
+                    (PAGE_OFFSET_X + cursor_x) * SCALE,
                     (LINE_Y[line] - TEXT_Y_OFFSET) * SCALE,
                     CURSOR_W * SCALE,
                     CURSOR_H * SCALE,
@@ -150,8 +180,18 @@ impl Toodle {
     }
 
     pub(crate) fn click(&mut self, x: i16, y: i16) -> Result<(), Box<dyn Error>> {
+        if self.eraser_at(x, y) {
+            self.archive_completed_todos()?;
+            self.focused_line = None;
+            return Ok(());
+        }
+
         let x = x.max(0) as usize / SCALE;
         let y = y.max(0) as usize / SCALE;
+        let Some(x) = x.checked_sub(PAGE_OFFSET_X) else {
+            self.focused_line = None;
+            return Ok(());
+        };
 
         if x >= PAGE_CURL_X && y >= PAGE_CURL_Y {
             self.page = (self.page + 1) % self.pages.len();
@@ -167,6 +207,16 @@ impl Toodle {
 
         self.focused_line = line_at(y);
         Ok(())
+    }
+
+    pub(crate) fn hover(&mut self, x: i16, y: i16) -> bool {
+        let was_hovered = self.eraser_hovered;
+        if x < 0 || y < 0 {
+            self.eraser_hovered = false;
+            return was_hovered != self.eraser_hovered;
+        }
+        self.eraser_hovered = self.eraser_at(x, y);
+        was_hovered != self.eraser_hovered
     }
 
     pub(crate) fn handle_key_press(
@@ -200,21 +250,87 @@ impl Toodle {
         self.save_current_page()
     }
 
-    fn draw_check(&self, fb: &mut Framebuffer, page: usize, line: usize) {
-        fb.draw_scaled_region(
-            &self.checks,
-            (page + line) % CHECK_VARIANTS * CHECK_SPRITE_W,
-            0,
-            (CHECK_X - 1) * SCALE,
-            (CHECK_Y[line] - 4) * SCALE,
-            CHECK_SPRITE_W,
-            CHECK_SPRITE_H,
-            SCALE,
-        );
+    fn draw_check(&self, fb: &mut Framebuffer, palette: &Palette, page: usize, line: usize) {
+        let src_x = (page + line) % CHECK_VARIANTS * CHECK_SPRITE_W;
+        let dest_x = (PAGE_OFFSET_X + CHECK_X - 1) * SCALE;
+        let dest_y = (CHECK_Y[line] - 4) * SCALE;
+
+        if self.eraser_hovered {
+            draw_tinted_scaled_region(
+                fb,
+                &self.checks,
+                (src_x, 0),
+                (dest_x, dest_y),
+                (CHECK_SPRITE_W, CHECK_SPRITE_H),
+                SCALE,
+                palette.color(palette_color::GUNMETAL),
+            );
+        } else {
+            fb.draw_scaled_region(
+                &self.checks,
+                src_x,
+                0,
+                dest_x,
+                dest_y,
+                CHECK_SPRITE_W,
+                CHECK_SPRITE_H,
+                SCALE,
+            );
+        }
     }
 
     fn save_current_page(&self) -> Result<(), Box<dyn Error>> {
         self.todos[self.page].save(TODO_FILES[self.page])
+    }
+
+    fn archive_completed_todos(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut archived = Vec::new();
+        let mut changed_pages = [false; 3];
+
+        for (page_index, page) in self.todos.iter_mut().enumerate() {
+            let mut remaining = Vec::new();
+            for item in page.items.iter().cloned() {
+                if item.checked {
+                    if !item.text.trim().is_empty() {
+                        archived.push(item.text.clone());
+                    }
+                    changed_pages[page_index] = true;
+                } else {
+                    remaining.push(item);
+                }
+            }
+
+            if changed_pages[page_index] {
+                page.items = std::array::from_fn(|index| {
+                    remaining.get(index).cloned().unwrap_or_default()
+                });
+            }
+        }
+
+        if !archived.is_empty() {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(DONE_TODOS_PATH)?;
+            for todo in archived {
+                writeln!(file, "{todo}")?;
+            }
+        }
+
+        for (page_index, changed) in changed_pages.into_iter().enumerate() {
+            if changed {
+                self.todos[page_index].save(TODO_FILES[page_index])?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn eraser_at(&self, x: i16, y: i16) -> bool {
+        let x = x.max(0) as usize / SCALE;
+        let y = y.max(0) as usize / SCALE;
+        (ERASER_X..ERASER_X + self.eraser.width).contains(&x)
+            && (ERASER_Y..ERASER_Y + self.eraser.height).contains(&y)
     }
 }
 
@@ -294,7 +410,7 @@ fn draw_page_image(fb: &mut Framebuffer, image: &Image, page_color: PageColor, p
             }
 
             fb.fill_rect(
-                x * SCALE,
+                (PAGE_OFFSET_X + x) * SCALE,
                 y * SCALE,
                 SCALE,
                 SCALE,
@@ -357,7 +473,7 @@ fn mapped_page_color(page_color: PageColor, source_color: usize) -> usize {
             palette_color::BROWN => palette_color::BROWN,
             palette_color::PEACH => palette_color::CREAM,
             palette_color::CREAM => palette_color::CREAM,
-            palette_color::LIME => palette_color::ROSE,
+            palette_color::LIME => palette_color::CRIMSON,
             palette_color::GREEN => palette_color::GREEN,
             palette_color::ORANGE => palette_color::ORANGE,
             palette_color::CRIMSON => palette_color::BROWN,
@@ -428,6 +544,29 @@ fn draw_text(
 ) {
     for (index, ch) in text.chars().take(max_chars).enumerate() {
         draw_glyph(fb, atlas, ch, x + index * GLYPH_W * scale, y, scale, color);
+    }
+}
+
+fn draw_tinted_scaled_region(
+    fb: &mut Framebuffer,
+    image: &Image,
+    src: (usize, usize),
+    dest: (usize, usize),
+    size: (usize, usize),
+    scale: usize,
+    tint: Rgba,
+) {
+    let (src_x, src_y) = src;
+    let (dest_x, dest_y) = dest;
+    let (width, height) = size;
+
+    for y in 0..height {
+        for x in 0..width {
+            if image.at(src_x + x, src_y + y).a == 0 {
+                continue;
+            }
+            fb.fill_rect(dest_x + x * scale, dest_y + y * scale, scale, scale, tint);
+        }
     }
 }
 

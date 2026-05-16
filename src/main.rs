@@ -247,6 +247,7 @@ impl XWindow {
                     | EventMask::KEY_PRESS
                     | EventMask::BUTTON_PRESS
                     | EventMask::BUTTON_RELEASE
+                    | EventMask::POINTER_MOTION
                     | EventMask::STRUCTURE_NOTIFY,
             ),
         )?;
@@ -257,6 +258,7 @@ impl XWindow {
                     | EventMask::KEY_PRESS
                     | EventMask::BUTTON_PRESS
                     | EventMask::BUTTON_RELEASE
+                    | EventMask::POINTER_MOTION
                     | EventMask::STRUCTURE_NOTIFY,
             ),
         )?;
@@ -484,18 +486,19 @@ impl App {
 
     fn click(&mut self, x: i16, y: i16) -> Result<(), Box<dyn Error>> {
         self.puter_pressed = false;
+        if self.toodle_rect.contains(x, y) {
+            let (x, y) = self.toodle_rect.local(x, y);
+            self.focus = FocusedWidget::Toodle;
+            self.toodle.click(x, y)?;
+            return Ok(());
+        }
+
         if self.puter_rect.contains(x, y) {
             let (x, y) = self.puter_rect.local(x, y);
             self.focus = FocusedWidget::Puter;
             self.puter_pressed = true;
             self.puter.press_button(x, y);
             return Ok(());
-        }
-
-        if self.toodle_rect.contains(x, y) {
-            let (x, y) = self.toodle_rect.local(x, y);
-            self.focus = FocusedWidget::Toodle;
-            self.toodle.click(x, y)?;
         }
 
         Ok(())
@@ -506,6 +509,15 @@ impl App {
             let (x, y) = self.puter_rect.local(x, y);
             self.puter.release_button(x, y);
             self.puter_pressed = false;
+        }
+    }
+
+    fn motion(&mut self, x: i16, y: i16) -> bool {
+        if self.toodle_rect.contains(x, y) {
+            let (x, y) = self.toodle_rect.local(x, y);
+            self.toodle.hover(x, y)
+        } else {
+            self.toodle.hover(-1, -1)
         }
     }
 
@@ -574,6 +586,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 XEvent::ButtonRelease(event) => {
                     if event.detail == ButtonIndex::M1.into() {
                         app.release(event.event_x, event.event_y);
+                        app.render(&mut fb, &palette);
+                        xwin.draw(&fb)?;
+                    }
+                }
+                XEvent::MotionNotify(event) => {
+                    if app.motion(event.event_x, event.event_y) {
                         app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
                     }

@@ -49,6 +49,7 @@ const COLOR_GREEN_GLOW: usize = palette_color::GREEN;
 const BUTTON_SPRITES_PATH: &str = "assets/buttons-pressed.png";
 const BUTTON_W: usize = 20;
 const BUTTON_H: usize = 16;
+const BUTTON_HIT_OFFSET_X: isize = -2;
 const BUTTON_PRESSED_OFFSET_X: isize = -3;
 const SCROLL_LINES: i32 = 3;
 const LIGHT_W: usize = 4;
@@ -593,7 +594,7 @@ fn button_at(x: i16, y: i16) -> Option<usize> {
     let x = x.max(0) as usize / BG_SCALE;
     let y = y.max(0) as usize / BG_SCALE;
     BUTTON_TARGETS.iter().position(|button| {
-        let button_x = button.x - ART_CROP_X;
+        let button_x = (button.x as isize - ART_CROP_X as isize + BUTTON_HIT_OFFSET_X) as usize;
         let button_y = button.y - ART_CROP_Y;
         x >= button_x && x < button_x + BUTTON_W && y >= button_y && y < button_y + BUTTON_H
     })
