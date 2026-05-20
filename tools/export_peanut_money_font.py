@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
+"""Export boxy pixel TTF outlines to a bitmap atlas plus Rust metrics.
+
+Default usage regenerates Toodle's PeanutMoney font assets:
+
+    python3 tools/export_peanut_money_font.py
+
+Example for another ASCII pixel font:
+
+    python3 tools/export_peanut_money_font.py \
+        --font OtherPixel.ttf \
+        --atlas assets/other_pixel_ascii.png \
+        --metrics src/other_pixel_font.rs \
+        --const-prefix OTHER_PIXEL
+"""
+
+import argparse
+import math
+import re
 import struct
 import zlib
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FONT = ROOT / "PeanutMoney.ttf"
-ATLAS = ROOT / "assets" / "peanut_money_ascii.png"
-METRICS = ROOT / "src" / "peanut_money_font.rs"
-FIRST = 32
-LAST = 126
-COLS = 16
-
-# PeanutMoney's outlines are pixel boxes on a 64 font-unit grid.
-UNITS_PER_PIXEL = 64
+DEFAULT_FONT = ROOT / "PeanutMoney.ttf"
+DEFAULT_ATLAS = ROOT / "assets" / "peanut_money_ascii.png"
+DEFAULT_METRICS = ROOT / "src" / "peanut_money_font.rs"
 
 
 def u16(data, offset):
@@ -34,7 +46,34 @@ def table(font, tag):
     raise ValueError(f"missing TTF table: {tag}")
 
 
-def cmap_format_4(font):
+def parse_codepoint(value):
+    value = value.strip()
+    if value.startswith(("0x", "0X")):
+        return int(value, 16)
+    if value.startswith(("U+", "u+")):
+        return int(value[2:], 16)
+    if len(value) == 1:
+        return ord(value)
+    return int(value, 10)
+
+
+def const_name(value):
+    name = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").upper()
+    if not name:
+        raise ValueError("constant prefix must contain at least one letter or number")
+    if name[0].isdigit():
+        name = f"FONT_{name}"
+    return name
+
+
+def repo_relative(path):
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def cmap_format_4(font, font_path):
     cmap = table(font, "cmap")
     count = u16(cmap, 2)
     fallback = None
@@ -47,7 +86,7 @@ def cmap_format_4(font):
         if platform == 3 and encoding == 1:
             return subtable
     if fallback is None:
-        raise ValueError("PeanutMoney.ttf has no cmap format 4 table")
+        raise ValueError(f"{font_path} has no cmap format 4 table")
     return fallback
 
 
@@ -87,7 +126,7 @@ def glyph_offsets(font):
     return [struct.unpack_from(">I", loca, index * 4)[0] for index in range(glyph_count + 1)]
 
 
-def glyph_metric(font, glyph):
+def glyph_metric_units(font, glyph):
     hhea = table(font, "hhea")
     hmtx = table(font, "hmtx")
     metric_count = u16(hhea, 34)
@@ -96,13 +135,20 @@ def glyph_metric(font, glyph):
     else:
         advance = u16(hmtx, (metric_count - 1) * 4)
         lsb = i16(hmtx, metric_count * 4 + (glyph - metric_count) * 2)
-    return round(advance / UNITS_PER_PIXEL), round(lsb / UNITS_PER_PIXEL)
+    return advance, lsb
 
 
-def decode_simple_glyph(data):
+def glyph_metric(font, glyph, units_per_pixel):
+    advance, lsb = glyph_metric_units(font, glyph)
+    return round(advance / units_per_pixel), round(lsb / units_per_pixel)
+
+
+def decode_simple_glyph_units(data):
     contour_count = i16(data, 0)
-    if contour_count <= 0:
+    if contour_count == 0:
         return [], (0, 0, 0, 0)
+    if contour_count < 0:
+        raise ValueError("compound glyphs are not supported by this pixel-font exporter")
 
     bbox = tuple(i16(data, 2 + index * 2) for index in range(4))
     ends = [u16(data, 10 + index * 2) for index in range(contour_count)]
@@ -130,7 +176,7 @@ def decode_simple_glyph(data):
         elif not flag & 0x10:
             x += i16(data, pos)
             pos += 2
-        xs.append(x / UNITS_PER_PIXEL)
+        xs.append(x)
 
     ys = []
     y = 0
@@ -142,7 +188,7 @@ def decode_simple_glyph(data):
         elif not flag & 0x20:
             y += i16(data, pos)
             pos += 2
-        ys.append(y / UNITS_PER_PIXEL)
+        ys.append(y)
 
     contours = []
     start = 0
@@ -151,6 +197,40 @@ def decode_simple_glyph(data):
         start = end + 1
 
     return contours, bbox
+
+
+def decode_simple_glyph(data, units_per_pixel):
+    contours, bbox = decode_simple_glyph_units(data)
+    return [
+        [(x / units_per_pixel, y / units_per_pixel) for x, y in contour]
+        for contour in contours
+    ], bbox
+
+
+def infer_units_per_pixel(font, cmap, glyf, offsets, codepoints):
+    hhea = table(font, "hhea")
+    values = [abs(i16(hhea, 4)), abs(i16(hhea, 6))]
+    for codepoint in codepoints:
+        glyph = glyph_id(cmap, codepoint)
+        advance, lsb = glyph_metric_units(font, glyph)
+        values.extend([abs(advance), abs(lsb)])
+
+        start, end = offsets[glyph], offsets[glyph + 1]
+        if start == end:
+            continue
+        contours, bbox = decode_simple_glyph_units(glyf[start:end])
+        values.extend(abs(value) for value in bbox)
+        for contour in contours:
+            for x, y in contour:
+                values.extend([abs(x), abs(y)])
+
+    unit = 0
+    for value in values:
+        if value != 0:
+            unit = value if unit == 0 else math.gcd(unit, value)
+    if unit <= 0:
+        raise ValueError("could not infer units per pixel; pass --units-per-pixel")
+    return unit
 
 
 def point_in_polygon(x, y, polygon):
@@ -188,46 +268,101 @@ def write_rgb_png(path, width, height, pixels):
     path.write_bytes(png)
 
 
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description="Export boxy pixel TTF glyphs to an RGB bitmap atlas and Rust metrics."
+    )
+    parser.add_argument("--font", type=Path, default=DEFAULT_FONT, help="TTF file to export")
+    parser.add_argument("--atlas", type=Path, default=DEFAULT_ATLAS, help="output PNG atlas path")
+    parser.add_argument(
+        "--metrics",
+        type=Path,
+        default=DEFAULT_METRICS,
+        help="output Rust constants path",
+    )
+    parser.add_argument(
+        "--const-prefix",
+        default="PEANUT_MONEY",
+        help="Rust constant prefix, e.g. PEANUT_MONEY or TINY_FONT",
+    )
+    parser.add_argument(
+        "--first",
+        default="32",
+        help="first codepoint to export, decimal, hex, U+NNNN, or a single character",
+    )
+    parser.add_argument(
+        "--last",
+        default="126",
+        help="last codepoint to export, decimal, hex, U+NNNN, or a single character",
+    )
+    parser.add_argument("--cols", type=int, default=16, help="atlas columns")
+    parser.add_argument(
+        "--units-per-pixel",
+        type=int,
+        help="font units per output pixel; defaults to auto-detected outline grid",
+    )
+    return parser
+
+
 def main():
-    font = FONT.read_bytes()
-    cmap = cmap_format_4(font)
+    args = build_arg_parser().parse_args()
+    font_path = args.font.resolve()
+    atlas_path = args.atlas.resolve()
+    metrics_path = args.metrics.resolve()
+    prefix = const_name(args.const_prefix)
+    first = parse_codepoint(args.first)
+    last = parse_codepoint(args.last)
+    if first > last:
+        raise ValueError("--first must be less than or equal to --last")
+    if args.cols <= 0:
+        raise ValueError("--cols must be positive")
+
+    font = font_path.read_bytes()
+    cmap = cmap_format_4(font, font_path)
     glyf = table(font, "glyf")
     offsets = glyph_offsets(font)
     hhea = table(font, "hhea")
+    codepoints = list(range(first, last + 1))
+    units_per_pixel = args.units_per_pixel or infer_units_per_pixel(
+        font, cmap, glyf, offsets, codepoints
+    )
+    if units_per_pixel <= 0:
+        raise ValueError("--units-per-pixel must be positive")
 
-    ascent = round(i16(hhea, 4) / UNITS_PER_PIXEL)
-    descent = round(-i16(hhea, 6) / UNITS_PER_PIXEL)
+    ascent = round(i16(hhea, 4) / units_per_pixel)
+    descent = round(-i16(hhea, 6) / units_per_pixel)
     x_origin = 0
 
     glyphs = {}
-    advances = [0] * 128
+    table_len = max(last + 1, 128)
+    advances = [0] * table_len
     max_w = 0
-    for code in range(FIRST, LAST + 1):
+    for code in codepoints:
         glyph = glyph_id(cmap, code)
         start, end = offsets[glyph], offsets[glyph + 1]
-        advance, lsb = glyph_metric(font, glyph)
+        advance, lsb = glyph_metric(font, glyph, units_per_pixel)
         advances[code] = advance
         max_w = max(max_w, advance)
 
         contours = []
         if start != end:
-            contours, bbox = decode_simple_glyph(glyf[start:end])
-            x_min = round(bbox[0] / UNITS_PER_PIXEL)
+            contours, bbox = decode_simple_glyph(glyf[start:end], units_per_pixel)
+            x_min = round(bbox[0] / units_per_pixel)
             x_origin = max(x_origin, -x_min)
         glyphs[code] = contours
 
     cell_w = max_w + x_origin
     cell_h = ascent + descent
-    rows = (128 + COLS - 1) // COLS
-    atlas_w = COLS * cell_w
+    rows = (table_len + args.cols - 1) // args.cols
+    atlas_w = args.cols * cell_w
     atlas_h = rows * cell_h
     pixels = bytearray(atlas_w * atlas_h)
 
     for code, contours in glyphs.items():
         if not contours:
             continue
-        cell_x = (code % COLS) * cell_w
-        cell_y = (code // COLS) * cell_h
+        cell_x = (code % args.cols) * cell_w
+        cell_y = (code // args.cols) * cell_h
         for y in range(cell_h):
             font_y = ascent - y - 0.5
             for x in range(cell_w):
@@ -235,19 +370,22 @@ def main():
                 if glyph_covers_pixel(contours, font_x, font_y):
                     pixels[(cell_y + y) * atlas_w + cell_x + x] = 255
 
-    write_rgb_png(ATLAS, atlas_w, atlas_h, pixels)
+    atlas_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    write_rgb_png(atlas_path, atlas_w, atlas_h, pixels)
 
     metrics_body = ", ".join(str(width) for width in advances)
-    METRICS.write_text(
+    metrics_path.write_text(
         "\n".join(
             [
-                "// Generated by tools/export_peanut_money_font.py from PeanutMoney.ttf.",
-                f"pub(crate) const PEANUT_MONEY_ATLAS_PATH: &str = \"assets/{ATLAS.name}\";",
-                f"pub(crate) const PEANUT_MONEY_CELL_W: usize = {cell_w};",
-                f"pub(crate) const PEANUT_MONEY_CELL_H: usize = {cell_h};",
-                f"pub(crate) const PEANUT_MONEY_COLS: usize = {COLS};",
-                f"pub(crate) const PEANUT_MONEY_X_ORIGIN: usize = {x_origin};",
-                f"pub(crate) const PEANUT_MONEY_ADVANCE: [u8; 128] = [{metrics_body}];",
+                f"// Generated by tools/export_peanut_money_font.py from {font_path.name}.",
+                f"// units_per_pixel={units_per_pixel}, range=U+{first:04X}..U+{last:04X}",
+                f"pub(crate) const {prefix}_ATLAS_PATH: &str = \"{repo_relative(atlas_path)}\";",
+                f"pub(crate) const {prefix}_CELL_W: usize = {cell_w};",
+                f"pub(crate) const {prefix}_CELL_H: usize = {cell_h};",
+                f"pub(crate) const {prefix}_COLS: usize = {args.cols};",
+                f"pub(crate) const {prefix}_X_ORIGIN: usize = {x_origin};",
+                f"pub(crate) const {prefix}_ADVANCE: [u8; {table_len}] = [{metrics_body}];",
                 "",
             ]
         )
