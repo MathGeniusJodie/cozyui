@@ -13,6 +13,7 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
+mod peanut_money_font;
 mod puter;
 mod toodle;
 

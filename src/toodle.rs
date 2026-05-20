@@ -4,12 +4,11 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::palette_color;
+use crate::peanut_money_font;
 use crate::{Framebuffer, Image, Palette, Rgba, decode_png_with_size};
 
 const SCALE: usize = 2;
 const GLYPH_SCALE: usize = 1;
-const GLYPH_W: usize = 6;
-const GLYPH_H: usize = 12;
 const LINE_COUNT: usize = 6;
 const CHECK_VARIANTS: usize = 4;
 
@@ -22,7 +21,6 @@ const ERASER_PATH: &str = "assets/eraser.png";
 const GOLDSTAR_PATH: &str = "assets/goldstar.png";
 const PENCIL_PATH: &str = "assets/toodle_pencil.png";
 const PENCIL_SHADOW_PATH: &str = "assets/toodle_pencil_shadow.png";
-const FONT_PATH: &str = "glyphs/0000-007F.png";
 
 const TODO_FILES: [&str; 3] = ["toodle_top.txt", "toodle_second.txt", "toodle_third.txt"];
 const DONE_TODOS_PATH: &str = "toodle_done.txt";
@@ -50,6 +48,8 @@ const LAST_LINE_SHADOW_MAX_CHARS: usize = 14;
 const LINE_CLICK_OFFSET_Y: usize = 9;
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
+const MAX_TEXT_WIDTH: usize = MAX_TEXT_CHARS * 6;
+const LAST_LINE_MAX_TEXT_WIDTH: usize = LAST_LINE_MAX_TEXT_CHARS * 6;
 
 #[derive(Clone, Copy)]
 enum PageColor {
@@ -239,7 +239,7 @@ impl Toodle {
         match edit_key(keycode, state) {
             EditKey::Insert(ch) => {
                 let text = &mut self.todos[self.page].items[line].text;
-                if text.chars().count() < max_text_chars(line) {
+                if self.font.fits_with_insert(text, ch, max_text_width(line)) {
                     text.push(ch);
                 }
             }
@@ -350,8 +350,8 @@ impl Toodle {
 
         let count = self.done_count.to_string();
         let text_scale = GLYPH_SCALE * SCALE;
-        let text_w = count.chars().count() * GLYPH_W * text_scale;
-        let text_h = GLYPH_H * text_scale;
+        let text_w = self.font.text_width(&count) * text_scale;
+        let text_h = peanut_money_font::PEANUT_MONEY_CELL_H * text_scale;
         let star_w = self.goldstar.width * SCALE;
         let star_h = self.goldstar.height * SCALE;
         let text_x = star_x * SCALE + star_w.saturating_sub(text_w) / 2;
@@ -438,13 +438,12 @@ impl Toodle {
     fn focused_pencil_position(&self) -> Option<(usize, usize, usize, bool)> {
         let line = self.focused_line?;
         let todo = &self.todos[self.page].items[line];
-        let char_count = todo.text.chars().count();
-        let (cursor_x, cursor_y) = pencil_cursor_position(line, char_count);
+        let (cursor_x, cursor_y) = pencil_cursor_position(&self.font, line, &todo.text);
         Some((
             line,
             cursor_x,
             cursor_y,
-            char_count > text_chars_per_row(line),
+            self.font.wrap_index(&todo.text, max_text_width(line)) < todo.text.chars().count(),
         ))
     }
 
@@ -708,7 +707,8 @@ struct GlyphAtlas {
 
 impl GlyphAtlas {
     fn load() -> Result<Self, Box<dyn Error>> {
-        let (width, _height, pixels) = decode_png_with_size(FONT_PATH)?;
+        let (width, _height, pixels) =
+            decode_png_with_size(peanut_money_font::PEANUT_MONEY_ATLAS_PATH)?;
         let pixels = pixels.into_iter().map(is_glyph_ink).collect();
         Ok(Self { width, pixels })
     }
@@ -719,10 +719,55 @@ impl GlyphAtlas {
             return self.is_on('?', x, y);
         }
 
-        let cols = self.width / GLYPH_W;
-        let sx = (code % cols) * GLYPH_W + x;
-        let sy = (code / cols) * GLYPH_H + y;
+        let sx = (code % peanut_money_font::PEANUT_MONEY_COLS)
+            * peanut_money_font::PEANUT_MONEY_CELL_W
+            + x;
+        let sy = (code / peanut_money_font::PEANUT_MONEY_COLS)
+            * peanut_money_font::PEANUT_MONEY_CELL_H
+            + y;
         self.pixels[sy * self.width + sx]
+    }
+
+    fn advance(&self, ch: char) -> usize {
+        let code = ch as usize;
+        if code < peanut_money_font::PEANUT_MONEY_ADVANCE.len() {
+            peanut_money_font::PEANUT_MONEY_ADVANCE[code] as usize
+        } else {
+            peanut_money_font::PEANUT_MONEY_ADVANCE['?' as usize] as usize
+        }
+    }
+
+    fn text_width(&self, text: &str) -> usize {
+        text.chars().map(|ch| self.advance(ch)).sum()
+    }
+
+    fn wrap_index(&self, text: &str, max_width: usize) -> usize {
+        let mut width = 0;
+        let mut index = 0;
+        for ch in text.chars() {
+            let advance = self.advance(ch);
+            if width + advance > max_width {
+                break;
+            }
+            width += advance;
+            index += 1;
+        }
+        index
+    }
+
+    fn fits_with_insert(&self, text: &str, ch: char, row_width: usize) -> bool {
+        let mut candidate = String::with_capacity(text.len() + ch.len_utf8());
+        candidate.push_str(text);
+        candidate.push(ch);
+
+        let first_row_chars = self.wrap_index(&candidate, row_width);
+        if first_row_chars == candidate.chars().count() {
+            return true;
+        }
+
+        let second_line = candidate.chars().skip(first_row_chars).collect::<String>();
+        !second_line.is_empty()
+            && self.wrap_index(&second_line, row_width) == second_line.chars().count()
     }
 }
 
@@ -736,8 +781,10 @@ fn draw_text(
     color: Rgba,
     max_chars: usize,
 ) {
-    for (index, ch) in text.chars().take(max_chars).enumerate() {
-        draw_glyph(fb, atlas, ch, x + index * GLYPH_W * scale, y, scale, color);
+    let mut cursor_x = x;
+    for ch in text.chars().take(max_chars) {
+        draw_glyph(fb, atlas, ch, cursor_x, y, scale, color);
+        cursor_x += atlas.advance(ch) * scale;
     }
 }
 
@@ -751,16 +798,21 @@ fn draw_todo_text(
     color: Rgba,
     chars_per_row: usize,
 ) {
-    if text.chars().count() <= chars_per_row {
-        draw_text(fb, atlas, text, x, y, scale, color, chars_per_row);
+    let max_width = chars_per_row * 6;
+    let first_row_chars = atlas.wrap_index(text, max_width);
+    if first_row_chars == text.chars().count() {
+        draw_text(fb, atlas, text, x, y, scale, color, usize::MAX);
         return;
     }
 
-    let first_line = text.chars().take(chars_per_row).collect::<String>();
+    let first_line = text.chars().take(first_row_chars).collect::<String>();
     let second_line = text
         .chars()
-        .skip(chars_per_row)
-        .take(chars_per_row)
+        .skip(first_row_chars)
+        .take(atlas.wrap_index(
+            &text.chars().skip(first_row_chars).collect::<String>(),
+            max_width,
+        ))
         .collect::<String>();
 
     draw_text(
@@ -771,7 +823,7 @@ fn draw_todo_text(
         y - WRAPPED_FIRST_LINE_OFFSET_Y * SCALE,
         scale,
         color,
-        chars_per_row,
+        usize::MAX,
     );
     draw_text(
         fb,
@@ -781,7 +833,7 @@ fn draw_todo_text(
         y + WRAPPED_SECOND_LINE_OFFSET_Y * SCALE,
         scale,
         color,
-        chars_per_row,
+        usize::MAX,
     );
 }
 
@@ -817,12 +869,18 @@ fn draw_glyph(
     scale: usize,
     color: Rgba,
 ) {
-    for gy in 0..GLYPH_H {
-        for gx in 0..GLYPH_W {
+    for gy in 0..peanut_money_font::PEANUT_MONEY_CELL_H {
+        for gx in 0..peanut_money_font::PEANUT_MONEY_CELL_W {
             if !atlas.is_on(ch, gx, gy) {
                 continue;
             }
-            fb.fill_rect(x + gx * scale, y + gy * scale, scale, scale, color);
+            let dest_x = x as isize
+                + (gx as isize - peanut_money_font::PEANUT_MONEY_X_ORIGIN as isize)
+                    * scale as isize;
+            if dest_x < 0 {
+                continue;
+            }
+            fb.fill_rect(dest_x as usize, y + gy * scale, scale, scale, color);
         }
     }
 }
@@ -852,19 +910,24 @@ fn text_chars_per_row(line: usize) -> usize {
     }
 }
 
-fn max_text_chars(line: usize) -> usize {
-    text_chars_per_row(line) * 2
+fn max_text_width(line: usize) -> usize {
+    if line == LINE_COUNT - 1 {
+        LAST_LINE_MAX_TEXT_WIDTH
+    } else {
+        MAX_TEXT_WIDTH
+    }
 }
 
-fn pencil_cursor_position(line: usize, char_count: usize) -> (usize, usize) {
-    let chars_per_row = text_chars_per_row(line);
+fn pencil_cursor_position(atlas: &GlyphAtlas, line: usize, text: &str) -> (usize, usize) {
+    let first_row_chars = atlas.wrap_index(text, max_text_width(line));
     let base_y = LINE_Y[line] - TEXT_Y_OFFSET;
 
-    if char_count <= chars_per_row {
-        (TEXT_X + char_count.min(chars_per_row) * GLYPH_W, base_y)
+    if first_row_chars == text.chars().count() {
+        (TEXT_X + atlas.text_width(text), base_y)
     } else {
+        let second_line = text.chars().skip(first_row_chars).collect::<String>();
         (
-            TEXT_X + (char_count - chars_per_row).min(chars_per_row) * GLYPH_W,
+            TEXT_X + atlas.text_width(&second_line).min(max_text_width(line)),
             base_y + WRAPPED_SECOND_LINE_OFFSET_Y,
         )
     }
