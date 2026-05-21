@@ -13,20 +13,25 @@ use crate::{Framebuffer, Image, Palette, Rgba};
 
 const SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
-const W: usize = 190;
-const H: usize = 236;
+const W: usize = 268;
+const H: usize = 318;
 const PAD: usize = 8;
 const MODEL_Y: usize = 8;
-const MODEL_SLOT_W: usize = 42;
-const MODEL_SLOT_H: usize = 34;
+const MODEL_GAP: usize = 8;
+const SPEAKER_GAP: usize = 6;
 const CHAT_Y: usize = 48;
 const CHAT_H: usize = 142;
+const INPUT_X: usize = 24;
 const INPUT_Y: usize = 196;
-const INPUT_H: usize = 31;
+const INPUT_TEXT_Y: usize = 24;
 const TEXT_PAD: usize = 7;
 const BUBBLE_PAD_X: usize = 14;
 const BUBBLE_PAD_TOP: usize = 8;
 const BUBBLE_PAD_BOTTOM: usize = 11;
+const STICKY_PAD_LEFT: usize = 10;
+const STICKY_PAD_RIGHT: usize = 20;
+const STICKY_PAD_TOP: usize = 20;
+const STICKY_PAD_BOTTOM: usize = 20;
 const BUBBLE_GAP: usize = 5;
 const BUBBLE_MIN_W: usize = 38;
 const BUBBLE_MAX_W: usize = 142;
@@ -34,34 +39,44 @@ const BUBBLE_LEFT_CAP: usize = 21;
 const BUBBLE_RIGHT_CAP: usize = 21;
 const BUBBLE_TOP_CAP: usize = 17;
 const BUBBLE_BOTTOM_CAP: usize = 17;
+const STICKY_LEFT_CAP: usize = 10;
+const STICKY_RIGHT_CAP: usize = 20;
+const STICKY_TOP_CAP: usize = 20;
+const STICKY_BOTTOM_CAP: usize = 20;
 const SCROLL_STEP: usize = 24;
 const LINE_H: usize = 16;
 const MAX_INPUT_CHARS: usize = 96;
 const SYSTEM_PROMPT_PATH: &str = "fwends_system_prompt.txt";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const FOCUS_PENCIL_PATH: &str = "assets/focus_pencil.png";
+const USER_STICKY_PATH: &str = "assets/sticky.png";
+const INPUT_STICKY_PATH: &str = "assets/sticky_stack.png";
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
 
 const MODELS: [Model; 4] = [
     Model {
-        name: "Claude",
+        _name: "Claude",
         id: "anthropic/claude-haiku-4.5",
+        _think_id: "anthropic/claude-opus-4.5",
         asset_path: "assets/claw.png",
     },
     Model {
-        name: "DeepSeek",
+        _name: "DeepSeek",
         id: "deepseek/deepseek-v4-flash",
+        _think_id: "deepseek/deepseek-v4-pro",
         asset_path: "assets/deep.png",
     },
     Model {
-        name: "Qwen",
+        _name: "Qwen",
         id: "qwen/qwen3.6-35b-a3b",
+        _think_id: "qwen/qwen3.6-plus",
         asset_path: "assets/qwen.png",
     },
     Model {
-        name: "Kimi",
+        _name: "Kimi",
         id: "moonshotai/kimi-k2.6",
+        _think_id: "moonshotai/kimi-k2.6",
         asset_path: "assets/kimi.png",
     },
 ];
@@ -69,6 +84,8 @@ const MODELS: [Model; 4] = [
 pub(crate) struct Fwends {
     avatars: [Image; 4],
     bubble: Image,
+    user_sticky: Image,
+    input_sticky: Image,
     pencil: Image,
     font: BitmapFont,
     messages: Vec<Message>,
@@ -76,20 +93,32 @@ pub(crate) struct Fwends {
     selected_model: usize,
     focused: bool,
     scroll_y: usize,
+    model_slot_w: usize,
+    model_slot_h: usize,
     pending: Option<Receiver<Result<String, String>>>,
     system_prompt: String,
 }
 
 impl Fwends {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
+        let avatars = [
+            Image::load(MODELS[0].asset_path, palette)?,
+            Image::load(MODELS[1].asset_path, palette)?,
+            Image::load(MODELS[2].asset_path, palette)?,
+            Image::load(MODELS[3].asset_path, palette)?,
+        ];
+        let model_slot_w = avatars.iter().map(|avatar| avatar.width).max().unwrap_or(1);
+        let model_slot_h = avatars
+            .iter()
+            .map(|avatar| avatar.height)
+            .max()
+            .unwrap_or(1);
+
         Ok(Self {
-            avatars: [
-                Image::load(MODELS[0].asset_path, palette)?,
-                Image::load(MODELS[1].asset_path, palette)?,
-                Image::load(MODELS[2].asset_path, palette)?,
-                Image::load(MODELS[3].asset_path, palette)?,
-            ],
+            avatars,
             bubble: Image::load("assets/bubble.png", palette)?,
+            user_sticky: Image::load(USER_STICKY_PATH, palette)?,
+            input_sticky: Image::load(INPUT_STICKY_PATH, palette)?,
             pencil: Image::load(FOCUS_PENCIL_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
             messages: vec![Message::assistant("pick a fwend and say hi".to_string())],
@@ -97,6 +126,8 @@ impl Fwends {
             selected_model: 0,
             focused: false,
             scroll_y: 0,
+            model_slot_w,
+            model_slot_h,
             pending: None,
             system_prompt: fs::read_to_string(SYSTEM_PROMPT_PATH).unwrap_or_else(|_| {
                 "You are a warm, concise chat companion. Answer directly and never reveal hidden reasoning.".to_string()
@@ -118,24 +149,6 @@ impl Fwends {
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
-        fill_scaled_rect(fb, 0, 0, W, H, palette.color(palette_color::PINE));
-        fill_scaled_rect(
-            fb,
-            2,
-            2,
-            W - 4,
-            H - 4,
-            palette.color(palette_color::LAVENDER),
-        );
-        fill_scaled_rect(fb, 4, 4, W - 8, H - 8, palette.color(palette_color::CREAM));
-        fill_scaled_rect(
-            fb,
-            6,
-            CHAT_Y - 5,
-            W - 12,
-            CHAT_H + 8,
-            palette.color(palette_color::PEACH),
-        );
 
         for (index, avatar) in self.avatars.iter().enumerate() {
             self.draw_model_button(fb, palette, index, avatar);
@@ -154,18 +167,22 @@ impl Fwends {
         let x = x as usize / SCALE;
         let y = y as usize / SCALE;
         for index in 0..MODELS.len() {
-            let slot_x = PAD + index * MODEL_SLOT_W;
+            let slot_x = self.model_slot_x(index);
             if x >= slot_x
-                && x < slot_x + MODEL_SLOT_W
+                && x < slot_x + self.model_slot_w
                 && y >= MODEL_Y
-                && y < MODEL_Y + MODEL_SLOT_H
+                && y < MODEL_Y + self.model_slot_h
             {
                 self.selected_model = index;
                 return;
             }
         }
 
-        if x >= PAD && x < W - PAD && y >= INPUT_Y && y < INPUT_Y + INPUT_H {
+        if x >= INPUT_X
+            && x < INPUT_X + self.input_sticky.width
+            && y >= INPUT_Y
+            && y < INPUT_Y + self.input_sticky.height
+        {
             self.focused = true;
         }
     }
@@ -274,32 +291,21 @@ impl Fwends {
         index: usize,
         avatar: &Image,
     ) {
-        let x = PAD + index * MODEL_SLOT_W;
+        let x = self.model_slot_x(index);
         let selected = index == self.selected_model;
-        let fill = if selected {
-            palette.color(palette_color::CYAN)
-        } else {
-            palette.color(palette_color::CREAM)
-        };
-        fill_scaled_rect(
-            fb,
-            x,
-            MODEL_Y,
-            MODEL_SLOT_W - 4,
-            MODEL_SLOT_H,
-            palette.color(palette_color::PINE),
-        );
-        fill_scaled_rect(
-            fb,
-            x + 1,
-            MODEL_Y + 1,
-            MODEL_SLOT_W - 6,
-            MODEL_SLOT_H - 2,
-            fill,
-        );
+        if selected {
+            fill_scaled_rect(
+                fb,
+                x.saturating_sub(1),
+                MODEL_Y.saturating_sub(1),
+                self.model_slot_w + 2,
+                self.model_slot_h + 2,
+                palette.color(palette_color::CYAN),
+            );
+        }
 
-        let avatar_x = x + (MODEL_SLOT_W - 4).saturating_sub(avatar.width) / 2;
-        let avatar_y = MODEL_Y + 3;
+        let avatar_x = x + self.model_slot_w.saturating_sub(avatar.width) / 2;
+        let avatar_y = MODEL_Y + self.model_slot_h.saturating_sub(avatar.height);
         fb.draw_scaled_region(
             avatar,
             0,
@@ -310,15 +316,10 @@ impl Fwends {
             avatar.height,
             SCALE,
         );
+    }
 
-        self.font.draw_text(
-            fb,
-            MODELS[index].name,
-            (x + 4) * SCALE,
-            (MODEL_Y + MODEL_SLOT_H - 9) * SCALE,
-            GLYPH_SCALE,
-            palette.color(palette_color::BLACK),
-        );
+    fn model_slot_x(&self, index: usize) -> usize {
+        PAD + index * (self.model_slot_w + MODEL_GAP)
     }
 
     fn draw_messages(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -332,9 +333,12 @@ impl Fwends {
                 continue;
             }
 
+            if !layout.from_user {
+                self.draw_speaker_avatar(fb, y, layout.h);
+            }
             self.draw_bubble(fb, layout.x, y, layout.w, layout.h, layout.from_user);
-            let text_x = layout.x + BUBBLE_PAD_X;
-            let mut text_y = y + BUBBLE_PAD_TOP as isize;
+            let text_x = layout.x + message_pad_left(layout.from_user);
+            let mut text_y = y + message_pad_top(layout.from_user) as isize;
             for line in layout.lines {
                 if text_y >= viewport_top as isize
                     && text_y + self.font.cell_h() as isize <= viewport_bottom as isize
@@ -372,24 +376,26 @@ impl Fwends {
             }
             for dx in 0..w {
                 let px = x + dx;
-                let mut sx = stretch_source_coord(
+                let image = if from_user {
+                    &self.user_sticky
+                } else {
+                    &self.bubble
+                };
+                let sx = stretch_source_coord(
                     dx,
                     w,
-                    self.bubble.width,
-                    BUBBLE_LEFT_CAP,
-                    BUBBLE_RIGHT_CAP,
+                    image.width,
+                    message_left_cap(from_user),
+                    message_right_cap(from_user),
                 );
-                if from_user {
-                    sx = self.bubble.width - 1 - sx;
-                }
                 let sy = stretch_source_coord(
                     dy,
                     h,
-                    self.bubble.height,
-                    BUBBLE_TOP_CAP,
-                    BUBBLE_BOTTOM_CAP,
+                    image.height,
+                    message_top_cap(from_user),
+                    message_bottom_cap(from_user),
                 );
-                let color = self.bubble.at(sx, sy);
+                let color = image.at(sx, sy);
                 if color.a == 0 {
                     continue;
                 }
@@ -402,17 +408,28 @@ impl Fwends {
         let mut layouts = Vec::new();
         let mut y = 0;
         for message in &self.messages {
-            let max_text_w = BUBBLE_MAX_W - BUBBLE_PAD_X * 2;
+            let max_text_w = BUBBLE_MAX_W
+                - message_pad_left(message.from_user)
+                - message_pad_right(message.from_user);
             let lines = self.font.wrap_lines(&message.text, max_text_w);
             let text_w = lines
                 .iter()
                 .map(|line| self.font.text_width(line))
                 .max()
                 .unwrap_or(0);
-            let w = (text_w + BUBBLE_PAD_X * 2).clamp(BUBBLE_MIN_W, BUBBLE_MAX_W);
-            let h = (lines.len() * LINE_H + BUBBLE_PAD_TOP + BUBBLE_PAD_BOTTOM)
-                .max(BUBBLE_TOP_CAP + BUBBLE_BOTTOM_CAP + 1);
-            let x = if message.from_user { W - PAD - w } else { PAD };
+            let w = (text_w
+                + message_pad_left(message.from_user)
+                + message_pad_right(message.from_user))
+            .clamp(BUBBLE_MIN_W, BUBBLE_MAX_W);
+            let h = (lines.len() * LINE_H
+                + message_pad_top(message.from_user)
+                + message_pad_bottom(message.from_user))
+            .max(message_top_cap(message.from_user) + message_bottom_cap(message.from_user) + 1);
+            let x = if message.from_user {
+                W - PAD - w
+            } else {
+                self.assistant_bubble_x()
+            };
             layouts.push(MessageLayout {
                 from_user: message.from_user,
                 lines,
@@ -424,6 +441,38 @@ impl Fwends {
             y += h + BUBBLE_GAP;
         }
         layouts
+    }
+
+    fn assistant_bubble_x(&self) -> usize {
+        PAD + self.model_slot_w + SPEAKER_GAP
+    }
+
+    fn draw_speaker_avatar(&self, fb: &mut Framebuffer, bubble_y: isize, bubble_h: usize) {
+        let avatar = &self.avatars[self.selected_model];
+        let avatar_x = PAD + self.model_slot_w.saturating_sub(avatar.width) / 2;
+        let avatar_y = bubble_y + bubble_h as isize - avatar.height as isize;
+        let clip_top = CHAT_Y as isize;
+        let clip_bottom = (CHAT_Y + CHAT_H) as isize;
+
+        for sy in 0..avatar.height {
+            let py = avatar_y + sy as isize;
+            if py < clip_top || py >= clip_bottom {
+                continue;
+            }
+            for sx in 0..avatar.width {
+                let color = avatar.at(sx, sy);
+                if color.a == 0 {
+                    continue;
+                }
+                fb.fill_rect(
+                    (avatar_x + sx) * SCALE,
+                    py as usize * SCALE,
+                    SCALE,
+                    SCALE,
+                    color,
+                );
+            }
+        }
     }
 
     fn content_height(&self) -> usize {
@@ -442,35 +491,30 @@ impl Fwends {
     }
 
     fn draw_input(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let border = if self.focused {
-            palette.color(palette_color::BLUE)
-        } else {
-            palette.color(palette_color::PINE)
-        };
-        fill_scaled_rect(fb, PAD, INPUT_Y, W - PAD * 2, INPUT_H, border);
-        fill_scaled_rect(
-            fb,
-            PAD + 2,
-            INPUT_Y + 2,
-            W - PAD * 2 - 4,
-            INPUT_H - 4,
-            palette.color(palette_color::CREAM),
+        fb.draw_scaled_region(
+            &self.input_sticky,
+            0,
+            0,
+            INPUT_X * SCALE,
+            INPUT_Y * SCALE,
+            self.input_sticky.width,
+            self.input_sticky.height,
+            SCALE,
         );
 
         let label = if self.pending.is_some() {
             "wait a sec..."
-        } else if self.input.is_empty() {
-            "type here"
         } else {
             &self.input
         };
-        let lines = self.font.wrap_lines(label, W - PAD * 2 - TEXT_PAD * 2);
-        for (index, line) in lines.into_iter().take(2).enumerate() {
+        let max_width = self.input_sticky.width - TEXT_PAD * 2;
+        let lines = self.font.wrap_lines(label, max_width);
+        for (index, line) in lines.into_iter().take(5).enumerate() {
             self.font.draw_text(
                 fb,
                 &line,
-                (PAD + TEXT_PAD) * SCALE,
-                (INPUT_Y + 7 + index * LINE_H) * SCALE,
+                (INPUT_X + TEXT_PAD) * SCALE,
+                (INPUT_Y + INPUT_TEXT_Y + index * LINE_H) * SCALE,
                 GLYPH_SCALE,
                 palette.color(palette_color::BLACK),
             );
@@ -499,20 +543,21 @@ impl Fwends {
     }
 
     fn input_cursor_position(&self) -> (usize, usize) {
-        let max_width = W - PAD * 2 - TEXT_PAD * 2;
+        let max_width = self.input_sticky.width - TEXT_PAD * 2;
         let lines = self.font.wrap_lines(&self.input, max_width);
-        let line_index = lines.len().saturating_sub(1).min(1);
+        let line_index = lines.len().saturating_sub(1).min(4);
         (
-            PAD + TEXT_PAD + self.font.text_width(&lines[line_index]).min(max_width),
-            INPUT_Y + 7 + line_index * LINE_H,
+            INPUT_X + TEXT_PAD + self.font.text_width(&lines[line_index]).min(max_width),
+            INPUT_Y + INPUT_TEXT_Y + line_index * LINE_H,
         )
     }
 }
 
 #[derive(Clone, Copy)]
 struct Model {
-    name: &'static str,
+    _name: &'static str,
     id: &'static str,
+    _think_id: &'static str,
     asset_path: &'static str,
 }
 
@@ -675,15 +720,9 @@ fn parse_json_string(text: &str) -> Option<(String, usize)> {
                 '"' => out.push('"'),
                 '\\' => out.push('\\'),
                 '/' => out.push('/'),
-                'n' => out.push('\n'),
-                'r' => out.push('\r'),
+                'n' | 'r' => out.push(' '),
                 't' => out.push('\t'),
-                'u' => {
-                    for _ in 0..4 {
-                        let _ = chars.next();
-                    }
-                    out.push('?');
-                }
+                'u' => push_unicode_escape(&mut out, &mut chars),
                 other => out.push(other),
             }
             escaped = false;
@@ -692,10 +731,106 @@ fn parse_json_string(text: &str) -> Option<(String, usize)> {
         } else if ch == '"' {
             return Some((out, index + 1));
         } else {
-            out.push(ch);
+            push_display_char(&mut out, ch);
         }
     }
     None
+}
+
+fn push_unicode_escape(out: &mut String, chars: &mut std::str::CharIndices<'_>) {
+    let Some(code) = read_hex_escape(chars) else {
+        out.push('?');
+        return;
+    };
+
+    if (0xD800..=0xDBFF).contains(&code) {
+        let mut lookahead = chars.clone();
+        let Some((_, '\\')) = lookahead.next() else {
+            out.push('?');
+            return;
+        };
+        let Some((_, 'u')) = lookahead.next() else {
+            out.push('?');
+            return;
+        };
+        let Some(low) = read_hex_escape(&mut lookahead) else {
+            out.push('?');
+            return;
+        };
+        if !(0xDC00..=0xDFFF).contains(&low) {
+            out.push('?');
+            return;
+        }
+
+        *chars = lookahead;
+        let scalar = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+        if let Some(ch) = char::from_u32(scalar) {
+            push_display_char(out, ch);
+        } else {
+            out.push('?');
+        }
+        return;
+    }
+
+    if let Some(ch) = char::from_u32(code) {
+        push_display_char(out, ch);
+    } else {
+        out.push('?');
+    }
+}
+
+fn read_hex_escape(chars: &mut std::str::CharIndices<'_>) -> Option<u32> {
+    let mut code = 0;
+    for _ in 0..4 {
+        let (_, ch) = chars.next()?;
+        code = code * 16 + ch.to_digit(16)?;
+    }
+    Some(code)
+}
+
+fn push_display_char(out: &mut String, ch: char) {
+    match ch {
+        '\n' | '\r' => out.push(' '),
+        ch if ch.is_ascii() => out.push(ch),
+        '‘' | '’' | '‚' | '‛' => out.push('\''),
+        '“' | '”' | '„' | '‟' => out.push('"'),
+        '‐' | '‑' | '‒' | '–' | '—' | '−' => out.push('-'),
+        '…' => out.push_str("..."),
+        ' ' => out.push(' '),
+        '​' | '‌' | '‍' | '︎' | '️' => {}
+        '•' | '⁃' | '∙' | '●' | '◦' => out.push('*'),
+        '←' => out.push_str("<-"),
+        '↑' => out.push('^'),
+        '→' => out.push_str("->"),
+        '↓' => out.push('v'),
+        '⇒' | '➡' => out.push_str("=>"),
+        '°' => out.push_str(" deg"),
+        '·' => out.push('*'),
+        '®' => out.push_str("(R)"),
+        '©' => out.push_str("(c)"),
+        '™' => out.push_str("TM"),
+        '☺' | '☻' | '🙂' => out.push_str(":)"),
+        '😁' | '😆' | '😀' | '😃' | '😄' => out.push_str(":D"),
+        '😅' => out.push_str("':)"),
+        '😂' | '🤣' => out.push_str("XD"),
+        '😉' => out.push_str(";)"),
+        '😊' | '😇' => out.push_str("^^"),
+        '😍' | '🥰' => out.push_str("<3"),
+        '😘' | '😗' | '😙' | '😚' => out.push_str(":*"),
+        '🤔' => out.push_str("hmm"),
+        '😐' | '😑' | '😶' => out.push_str(":|"),
+        '😕' | '🙁' | '☹' => out.push_str(":/"),
+        '😭' => out.push_str("D;"),
+        '😞' | '😢'  => out.push_str(";("),
+        '😮' | '😲' => out.push_str(":o"),
+        '😎' => out.push_str("B)"),
+        '👍' => out.push_str("+1"),
+        '👎' => out.push_str("-1"),
+        '❤' | '💓'..='💟' => out.push_str("<3"),
+        '😀'..='🙏' => {}
+        '🌀'..='🫿' => {}
+        _ => out.push('?'),
+    }
 }
 
 fn compact_error(response: &str) -> String {
@@ -719,6 +854,70 @@ fn chat_contains(x: i16, y: i16) -> bool {
     let x = x as usize / SCALE;
     let y = y as usize / SCALE;
     x >= PAD && x < W - PAD && y >= CHAT_Y && y < CHAT_Y + CHAT_H
+}
+
+fn message_pad_left(from_user: bool) -> usize {
+    if from_user {
+        STICKY_PAD_LEFT
+    } else {
+        BUBBLE_PAD_X
+    }
+}
+
+fn message_pad_right(from_user: bool) -> usize {
+    if from_user {
+        STICKY_PAD_RIGHT
+    } else {
+        BUBBLE_PAD_X
+    }
+}
+
+fn message_pad_top(from_user: bool) -> usize {
+    if from_user {
+        STICKY_PAD_TOP
+    } else {
+        BUBBLE_PAD_TOP
+    }
+}
+
+fn message_pad_bottom(from_user: bool) -> usize {
+    if from_user {
+        STICKY_PAD_BOTTOM
+    } else {
+        BUBBLE_PAD_BOTTOM
+    }
+}
+
+fn message_left_cap(from_user: bool) -> usize {
+    if from_user {
+        STICKY_LEFT_CAP
+    } else {
+        BUBBLE_LEFT_CAP
+    }
+}
+
+fn message_right_cap(from_user: bool) -> usize {
+    if from_user {
+        STICKY_RIGHT_CAP
+    } else {
+        BUBBLE_RIGHT_CAP
+    }
+}
+
+fn message_top_cap(from_user: bool) -> usize {
+    if from_user {
+        STICKY_TOP_CAP
+    } else {
+        BUBBLE_TOP_CAP
+    }
+}
+
+fn message_bottom_cap(from_user: bool) -> usize {
+    if from_user {
+        STICKY_BOTTOM_CAP
+    } else {
+        BUBBLE_BOTTOM_CAP
+    }
 }
 
 fn stretch_source_coord(
