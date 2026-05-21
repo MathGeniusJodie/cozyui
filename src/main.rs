@@ -13,6 +13,8 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
+mod comicoro_font;
+mod fwends;
 mod peanut_money_font;
 mod puter;
 mod toodle;
@@ -397,13 +399,16 @@ impl Rect {
 enum FocusedWidget {
     Puter,
     Toodle,
+    Fwends,
 }
 
 struct App {
     puter: puter::Puter,
     toodle: toodle::Toodle,
+    fwends: fwends::Fwends,
     puter_rect: Rect,
     toodle_rect: Rect,
+    fwends_rect: Rect,
     focus: FocusedWidget,
     puter_pressed: bool,
 }
@@ -412,6 +417,7 @@ impl App {
     fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         let puter = puter::Puter::load(palette)?;
         let toodle = toodle::Toodle::load(palette)?;
+        let fwends = fwends::Fwends::load(palette)?;
         let puter_rect = Rect {
             x: 0,
             y: 0,
@@ -424,23 +430,36 @@ impl App {
             w: toodle.width(),
             h: toodle.height(),
         };
+        let fwends_rect = Rect {
+            x: puter.width() + WIDGET_GAP,
+            y: toodle.height() + WIDGET_GAP,
+            w: fwends.width(),
+            h: fwends.height(),
+        };
 
         Ok(Self {
             puter,
             toodle,
+            fwends,
             puter_rect,
             toodle_rect,
+            fwends_rect,
             focus: FocusedWidget::Toodle,
             puter_pressed: false,
         })
     }
 
     fn width(&self) -> usize {
-        self.toodle_rect.x + self.toodle_rect.w
+        self.toodle_rect
+            .x
+            .saturating_add(self.toodle_rect.w)
+            .max(self.fwends_rect.x + self.fwends_rect.w)
     }
 
     fn height(&self) -> usize {
-        self.puter_rect.h.max(self.toodle_rect.h)
+        self.puter_rect
+            .h
+            .max(self.fwends_rect.y + self.fwends_rect.h)
     }
 
     fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -469,10 +488,22 @@ impl App {
         );
         self.toodle.render(&mut toodle_fb, palette);
         fb.blit_from(&toodle_fb, self.toodle_rect.x, self.toodle_rect.y);
+
+        let mut fwends_fb = Framebuffer::new(
+            self.fwends_rect.w,
+            self.fwends_rect.h,
+            self.fwends.fill_color(palette),
+        );
+        self.fwends.render(&mut fwends_fb, palette);
+        fb.blit_from(&fwends_fb, self.fwends_rect.x, self.fwends_rect.y);
     }
 
     fn drain_events(&self) -> bool {
         self.puter.drain_terminal_events()
+    }
+
+    fn drain_replies(&mut self) -> bool {
+        self.fwends.drain_reply()
     }
 
     fn handle_key_press(&mut self, keycode: u8, state: u16) -> Result<(), Box<dyn Error>> {
@@ -482,11 +513,19 @@ impl App {
                 Ok(())
             }
             FocusedWidget::Toodle => self.toodle.handle_key_press(keycode, state),
+            FocusedWidget::Fwends => self.fwends.handle_key_press(keycode, state),
         }
     }
 
     fn click(&mut self, x: i16, y: i16) -> Result<(), Box<dyn Error>> {
         self.puter_pressed = false;
+        if self.fwends_rect.contains(x, y) {
+            let (x, y) = self.fwends_rect.local(x, y);
+            self.focus = FocusedWidget::Fwends;
+            self.fwends.click(x, y);
+            return Ok(());
+        }
+
         if self.toodle_rect.contains(x, y) {
             let (x, y) = self.toodle_rect.local(x, y);
             self.focus = FocusedWidget::Toodle;
@@ -522,13 +561,25 @@ impl App {
         }
     }
 
-    fn scroll_up(&self, x: i16, y: i16) {
+    fn scroll_up(&mut self, x: i16, y: i16) {
+        if self.fwends_rect.contains(x, y) {
+            let (x, y) = self.fwends_rect.local(x, y);
+            self.fwends.scroll_up(x, y);
+            return;
+        }
+
         if self.puter_rect.contains(x, y) {
             self.puter.scroll_up();
         }
     }
 
-    fn scroll_down(&self, x: i16, y: i16) {
+    fn scroll_down(&mut self, x: i16, y: i16) {
+        if self.fwends_rect.contains(x, y) {
+            let (x, y) = self.fwends_rect.local(x, y);
+            self.fwends.scroll_down(x, y);
+            return;
+        }
+
         if self.puter_rect.contains(x, y) {
             self.puter.scroll_down();
         }
@@ -554,6 +605,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut running = true;
     while running {
         running = app.drain_events();
+        if app.drain_replies() {
+            app.render(&mut fb, &palette);
+            xwin.draw(&fb)?;
+        }
 
         while let Some(event) = xwin.conn.poll_for_event()? {
             match event {

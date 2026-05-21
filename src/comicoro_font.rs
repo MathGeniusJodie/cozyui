@@ -5,4 +5,5 @@ pub(crate) const COMICORO_CELL_W: usize = 10;
 pub(crate) const COMICORO_CELL_H: usize = 15;
 pub(crate) const COMICORO_COLS: usize = 16;
 pub(crate) const COMICORO_X_ORIGIN: usize = 0;
+#[rustfmt::skip]
 pub(crate) const COMICORO_ADVANCE: [u8; 128] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 3, 4, 7, 6, 10, 7, 2, 4, 4, 6, 6, 3, 4, 2, 4, 7, 3, 6, 6, 6, 6, 6, 6, 6, 6, 2, 3, 5, 5, 5, 5, 9, 7, 7, 6, 7, 6, 6, 8, 7, 3, 7, 7, 6, 8, 8, 8, 7, 8, 7, 6, 7, 7, 7, 8, 7, 7, 7, 3, 4, 3, 4, 7, 3, 6, 6, 6, 6, 5, 4, 6, 6, 2, 4, 6, 2, 8, 6, 6, 6, 6, 4, 5, 4, 6, 6, 7, 6, 6, 5, 4, 2, 4, 7, 0];
