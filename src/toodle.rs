@@ -21,7 +21,7 @@ const CHECKBOXES_PATH: &str = "assets/checkboxes.png";
 const CHECKS_PATH: &str = "assets/checks.png";
 const ERASER_PATH: &str = "assets/eraser.png";
 const GOLDSTAR_PATH: &str = "assets/goldstar.png";
-const PENCIL_PATH: &str = "assets/toodle_pencil.png";
+const PENCIL_PATH: &str = "assets/focus_pencil.png";
 const PENCIL_SHADOW_PATH: &str = "assets/toodle_pencil_shadow.png";
 
 const TODO_FILES: [&str; 3] = ["toodle_top.txt", "toodle_second.txt", "toodle_third.txt"];

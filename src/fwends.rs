@@ -39,6 +39,9 @@ const LINE_H: usize = 16;
 const MAX_INPUT_CHARS: usize = 96;
 const SYSTEM_PROMPT_PATH: &str = "fwends_system_prompt.txt";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const FOCUS_PENCIL_PATH: &str = "assets/focus_pencil.png";
+const PENCIL_TIP_X: usize = 0;
+const PENCIL_TIP_Y: usize = 24;
 
 const MODELS: [Model; 4] = [
     Model {
@@ -66,6 +69,7 @@ const MODELS: [Model; 4] = [
 pub(crate) struct Fwends {
     avatars: [Image; 4],
     bubble: Image,
+    pencil: Image,
     font: BitmapFont,
     messages: Vec<Message>,
     input: String,
@@ -86,6 +90,7 @@ impl Fwends {
                 Image::load(MODELS[3].asset_path, palette)?,
             ],
             bubble: Image::load("assets/bubble.png", palette)?,
+            pencil: Image::load(FOCUS_PENCIL_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
             messages: vec![Message::assistant("pick a fwend and say hi".to_string())],
             input: String::new(),
@@ -470,6 +475,37 @@ impl Fwends {
                 palette.color(palette_color::BLACK),
             );
         }
+        self.draw_focused_pencil(fb);
+    }
+
+    fn draw_focused_pencil(&self, fb: &mut Framebuffer) {
+        if !self.focused {
+            return;
+        }
+
+        let (cursor_x, cursor_y) = self.input_cursor_position();
+        let dest_x = cursor_x.saturating_sub(PENCIL_TIP_X);
+        let dest_y = cursor_y.saturating_sub(PENCIL_TIP_Y);
+        fb.draw_scaled_region(
+            &self.pencil,
+            0,
+            0,
+            dest_x * SCALE,
+            dest_y * SCALE,
+            self.pencil.width,
+            self.pencil.height,
+            SCALE,
+        );
+    }
+
+    fn input_cursor_position(&self) -> (usize, usize) {
+        let max_width = W - PAD * 2 - TEXT_PAD * 2;
+        let lines = self.font.wrap_lines(&self.input, max_width);
+        let line_index = lines.len().saturating_sub(1).min(1);
+        (
+            PAD + TEXT_PAD + self.font.text_width(&lines[line_index]).min(max_width),
+            INPUT_Y + 7 + line_index * LINE_H,
+        )
     }
 }
 
