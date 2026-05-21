@@ -6,7 +6,8 @@ WIP pixel art desktop environment.
 ### puter
 tiny pixel-art terminal emulator that uses `alacritty_terminal`
 
-![toodle](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/focus_pencil.png?raw=true)
+![pencil](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/focus_pencil.png?raw=true)
+![eraser](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/eraser.png?raw=true)
 
 ### toodle
 todo app with 3 priority levels
