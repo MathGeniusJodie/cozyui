@@ -1,0 +1,129 @@
+use std::error::Error;
+
+use crate::text_wrap;
+use crate::{Framebuffer, Rgba, decode_png_with_size};
+
+pub(crate) struct FontSpec {
+    pub(crate) atlas_path: &'static str,
+    pub(crate) cell_w: usize,
+    pub(crate) cell_h: usize,
+    pub(crate) cols: usize,
+    pub(crate) x_origin: usize,
+    pub(crate) advance: &'static [u8; 128],
+}
+
+pub(crate) struct BitmapFont {
+    spec: &'static FontSpec,
+    width: usize,
+    pixels: Vec<bool>,
+}
+
+impl BitmapFont {
+    pub(crate) fn load(spec: &'static FontSpec) -> Result<Self, Box<dyn Error>> {
+        let (width, _height, pixels) = decode_png_with_size(spec.atlas_path)?;
+        let pixels = pixels.into_iter().map(is_glyph_ink).collect();
+        Ok(Self {
+            spec,
+            width,
+            pixels,
+        })
+    }
+
+    pub(crate) fn cell_h(&self) -> usize {
+        self.spec.cell_h
+    }
+
+    pub(crate) fn advance(&self, ch: char) -> usize {
+        let code = glyph_code(ch);
+        self.spec.advance[code] as usize
+    }
+
+    pub(crate) fn text_width(&self, text: &str) -> usize {
+        text.chars().map(|ch| self.advance(ch)).sum()
+    }
+
+    pub(crate) fn wrap_lines(&self, text: &str, max_width: usize) -> Vec<String> {
+        text_wrap::wrap_lines(text, max_width, |ch| self.advance(ch))
+    }
+
+    pub(crate) fn fits_with_insert(&self, text: &str, ch: char, row_width: usize) -> bool {
+        let mut candidate = String::with_capacity(text.len() + ch.len_utf8());
+        candidate.push_str(text);
+        candidate.push(ch);
+
+        text_wrap::fits_in_lines(&candidate, row_width, 2, |ch| self.advance(ch))
+    }
+
+    pub(crate) fn draw_text(
+        &self,
+        fb: &mut Framebuffer,
+        text: &str,
+        x: usize,
+        y: usize,
+        scale: usize,
+        color: Rgba,
+    ) {
+        self.draw_text_limited(fb, text, x, y, scale, color, usize::MAX);
+    }
+
+    pub(crate) fn draw_text_limited(
+        &self,
+        fb: &mut Framebuffer,
+        text: &str,
+        x: usize,
+        y: usize,
+        scale: usize,
+        color: Rgba,
+        max_chars: usize,
+    ) {
+        let mut cursor_x = x;
+        for ch in text.chars().take(max_chars) {
+            self.draw_glyph(fb, ch, cursor_x, y, scale, color);
+            cursor_x += self.advance(ch) * scale;
+        }
+    }
+
+    fn is_on(&self, ch: char, x: usize, y: usize) -> bool {
+        let code = glyph_code(ch);
+        let sx = (code % self.spec.cols) * self.spec.cell_w + x;
+        let sy = (code / self.spec.cols) * self.spec.cell_h + y;
+        self.pixels[sy * self.width + sx]
+    }
+
+    fn draw_glyph(
+        &self,
+        fb: &mut Framebuffer,
+        ch: char,
+        x: usize,
+        y: usize,
+        scale: usize,
+        color: Rgba,
+    ) {
+        for gy in 0..self.spec.cell_h {
+            for gx in 0..self.spec.cell_w {
+                if !self.is_on(ch, gx, gy) {
+                    continue;
+                }
+                let dest_x =
+                    x as isize + (gx as isize - self.spec.x_origin as isize) * scale as isize;
+                if dest_x < 0 {
+                    continue;
+                }
+                fb.fill_rect(dest_x as usize, y + gy * scale, scale, scale, color);
+            }
+        }
+    }
+}
+
+fn glyph_code(ch: char) -> usize {
+    if ch.is_ascii() {
+        ch as usize
+    } else {
+        '?' as usize
+    }
+}
+
+fn is_glyph_ink(color: Rgba) -> bool {
+    let luminance = color.r as u16 + color.g as u16 + color.b as u16;
+    luminance >= 384
+}

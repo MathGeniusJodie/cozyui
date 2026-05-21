@@ -3,9 +3,11 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
+use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::peanut_money_font;
-use crate::{Framebuffer, Image, Palette, Rgba, decode_png_with_size};
+use crate::text_input::{EditKey, edit_key};
+use crate::{Framebuffer, Image, Palette, Rgba};
 
 const SCALE: usize = 2;
 const GLYPH_SCALE: usize = 1;
@@ -66,7 +68,7 @@ pub(crate) struct Toodle {
     goldstar: Image,
     pencil: Image,
     pencil_shadow: Image,
-    font: GlyphAtlas,
+    font: BitmapFont,
     todos: [TodoPage; 3],
     done_count: usize,
     page: usize,
@@ -88,7 +90,7 @@ impl Toodle {
             goldstar: Image::load(GOLDSTAR_PATH, palette)?,
             pencil: Image::load(PENCIL_PATH, palette)?,
             pencil_shadow: Image::load(PENCIL_SHADOW_PATH, palette)?,
-            font: GlyphAtlas::load()?,
+            font: BitmapFont::load(&peanut_money_font::PEANUT_MONEY_SPEC)?,
             todos: [
                 TodoPage::load(TODO_FILES[0])?,
                 TodoPage::load(TODO_FILES[1])?,
@@ -252,7 +254,7 @@ impl Toodle {
             EditKey::Escape => {
                 self.focused_line = None;
             }
-            EditKey::None => return Ok(()),
+            EditKey::Tab | EditKey::Left | EditKey::Right | EditKey::None => return Ok(()),
         }
 
         self.save_current_page()
@@ -351,15 +353,14 @@ impl Toodle {
         let count = self.done_count.to_string();
         let text_scale = GLYPH_SCALE * SCALE;
         let text_w = self.font.text_width(&count) * text_scale;
-        let text_h = peanut_money_font::PEANUT_MONEY_CELL_H * text_scale;
+        let text_h = self.font.cell_h() * text_scale;
         let star_w = self.goldstar.width * SCALE;
         let star_h = self.goldstar.height * SCALE;
         let text_x = star_x * SCALE + star_w.saturating_sub(text_w) / 2;
         let text_y = GOLDSTAR_Y * SCALE + star_h.saturating_sub(text_h) / 2;
 
-        draw_text(
+        self.font.draw_text_limited(
             fb,
-            &self.font,
             &count,
             text_x,
             text_y,
@@ -443,7 +444,7 @@ impl Toodle {
             line,
             cursor_x,
             cursor_y,
-            self.font.wrap_index(&todo.text, max_text_width(line)) < todo.text.chars().count(),
+            self.font.wrap_lines(&todo.text, max_text_width(line)).len() > 1,
         ))
     }
 
@@ -700,97 +701,9 @@ fn mapped_page_color(page_color: PageColor, source_color: usize) -> usize {
     }
 }
 
-struct GlyphAtlas {
-    width: usize,
-    pixels: Vec<bool>,
-}
-
-impl GlyphAtlas {
-    fn load() -> Result<Self, Box<dyn Error>> {
-        let (width, _height, pixels) =
-            decode_png_with_size(peanut_money_font::PEANUT_MONEY_ATLAS_PATH)?;
-        let pixels = pixels.into_iter().map(is_glyph_ink).collect();
-        Ok(Self { width, pixels })
-    }
-
-    fn is_on(&self, ch: char, x: usize, y: usize) -> bool {
-        let code = ch as usize;
-        if code >= 128 {
-            return self.is_on('?', x, y);
-        }
-
-        let sx = (code % peanut_money_font::PEANUT_MONEY_COLS)
-            * peanut_money_font::PEANUT_MONEY_CELL_W
-            + x;
-        let sy = (code / peanut_money_font::PEANUT_MONEY_COLS)
-            * peanut_money_font::PEANUT_MONEY_CELL_H
-            + y;
-        self.pixels[sy * self.width + sx]
-    }
-
-    fn advance(&self, ch: char) -> usize {
-        let code = ch as usize;
-        if code < peanut_money_font::PEANUT_MONEY_ADVANCE.len() {
-            peanut_money_font::PEANUT_MONEY_ADVANCE[code] as usize
-        } else {
-            peanut_money_font::PEANUT_MONEY_ADVANCE['?' as usize] as usize
-        }
-    }
-
-    fn text_width(&self, text: &str) -> usize {
-        text.chars().map(|ch| self.advance(ch)).sum()
-    }
-
-    fn wrap_index(&self, text: &str, max_width: usize) -> usize {
-        let mut width = 0;
-        let mut index = 0;
-        for ch in text.chars() {
-            let advance = self.advance(ch);
-            if width + advance > max_width {
-                break;
-            }
-            width += advance;
-            index += 1;
-        }
-        index
-    }
-
-    fn fits_with_insert(&self, text: &str, ch: char, row_width: usize) -> bool {
-        let mut candidate = String::with_capacity(text.len() + ch.len_utf8());
-        candidate.push_str(text);
-        candidate.push(ch);
-
-        let first_row_chars = self.wrap_index(&candidate, row_width);
-        if first_row_chars == candidate.chars().count() {
-            return true;
-        }
-
-        let second_line = candidate.chars().skip(first_row_chars).collect::<String>();
-        !second_line.is_empty()
-            && self.wrap_index(&second_line, row_width) == second_line.chars().count()
-    }
-}
-
-fn draw_text(
-    fb: &mut Framebuffer,
-    atlas: &GlyphAtlas,
-    text: &str,
-    x: usize,
-    y: usize,
-    scale: usize,
-    color: Rgba,
-    max_chars: usize,
-) {
-    let mut cursor_x = x;
-    for ch in text.chars().take(max_chars) {
-        draw_glyph(fb, atlas, ch, cursor_x, y, scale, color);
-        cursor_x += atlas.advance(ch) * scale;
-    }
-}
-
 fn draw_todo_text(
     fb: &mut Framebuffer,
-    atlas: &GlyphAtlas,
+    font: &BitmapFont,
     text: &str,
     x: usize,
     y: usize,
@@ -799,41 +712,27 @@ fn draw_todo_text(
     chars_per_row: usize,
 ) {
     let max_width = chars_per_row * 6;
-    let first_row_chars = atlas.wrap_index(text, max_width);
-    if first_row_chars == text.chars().count() {
-        draw_text(fb, atlas, text, x, y, scale, color, usize::MAX);
+    let lines = font.wrap_lines(text, max_width);
+    if lines.len() <= 1 {
+        font.draw_text(fb, &lines[0], x, y, scale, color);
         return;
     }
 
-    let first_line = text.chars().take(first_row_chars).collect::<String>();
-    let second_line = text
-        .chars()
-        .skip(first_row_chars)
-        .take(atlas.wrap_index(
-            &text.chars().skip(first_row_chars).collect::<String>(),
-            max_width,
-        ))
-        .collect::<String>();
-
-    draw_text(
+    font.draw_text(
         fb,
-        atlas,
-        &first_line,
+        &lines[0],
         x,
         y - WRAPPED_FIRST_LINE_OFFSET_Y * SCALE,
         scale,
         color,
-        usize::MAX,
     );
-    draw_text(
+    font.draw_text(
         fb,
-        atlas,
-        &second_line,
+        &lines[1],
         x,
         y + WRAPPED_SECOND_LINE_OFFSET_Y * SCALE,
         scale,
         color,
-        usize::MAX,
     );
 }
 
@@ -858,36 +757,6 @@ fn draw_tinted_scaled_region(
             fb.fill_rect(dest_x + x * scale, dest_y + y * scale, scale, scale, tint);
         }
     }
-}
-
-fn draw_glyph(
-    fb: &mut Framebuffer,
-    atlas: &GlyphAtlas,
-    ch: char,
-    x: usize,
-    y: usize,
-    scale: usize,
-    color: Rgba,
-) {
-    for gy in 0..peanut_money_font::PEANUT_MONEY_CELL_H {
-        for gx in 0..peanut_money_font::PEANUT_MONEY_CELL_W {
-            if !atlas.is_on(ch, gx, gy) {
-                continue;
-            }
-            let dest_x = x as isize
-                + (gx as isize - peanut_money_font::PEANUT_MONEY_X_ORIGIN as isize)
-                    * scale as isize;
-            if dest_x < 0 {
-                continue;
-            }
-            fb.fill_rect(dest_x as usize, y + gy * scale, scale, scale, color);
-        }
-    }
-}
-
-fn is_glyph_ink(color: Rgba) -> bool {
-    let luminance = color.r as u16 + color.g as u16 + color.b as u16;
-    luminance >= 384
 }
 
 fn checkbox_at(x: usize, y: usize) -> Option<usize> {
@@ -918,130 +787,16 @@ fn max_text_width(line: usize) -> usize {
     }
 }
 
-fn pencil_cursor_position(atlas: &GlyphAtlas, line: usize, text: &str) -> (usize, usize) {
-    let first_row_chars = atlas.wrap_index(text, max_text_width(line));
+fn pencil_cursor_position(font: &BitmapFont, line: usize, text: &str) -> (usize, usize) {
     let base_y = LINE_Y[line] - TEXT_Y_OFFSET;
+    let lines = font.wrap_lines(text, max_text_width(line));
 
-    if first_row_chars == text.chars().count() {
-        (TEXT_X + atlas.text_width(text), base_y)
+    if lines.len() <= 1 {
+        (TEXT_X + font.text_width(&lines[0]), base_y)
     } else {
-        let second_line = text.chars().skip(first_row_chars).collect::<String>();
         (
-            TEXT_X + atlas.text_width(&second_line).min(max_text_width(line)),
+            TEXT_X + font.text_width(&lines[1]).min(max_text_width(line)),
             base_y + WRAPPED_SECOND_LINE_OFFSET_Y,
         )
-    }
-}
-
-enum EditKey {
-    Insert(char),
-    Backspace,
-    Enter,
-    Escape,
-    None,
-}
-
-fn edit_key(keycode: u8, state: u16) -> EditKey {
-    let shift = state & 1 != 0;
-    match (keycode, shift) {
-        (9, _) => EditKey::Escape,
-        (22, _) => EditKey::Backspace,
-        (36, _) => EditKey::Enter,
-        (65, _) => EditKey::Insert(' '),
-        (10, false) => EditKey::Insert('1'),
-        (10, true) => EditKey::Insert('!'),
-        (11, false) => EditKey::Insert('2'),
-        (11, true) => EditKey::Insert('@'),
-        (12, false) => EditKey::Insert('3'),
-        (12, true) => EditKey::Insert('#'),
-        (13, false) => EditKey::Insert('4'),
-        (13, true) => EditKey::Insert('$'),
-        (14, false) => EditKey::Insert('5'),
-        (14, true) => EditKey::Insert('%'),
-        (15, false) => EditKey::Insert('6'),
-        (15, true) => EditKey::Insert('^'),
-        (16, false) => EditKey::Insert('7'),
-        (16, true) => EditKey::Insert('&'),
-        (17, false) => EditKey::Insert('8'),
-        (17, true) => EditKey::Insert('*'),
-        (18, false) => EditKey::Insert('9'),
-        (18, true) => EditKey::Insert('('),
-        (19, false) => EditKey::Insert('0'),
-        (19, true) => EditKey::Insert(')'),
-        (20, false) => EditKey::Insert('-'),
-        (20, true) => EditKey::Insert('_'),
-        (21, false) => EditKey::Insert('='),
-        (21, true) => EditKey::Insert('+'),
-        (24, false) => EditKey::Insert('q'),
-        (24, true) => EditKey::Insert('Q'),
-        (25, false) => EditKey::Insert('w'),
-        (25, true) => EditKey::Insert('W'),
-        (26, false) => EditKey::Insert('e'),
-        (26, true) => EditKey::Insert('E'),
-        (27, false) => EditKey::Insert('r'),
-        (27, true) => EditKey::Insert('R'),
-        (28, false) => EditKey::Insert('t'),
-        (28, true) => EditKey::Insert('T'),
-        (29, false) => EditKey::Insert('y'),
-        (29, true) => EditKey::Insert('Y'),
-        (30, false) => EditKey::Insert('u'),
-        (30, true) => EditKey::Insert('U'),
-        (31, false) => EditKey::Insert('i'),
-        (31, true) => EditKey::Insert('I'),
-        (32, false) => EditKey::Insert('o'),
-        (32, true) => EditKey::Insert('O'),
-        (33, false) => EditKey::Insert('p'),
-        (33, true) => EditKey::Insert('P'),
-        (34, false) => EditKey::Insert('['),
-        (34, true) => EditKey::Insert('{'),
-        (35, false) => EditKey::Insert(']'),
-        (35, true) => EditKey::Insert('}'),
-        (38, false) => EditKey::Insert('a'),
-        (38, true) => EditKey::Insert('A'),
-        (39, false) => EditKey::Insert('s'),
-        (39, true) => EditKey::Insert('S'),
-        (40, false) => EditKey::Insert('d'),
-        (40, true) => EditKey::Insert('D'),
-        (41, false) => EditKey::Insert('f'),
-        (41, true) => EditKey::Insert('F'),
-        (42, false) => EditKey::Insert('g'),
-        (42, true) => EditKey::Insert('G'),
-        (43, false) => EditKey::Insert('h'),
-        (43, true) => EditKey::Insert('H'),
-        (44, false) => EditKey::Insert('j'),
-        (44, true) => EditKey::Insert('J'),
-        (45, false) => EditKey::Insert('k'),
-        (45, true) => EditKey::Insert('K'),
-        (46, false) => EditKey::Insert('l'),
-        (46, true) => EditKey::Insert('L'),
-        (47, false) => EditKey::Insert(';'),
-        (47, true) => EditKey::Insert(':'),
-        (48, false) => EditKey::Insert('\''),
-        (48, true) => EditKey::Insert('"'),
-        (49, false) => EditKey::Insert('`'),
-        (49, true) => EditKey::Insert('~'),
-        (51, false) => EditKey::Insert('\\'),
-        (51, true) => EditKey::Insert('|'),
-        (52, false) => EditKey::Insert('z'),
-        (52, true) => EditKey::Insert('Z'),
-        (53, false) => EditKey::Insert('x'),
-        (53, true) => EditKey::Insert('X'),
-        (54, false) => EditKey::Insert('c'),
-        (54, true) => EditKey::Insert('C'),
-        (55, false) => EditKey::Insert('v'),
-        (55, true) => EditKey::Insert('V'),
-        (56, false) => EditKey::Insert('b'),
-        (56, true) => EditKey::Insert('B'),
-        (57, false) => EditKey::Insert('n'),
-        (57, true) => EditKey::Insert('N'),
-        (58, false) => EditKey::Insert('m'),
-        (58, true) => EditKey::Insert('M'),
-        (59, false) => EditKey::Insert(','),
-        (59, true) => EditKey::Insert('<'),
-        (60, false) => EditKey::Insert('.'),
-        (60, true) => EditKey::Insert('>'),
-        (61, false) => EditKey::Insert('/'),
-        (61, true) => EditKey::Insert('?'),
-        _ => EditKey::None,
     }
 }

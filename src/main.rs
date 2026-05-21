@@ -13,10 +13,13 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
+mod bitmap_font;
 mod comicoro_font;
 mod fwends;
 mod peanut_money_font;
 mod puter;
+mod text_input;
+mod text_wrap;
 mod toodle;
 
 const PALETTE_PATH: &str = "na16-1x.png";

@@ -5,9 +5,11 @@ use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
+use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
-use crate::{Framebuffer, Image, Palette, Rgba, decode_png_with_size};
+use crate::text_input::{EditKey, edit_key};
+use crate::{Framebuffer, Image, Palette, Rgba};
 
 const SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
@@ -64,7 +66,7 @@ const MODELS: [Model; 4] = [
 pub(crate) struct Fwends {
     avatars: [Image; 4],
     bubble: Image,
-    font: GlyphAtlas,
+    font: BitmapFont,
     messages: Vec<Message>,
     input: String,
     selected_model: usize,
@@ -84,7 +86,7 @@ impl Fwends {
                 Image::load(MODELS[3].asset_path, palette)?,
             ],
             bubble: Image::load("assets/bubble.png", palette)?,
-            font: GlyphAtlas::load()?,
+            font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
             messages: vec![Message::assistant("pick a fwend and say hi".to_string())],
             input: String::new(),
             selected_model: 0,
@@ -304,9 +306,8 @@ impl Fwends {
             SCALE,
         );
 
-        draw_text(
+        self.font.draw_text(
             fb,
-            &self.font,
             MODELS[index].name,
             (x + 4) * SCALE,
             (MODEL_Y + MODEL_SLOT_H - 9) * SCALE,
@@ -331,11 +332,10 @@ impl Fwends {
             let mut text_y = y + BUBBLE_PAD_TOP as isize;
             for line in layout.lines {
                 if text_y >= viewport_top as isize
-                    && text_y + comicoro_font::COMICORO_CELL_H as isize <= viewport_bottom as isize
+                    && text_y + self.font.cell_h() as isize <= viewport_bottom as isize
                 {
-                    draw_text(
+                    self.font.draw_text(
                         fb,
-                        &self.font,
                         &line,
                         text_x * SCALE,
                         text_y as usize * SCALE,
@@ -461,9 +461,8 @@ impl Fwends {
         };
         let lines = self.font.wrap_lines(label, W - PAD * 2 - TEXT_PAD * 2);
         for (index, line) in lines.into_iter().take(2).enumerate() {
-            draw_text(
+            self.font.draw_text(
                 fb,
-                &self.font,
                 &line,
                 (PAD + TEXT_PAD) * SCALE,
                 (INPUT_Y + 7 + index * LINE_H) * SCALE,
@@ -519,81 +518,6 @@ impl Message {
 enum Role {
     User,
     Assistant,
-}
-
-struct GlyphAtlas {
-    width: usize,
-    pixels: Vec<bool>,
-}
-
-impl GlyphAtlas {
-    fn load() -> Result<Self, Box<dyn Error>> {
-        let (width, _height, pixels) = decode_png_with_size(comicoro_font::COMICORO_ATLAS_PATH)?;
-        let pixels = pixels.into_iter().map(is_glyph_ink).collect();
-        Ok(Self { width, pixels })
-    }
-
-    fn is_on(&self, ch: char, x: usize, y: usize) -> bool {
-        let code = if ch.is_ascii() {
-            ch as usize
-        } else {
-            '?' as usize
-        };
-        let sx = (code % comicoro_font::COMICORO_COLS) * comicoro_font::COMICORO_CELL_W + x;
-        let sy = (code / comicoro_font::COMICORO_COLS) * comicoro_font::COMICORO_CELL_H + y;
-        self.pixels[sy * self.width + sx]
-    }
-
-    fn advance(&self, ch: char) -> usize {
-        let code = if ch.is_ascii() {
-            ch as usize
-        } else {
-            '?' as usize
-        };
-        comicoro_font::COMICORO_ADVANCE[code] as usize
-    }
-
-    fn text_width(&self, text: &str) -> usize {
-        text.chars().map(|ch| self.advance(ch)).sum()
-    }
-
-    fn wrap_lines(&self, text: &str, max_width: usize) -> Vec<String> {
-        let mut lines = Vec::new();
-        let mut line = String::new();
-        for word in text.split_whitespace() {
-            let candidate = if line.is_empty() {
-                word.to_string()
-            } else {
-                format!("{line} {word}")
-            };
-
-            if self.text_width(&candidate) <= max_width {
-                line = candidate;
-                continue;
-            }
-
-            if !line.is_empty() {
-                lines.push(line);
-                line = String::new();
-            }
-
-            for ch in word.chars() {
-                if self.text_width(&line) + self.advance(ch) > max_width && !line.is_empty() {
-                    lines.push(line);
-                    line = String::new();
-                }
-                line.push(ch);
-            }
-        }
-
-        if !line.is_empty() {
-            lines.push(line);
-        }
-        if lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines
-    }
 }
 
 fn request_history(messages: &[Message]) -> Vec<Message> {
@@ -790,168 +714,4 @@ fn stretch_source_coord(
     let src_middle = src_len - start_cap - end_cap;
     let dest_middle = dest_len - start_cap - end_cap;
     start_cap + (dest - start_cap) * src_middle / dest_middle
-}
-
-fn draw_text(
-    fb: &mut Framebuffer,
-    atlas: &GlyphAtlas,
-    text: &str,
-    x: usize,
-    y: usize,
-    scale: usize,
-    color: Rgba,
-) {
-    let mut cursor_x = x;
-    for ch in text.chars() {
-        draw_glyph(fb, atlas, ch, cursor_x, y, scale, color);
-        cursor_x += atlas.advance(ch) * scale;
-    }
-}
-
-fn draw_glyph(
-    fb: &mut Framebuffer,
-    atlas: &GlyphAtlas,
-    ch: char,
-    x: usize,
-    y: usize,
-    scale: usize,
-    color: Rgba,
-) {
-    for gy in 0..comicoro_font::COMICORO_CELL_H {
-        for gx in 0..comicoro_font::COMICORO_CELL_W {
-            if !atlas.is_on(ch, gx, gy) {
-                continue;
-            }
-            let dest_x = x as isize
-                + (gx as isize - comicoro_font::COMICORO_X_ORIGIN as isize) * scale as isize;
-            if dest_x < 0 {
-                continue;
-            }
-            fb.fill_rect(dest_x as usize, y + gy * scale, scale, scale, color);
-        }
-    }
-}
-
-fn is_glyph_ink(color: Rgba) -> bool {
-    let luminance = color.r as u16 + color.g as u16 + color.b as u16;
-    luminance >= 384
-}
-
-enum EditKey {
-    Insert(char),
-    Backspace,
-    Enter,
-    Escape,
-    Tab,
-    Left,
-    Right,
-    None,
-}
-
-fn edit_key(keycode: u8, state: u16) -> EditKey {
-    let shift = state & 1 != 0;
-    match (keycode, shift) {
-        (9, _) => EditKey::Escape,
-        (22, _) => EditKey::Backspace,
-        (23, _) => EditKey::Tab,
-        (36, _) => EditKey::Enter,
-        (65, _) => EditKey::Insert(' '),
-        (113, _) => EditKey::Left,
-        (114, _) => EditKey::Right,
-        (10, false) => EditKey::Insert('1'),
-        (10, true) => EditKey::Insert('!'),
-        (11, false) => EditKey::Insert('2'),
-        (11, true) => EditKey::Insert('@'),
-        (12, false) => EditKey::Insert('3'),
-        (12, true) => EditKey::Insert('#'),
-        (13, false) => EditKey::Insert('4'),
-        (13, true) => EditKey::Insert('$'),
-        (14, false) => EditKey::Insert('5'),
-        (14, true) => EditKey::Insert('%'),
-        (15, false) => EditKey::Insert('6'),
-        (15, true) => EditKey::Insert('^'),
-        (16, false) => EditKey::Insert('7'),
-        (16, true) => EditKey::Insert('&'),
-        (17, false) => EditKey::Insert('8'),
-        (17, true) => EditKey::Insert('*'),
-        (18, false) => EditKey::Insert('9'),
-        (18, true) => EditKey::Insert('('),
-        (19, false) => EditKey::Insert('0'),
-        (19, true) => EditKey::Insert(')'),
-        (20, false) => EditKey::Insert('-'),
-        (20, true) => EditKey::Insert('_'),
-        (21, false) => EditKey::Insert('='),
-        (21, true) => EditKey::Insert('+'),
-        (24, false) => EditKey::Insert('q'),
-        (24, true) => EditKey::Insert('Q'),
-        (25, false) => EditKey::Insert('w'),
-        (25, true) => EditKey::Insert('W'),
-        (26, false) => EditKey::Insert('e'),
-        (26, true) => EditKey::Insert('E'),
-        (27, false) => EditKey::Insert('r'),
-        (27, true) => EditKey::Insert('R'),
-        (28, false) => EditKey::Insert('t'),
-        (28, true) => EditKey::Insert('T'),
-        (29, false) => EditKey::Insert('y'),
-        (29, true) => EditKey::Insert('Y'),
-        (30, false) => EditKey::Insert('u'),
-        (30, true) => EditKey::Insert('U'),
-        (31, false) => EditKey::Insert('i'),
-        (31, true) => EditKey::Insert('I'),
-        (32, false) => EditKey::Insert('o'),
-        (32, true) => EditKey::Insert('O'),
-        (33, false) => EditKey::Insert('p'),
-        (33, true) => EditKey::Insert('P'),
-        (34, false) => EditKey::Insert('['),
-        (34, true) => EditKey::Insert('{'),
-        (35, false) => EditKey::Insert(']'),
-        (35, true) => EditKey::Insert('}'),
-        (38, false) => EditKey::Insert('a'),
-        (38, true) => EditKey::Insert('A'),
-        (39, false) => EditKey::Insert('s'),
-        (39, true) => EditKey::Insert('S'),
-        (40, false) => EditKey::Insert('d'),
-        (40, true) => EditKey::Insert('D'),
-        (41, false) => EditKey::Insert('f'),
-        (41, true) => EditKey::Insert('F'),
-        (42, false) => EditKey::Insert('g'),
-        (42, true) => EditKey::Insert('G'),
-        (43, false) => EditKey::Insert('h'),
-        (43, true) => EditKey::Insert('H'),
-        (44, false) => EditKey::Insert('j'),
-        (44, true) => EditKey::Insert('J'),
-        (45, false) => EditKey::Insert('k'),
-        (45, true) => EditKey::Insert('K'),
-        (46, false) => EditKey::Insert('l'),
-        (46, true) => EditKey::Insert('L'),
-        (47, false) => EditKey::Insert(';'),
-        (47, true) => EditKey::Insert(':'),
-        (48, false) => EditKey::Insert('\''),
-        (48, true) => EditKey::Insert('"'),
-        (49, false) => EditKey::Insert('`'),
-        (49, true) => EditKey::Insert('~'),
-        (51, false) => EditKey::Insert('\\'),
-        (51, true) => EditKey::Insert('|'),
-        (52, false) => EditKey::Insert('z'),
-        (52, true) => EditKey::Insert('Z'),
-        (53, false) => EditKey::Insert('x'),
-        (53, true) => EditKey::Insert('X'),
-        (54, false) => EditKey::Insert('c'),
-        (54, true) => EditKey::Insert('C'),
-        (55, false) => EditKey::Insert('v'),
-        (55, true) => EditKey::Insert('V'),
-        (56, false) => EditKey::Insert('b'),
-        (56, true) => EditKey::Insert('B'),
-        (57, false) => EditKey::Insert('n'),
-        (57, true) => EditKey::Insert('N'),
-        (58, false) => EditKey::Insert('m'),
-        (58, true) => EditKey::Insert('M'),
-        (59, false) => EditKey::Insert(','),
-        (59, true) => EditKey::Insert('<'),
-        (60, false) => EditKey::Insert('.'),
-        (60, true) => EditKey::Insert('>'),
-        (61, false) => EditKey::Insert('/'),
-        (61, true) => EditKey::Insert('?'),
-        _ => EditKey::None,
-    }
 }
