@@ -1,13 +1,20 @@
 # cozyui
 WIP pixel art desktop environment.
 
-![cozyui puter](https://github.com/MathGeniusJodie/cozyui/blob/main/puter_o_lc.png?raw=true)
+![puter](https://github.com/MathGeniusJodie/cozyui/blob/main/puter_o_lc.png?raw=true)
 
 ### puter
 tiny pixel-art terminal emulator that uses `alacritty_terminal`
 
+![toodle](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/focus_pencil.png?raw=true)
+
 ### toodle
 todo app with 3 priority levels
+
+![qwen](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/qwen.png?raw=true)
+![deepseek](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/deep.png?raw=true)
+![kimi](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/kimi.png?raw=true)
+![claw](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/claw.png?raw=true)
 
 ### fwends
 cute ai chat
