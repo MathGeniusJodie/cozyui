@@ -1,6 +1,8 @@
 # cozyui
 WIP pixel art desktop environment.
 
+![cozyui puter](https://github.com/MathGeniusJodie/cozyui/blob/main/puter_o_lc.png?raw=true)
+
 ### puter
 tiny pixel-art terminal emulator that uses `alacritty_terminal`
 
