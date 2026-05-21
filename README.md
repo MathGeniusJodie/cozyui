@@ -1,20 +1,29 @@
 # cozyui
+WIP pixel art desktop environment.
 
-A tiny pixel-art terminal emulator that uses `alacritty_terminal` for the PTY,
-parser, grid, scrollback, escape sequence handling, and resize plumbing.
+### puter
+tiny pixel-art terminal emulator that uses `alacritty_terminal`
 
-The window and renderer are deliberately plain X11 through `x11rb`: the
-background PNG and bitmap font are composited into a CPU framebuffer, then sent
-to the X server with `PutImage`.
+### toodle
+todo app with 3 priority levels
 
-Run it from an X11 session:
+### fwends
+cute ai chat
 
-```sh
-cargo run
-```
+pixel art by me except for the beautiful pixel art fonts from
+https://fontenddev.com/fonts/
+uses the na16 color palette
+https://lospec.com/palette-list/na16
 
 ## todo
-* icon theme
+* skeumorphic background tying the widgets together
+* raw framebuffer support to work without x11
 * file browser app
-* todo app
+* icon theme
 * statusbar
+* rss reader
+* toodle: multiple pages per priority level
+* fwends: diegetic user text input
+* fwends: make pretty
+* fwends: thinking mode
+* puter: bold, strikethrough, colors and other ANSI goodness
