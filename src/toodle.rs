@@ -33,6 +33,10 @@ const TODO_FILES: [&str; 3] = [
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_third.txt"),
 ];
 const DONE_TODOS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_done.txt");
+const ARCHIVE_TRANSACTION_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/toodle_archive_transaction.json"
+);
 const PAGE_OFFSET_X: usize = 14;
 const ERASER_X: usize = 0;
 const ERASER_Y: usize = 21;
@@ -85,6 +89,8 @@ pub(crate) struct Toodle {
 
 impl Toodle {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
+        recover_archive_transaction(ARCHIVE_TRANSACTION_PATH)?;
+
         Ok(Self {
             pages: [
                 Image::load(TOP_PAGE_PATH, palette)?,
@@ -347,9 +353,12 @@ impl Toodle {
                 )?);
             }
         }
+
+        write_archive_transaction_marker(ARCHIVE_TRANSACTION_PATH, &staged_writes)?;
         for staged_write in staged_writes {
             staged_write.commit()?;
         }
+        fs::remove_file(ARCHIVE_TRANSACTION_PATH)?;
 
         self.todos = staged_pages;
         self.done_count += archived.len();
@@ -566,6 +575,55 @@ impl Drop for AtomicWrite {
 
 fn atomic_write(path: &str, contents: &[u8]) -> Result<(), Box<dyn Error>> {
     AtomicWrite::stage(path, contents)?.commit()
+}
+
+fn write_archive_transaction_marker(
+    marker_path: &str,
+    staged_writes: &[AtomicWrite],
+) -> Result<(), Box<dyn Error>> {
+    let writes = staged_writes
+        .iter()
+        .map(|write| {
+            serde_json::json!({
+                "path": write.path.as_str(),
+                "temp_path": write.temp_path.as_str(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let marker = serde_json::to_vec(&writes)?;
+    let transaction_marker = AtomicWrite::stage(marker_path, marker)?;
+    transaction_marker.commit()?;
+    Ok(())
+}
+
+fn recover_archive_transaction(marker_path: &str) -> Result<(), Box<dyn Error>> {
+    if !Path::new(marker_path).exists() {
+        return Ok(());
+    }
+
+    let marker = fs::read_to_string(marker_path)?;
+    let writes = serde_json::from_str::<serde_json::Value>(&marker)?;
+    let Some(writes) = writes.as_array() else {
+        return Err("archive transaction marker is not a JSON array".into());
+    };
+
+    for write in writes {
+        let path = write
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("archive transaction marker is missing path")?;
+        let temp_path = write
+            .get("temp_path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("archive transaction marker is missing temp_path")?;
+
+        if Path::new(temp_path).exists() {
+            fs::rename(temp_path, path)?;
+        }
+    }
+
+    fs::remove_file(marker_path)?;
+    Ok(())
 }
 
 #[derive(Clone, Default)]
@@ -868,6 +926,7 @@ fn pencil_cursor_position(font: &BitmapFont, line: usize, text: &str) -> (usize,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn todo_item_round_trips_checked_items() {
@@ -888,5 +947,45 @@ mod tests {
 
         assert_eq!(page.serialized_text().lines().count(), LINE_COUNT);
         assert!(page.serialized_text().starts_with("[x] done\nnext\n"));
+    }
+
+    #[test]
+    fn archive_transaction_recovery_finishes_interrupted_commit() {
+        let dir = unique_temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+
+        let marker_path = dir.join("transaction.json");
+        let done_path = dir.join("done.txt");
+        let page_path = dir.join("page.txt");
+        fs::write(&done_path, "old\n").unwrap();
+        fs::write(&page_path, "[x] done\nnext\n\n\n\n\n").unwrap();
+
+        let staged_writes = vec![
+            AtomicWrite::stage(done_path.to_str().unwrap(), b"old\ndone\n").unwrap(),
+            AtomicWrite::stage(page_path.to_str().unwrap(), b"next\n\n\n\n\n\n").unwrap(),
+        ];
+        write_archive_transaction_marker(marker_path.to_str().unwrap(), &staged_writes).unwrap();
+
+        let marker = fs::read_to_string(&marker_path).unwrap();
+        let writes = serde_json::from_str::<serde_json::Value>(&marker).unwrap();
+        let writes = writes.as_array().unwrap();
+        let done_temp_path = writes[0].get("temp_path").unwrap().as_str().unwrap();
+        fs::rename(done_temp_path, &done_path).unwrap();
+
+        recover_archive_transaction(marker_path.to_str().unwrap()).unwrap();
+
+        assert_eq!(fs::read_to_string(&done_path).unwrap(), "old\ndone\n");
+        assert_eq!(fs::read_to_string(&page_path).unwrap(), "next\n\n\n\n\n\n");
+        assert!(!marker_path.exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn unique_temp_dir() -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("cozyui-toodle-test-{}-{nanos}", std::process::id()))
     }
 }
