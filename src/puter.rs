@@ -13,6 +13,7 @@ use alacritty_terminal::term::{Config, Term, point_to_viewport};
 use alacritty_terminal::tty;
 
 use crate::palette_color;
+use crate::text_input::printable_key;
 use crate::{Framebuffer, Image, Palette, Rgba, decode_png_with_size};
 
 const BG_SCALE: usize = 1;
@@ -25,9 +26,9 @@ const SCREEN_SOURCE_Y: usize = 49;
 const SCREEN_W: usize = 205 * BG_SCALE;
 const SCREEN_H: usize = 158 * BG_SCALE;
 
-const GREEN_LOW_CONTRAST_PATH: &str = "puter_g_lc.png";
-const ORANGE_LOW_CONTRAST_PATH: &str = "puter_o_lc.png";
-const HIGH_CONTRAST_PATH: &str = "puter_hc.png";
+const GREEN_LOW_CONTRAST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/puter_g_lc.png");
+const ORANGE_LOW_CONTRAST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/puter_o_lc.png");
+const HIGH_CONTRAST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/puter_hc.png");
 const ART_CROP_X: usize = 19;
 const ART_CROP_Y: usize = 17;
 
@@ -46,7 +47,8 @@ const COLOR_ORANGE_GLOW: usize = palette_color::BROWN;
 const COLOR_GREEN_TEXT: usize = palette_color::LIME;
 const COLOR_GREEN_GLOW: usize = palette_color::GREEN;
 
-const BUTTON_SPRITES_PATH: &str = "assets/buttons-pressed.png";
+const BUTTON_SPRITES_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/buttons-pressed.png");
 const BUTTON_W: usize = 20;
 const BUTTON_H: usize = 16;
 const BUTTON_HIT_OFFSET_X: isize = -2;
@@ -128,10 +130,10 @@ impl Puter {
 
     pub(crate) fn release_button(&mut self, x: i16, y: i16) {
         let released_button = button_at(x, y);
-        if let (Some(pressed), Some(released)) = (self.active_button, released_button) {
-            if pressed == released {
-                self.settings.toggle(BUTTON_TARGETS[pressed].action);
-            }
+        if let (Some(pressed), Some(released)) = (self.active_button, released_button)
+            && pressed == released
+        {
+            self.settings.toggle(BUTTON_TARGETS[pressed].action);
         }
         self.active_button = None;
     }
@@ -245,7 +247,15 @@ struct GlyphAtlas {
 
 impl GlyphAtlas {
     fn load() -> Result<Self, Box<dyn Error>> {
-        let (width, _height, pixels) = decode_png_with_size("glyphs/0000-007F.png")?;
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/glyphs/0000-007F.png");
+        let (width, height, pixels) = decode_png_with_size(path)?;
+        if width < GLYPH_W {
+            return Err(format!("glyph atlas {path} is too narrow for terminal glyphs").into());
+        }
+        let rows = 128_usize.div_ceil(width / GLYPH_W);
+        if height < rows * GLYPH_H {
+            return Err(format!("glyph atlas {path} is too small for 128 terminal glyphs").into());
+        }
         let pixels = pixels.into_iter().map(is_glyph_ink).collect();
         Ok(Self { width, pixels })
     }
@@ -616,117 +626,21 @@ fn art_y(y: usize) -> usize {
 }
 
 fn key_bytes(keycode: u8, state: u16) -> Option<Cow<'static, [u8]>> {
-    let shift = state & 1 != 0;
     let ctrl = state & 4 != 0;
-    let text = match (keycode, shift) {
-        (9, _) => "\x1b",
-        (22, _) => "\x7f",
-        (23, _) => "\t",
-        (36, _) => "\r",
-        (111, _) => "\x1b[A",
-        (116, _) => "\x1b[B",
-        (113, _) => "\x1b[D",
-        (114, _) => "\x1b[C",
-        (110, _) => "\x1b[H",
-        (115, _) => "\x1b[F",
-        (112, _) => "\x1b[5~",
-        (117, _) => "\x1b[6~",
-        (24, false) => "q",
-        (24, true) => "Q",
-        (25, false) => "w",
-        (25, true) => "W",
-        (26, false) => "e",
-        (26, true) => "E",
-        (27, false) => "r",
-        (27, true) => "R",
-        (28, false) => "t",
-        (28, true) => "T",
-        (29, false) => "y",
-        (29, true) => "Y",
-        (30, false) => "u",
-        (30, true) => "U",
-        (31, false) => "i",
-        (31, true) => "I",
-        (32, false) => "o",
-        (32, true) => "O",
-        (33, false) => "p",
-        (33, true) => "P",
-        (38, false) => "a",
-        (38, true) => "A",
-        (39, false) => "s",
-        (39, true) => "S",
-        (40, false) => "d",
-        (40, true) => "D",
-        (41, false) => "f",
-        (41, true) => "F",
-        (42, false) => "g",
-        (42, true) => "G",
-        (43, false) => "h",
-        (43, true) => "H",
-        (44, false) => "j",
-        (44, true) => "J",
-        (45, false) => "k",
-        (45, true) => "K",
-        (46, false) => "l",
-        (46, true) => "L",
-        (52, false) => "z",
-        (52, true) => "Z",
-        (53, false) => "x",
-        (53, true) => "X",
-        (54, false) => "c",
-        (54, true) => "C",
-        (55, false) => "v",
-        (55, true) => "V",
-        (56, false) => "b",
-        (56, true) => "B",
-        (57, false) => "n",
-        (57, true) => "N",
-        (58, false) => "m",
-        (58, true) => "M",
-        (65, _) => " ",
-        (10, false) => "1",
-        (10, true) => "!",
-        (11, false) => "2",
-        (11, true) => "@",
-        (12, false) => "3",
-        (12, true) => "#",
-        (13, false) => "4",
-        (13, true) => "$",
-        (14, false) => "5",
-        (14, true) => "%",
-        (15, false) => "6",
-        (15, true) => "^",
-        (16, false) => "7",
-        (16, true) => "&",
-        (17, false) => "8",
-        (17, true) => "*",
-        (18, false) => "9",
-        (18, true) => "(",
-        (19, false) => "0",
-        (19, true) => ")",
-        (20, false) => "-",
-        (20, true) => "_",
-        (21, false) => "=",
-        (21, true) => "+",
-        (34, false) => "[",
-        (34, true) => "{",
-        (35, false) => "]",
-        (35, true) => "}",
-        (47, false) => ";",
-        (47, true) => ":",
-        (48, false) => "'",
-        (48, true) => "\"",
-        (49, false) => "`",
-        (49, true) => "~",
-        (51, false) => "\\",
-        (51, true) => "|",
-        (59, false) => ",",
-        (59, true) => "<",
-        (60, false) => ".",
-        (60, true) => ">",
-        (61, false) => "/",
-        (61, true) => "?",
-        _ => return None,
+    let text: Cow<'static, str> = match keycode {
+        9 => Cow::Borrowed("\x1b"),
+        22 => Cow::Borrowed("\x7f"),
+        23 => Cow::Borrowed("\t"),
+        36 => Cow::Borrowed("\r"),
+        111 => Cow::Borrowed("\x1b[A"),
+        116 => Cow::Borrowed("\x1b[B"),
+        113 => Cow::Borrowed("\x1b[D"),
+        114 => Cow::Borrowed("\x1b[C"),
+        110 => Cow::Borrowed("\x1b[H"),
+        115 => Cow::Borrowed("\x1b[F"),
+        112 => Cow::Borrowed("\x1b[5~"),
+        117 => Cow::Borrowed("\x1b[6~"),
+        _ => Cow::Owned(printable_key(keycode, state)?.to_string()),
     };
 
     if ctrl && text.len() == 1 {
@@ -736,7 +650,10 @@ fn key_bytes(keycode: u8, state: u16) -> Option<Cow<'static, [u8]>> {
         }
     }
 
-    Some(Cow::Borrowed(text.as_bytes()))
+    Some(match text {
+        Cow::Borrowed(text) => Cow::Borrowed(text.as_bytes()),
+        Cow::Owned(text) => Cow::Owned(text.into_bytes()),
+    })
 }
 
 fn key_scroll(keycode: u8, state: u16) -> Option<Scroll> {

@@ -14,18 +14,25 @@ const GLYPH_SCALE: usize = 1;
 const LINE_COUNT: usize = 6;
 const CHECK_VARIANTS: usize = 4;
 
-const TOP_PAGE_PATH: &str = "assets/toodle_top.png";
-const SECOND_PAGE_PATH: &str = "assets/toodle_2nd.png";
-const THIRD_PAGE_PATH: &str = "assets/toodle_page.png";
-const CHECKBOXES_PATH: &str = "assets/checkboxes.png";
-const CHECKS_PATH: &str = "assets/checks.png";
-const ERASER_PATH: &str = "assets/eraser.png";
-const GOLDSTAR_PATH: &str = "assets/goldstar.png";
-const PENCIL_PATH: &str = "assets/focus_pencil.png";
-const PENCIL_SHADOW_PATH: &str = "assets/toodle_pencil_shadow.png";
+const TOP_PAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/toodle_top.png");
+const SECOND_PAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/toodle_2nd.png");
+const THIRD_PAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/toodle_page.png");
+const CHECKBOXES_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/checkboxes.png");
+const CHECKS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/checks.png");
+const ERASER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/eraser.png");
+const GOLDSTAR_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/goldstar.png");
+const PENCIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/focus_pencil.png");
+const PENCIL_SHADOW_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/toodle_pencil_shadow.png"
+);
 
-const TODO_FILES: [&str; 3] = ["toodle_top.txt", "toodle_second.txt", "toodle_third.txt"];
-const DONE_TODOS_PATH: &str = "toodle_done.txt";
+const TODO_FILES: [&str; 3] = [
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_top.txt"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_second.txt"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_third.txt"),
+];
+const DONE_TODOS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_done.txt");
 const PAGE_OFFSET_X: usize = 14;
 const ERASER_X: usize = 0;
 const ERASER_Y: usize = 21;
@@ -166,7 +173,7 @@ impl Toodle {
         } else {
             text_color
         };
-        for line in 0..LINE_COUNT {
+        for (line, _) in LINE_Y.iter().enumerate().take(LINE_COUNT) {
             let todo = &self.todos[logical_page].items[line];
             if todo.checked {
                 self.draw_check(fb, palette, logical_page, line);
@@ -296,8 +303,9 @@ impl Toodle {
     fn archive_completed_todos(&mut self) -> Result<(), Box<dyn Error>> {
         let mut archived = Vec::new();
         let mut changed_pages = [false; 3];
+        let mut staged_pages = self.todos.clone();
 
-        for (page_index, page) in self.todos.iter_mut().enumerate() {
+        for (page_index, page) in staged_pages.iter_mut().enumerate() {
             let mut remaining = Vec::new();
             for item in page.items.iter().cloned() {
                 if item.checked {
@@ -316,23 +324,39 @@ impl Toodle {
             }
         }
 
+        let mut done_text = if Path::new(DONE_TODOS_PATH).exists() {
+            fs::read_to_string(DONE_TODOS_PATH)?
+        } else {
+            String::new()
+        };
         if !archived.is_empty() {
-            let archived_count = archived.len();
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(DONE_TODOS_PATH)?;
-            for todo in archived {
-                writeln!(file, "{todo}")?;
+            if !done_text.is_empty() && !done_text.ends_with('\n') {
+                done_text.push('\n');
             }
-            self.done_count += archived_count;
+            for todo in &archived {
+                done_text.push_str(todo);
+                done_text.push('\n');
+            }
         }
 
+        let mut staged_writes = Vec::new();
+        if !archived.is_empty() {
+            staged_writes.push(AtomicWrite::stage(DONE_TODOS_PATH, done_text.into_bytes())?);
+        }
         for (page_index, changed) in changed_pages.into_iter().enumerate() {
             if changed {
-                self.todos[page_index].save(TODO_FILES[page_index])?;
+                staged_writes.push(AtomicWrite::stage(
+                    TODO_FILES[page_index],
+                    staged_pages[page_index].serialized_text().into_bytes(),
+                )?);
             }
         }
+        for staged_write in staged_writes {
+            staged_write.commit()?;
+        }
+
+        self.todos = staged_pages;
+        self.done_count += archived.len();
 
         Ok(())
     }
@@ -494,15 +518,58 @@ impl TodoPage {
     }
 
     fn save(&self, path: &str) -> Result<(), Box<dyn Error>> {
+        atomic_write(path, self.serialized_text().as_bytes())?;
+        Ok(())
+    }
+
+    fn serialized_text(&self) -> String {
         let text = self
             .items
             .iter()
             .map(TodoItem::serialize)
             .collect::<Vec<_>>()
             .join("\n");
-        fs::write(path, format!("{text}\n"))?;
+        format!("{text}\n")
+    }
+}
+
+struct AtomicWrite {
+    path: String,
+    temp_path: String,
+}
+
+impl AtomicWrite {
+    fn stage(path: &str, contents: impl AsRef<[u8]>) -> Result<Self, Box<dyn Error>> {
+        let temp_path = format!("{path}.tmp.{}", std::process::id());
+        {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&temp_path)?;
+            file.write_all(contents.as_ref())?;
+            file.sync_all()?;
+        }
+        Ok(Self {
+            path: path.to_string(),
+            temp_path,
+        })
+    }
+
+    fn commit(self) -> Result<(), Box<dyn Error>> {
+        fs::rename(&self.temp_path, &self.path)?;
         Ok(())
     }
+}
+
+impl Drop for AtomicWrite {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.temp_path);
+    }
+}
+
+fn atomic_write(path: &str, contents: &[u8]) -> Result<(), Box<dyn Error>> {
+    AtomicWrite::stage(path, contents)?.commit()
 }
 
 #[derive(Clone, Default)]
@@ -701,6 +768,7 @@ fn mapped_page_color(page_color: PageColor, source_color: usize) -> usize {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_todo_text(
     fb: &mut Framebuffer,
     font: &BitmapFont,
@@ -761,7 +829,7 @@ fn draw_tinted_scaled_region(
 
 fn checkbox_at(x: usize, y: usize) -> Option<usize> {
     CHECK_Y.iter().position(|&check_y| {
-        x >= CHECK_X && x < CHECK_X + CHECK_W && y >= check_y && y < check_y + CHECK_H
+        (CHECK_X..CHECK_X + CHECK_W).contains(&x) && (check_y..check_y + CHECK_H).contains(&y)
     })
 }
 
@@ -798,5 +866,31 @@ fn pencil_cursor_position(font: &BitmapFont, line: usize, text: &str) -> (usize,
             TEXT_X + font.text_width(&lines[1]).min(max_text_width(line)),
             base_y + WRAPPED_SECOND_LINE_OFFSET_Y,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn todo_item_round_trips_checked_items() {
+        let item = TodoItem::parse("[x] ship the tiny desktop");
+
+        assert!(item.checked);
+        assert_eq!(item.text, "ship the tiny desktop");
+        assert_eq!(item.serialize(), "[x] ship the tiny desktop");
+    }
+
+    #[test]
+    fn todo_page_serializes_fixed_line_count() {
+        let mut page = TodoPage {
+            items: std::array::from_fn(|_| TodoItem::default()),
+        };
+        page.items[0] = TodoItem::parse("[x] done");
+        page.items[1] = TodoItem::parse("next");
+
+        assert_eq!(page.serialized_text().lines().count(), LINE_COUNT);
+        assert!(page.serialized_text().starts_with("[x] done\nnext\n"));
     }
 }

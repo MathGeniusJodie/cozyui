@@ -20,7 +20,15 @@ pub(crate) struct BitmapFont {
 
 impl BitmapFont {
     pub(crate) fn load(spec: &'static FontSpec) -> Result<Self, Box<dyn Error>> {
-        let (width, _height, pixels) = decode_png_with_size(spec.atlas_path)?;
+        let (width, height, pixels) = decode_png_with_size(spec.atlas_path)?;
+        let rows = 128_usize.div_ceil(spec.cols);
+        if width < spec.cols * spec.cell_w || height < rows * spec.cell_h {
+            return Err(format!(
+                "font atlas {} is too small for {}x{} cells in {} columns",
+                spec.atlas_path, spec.cell_w, spec.cell_h, spec.cols
+            )
+            .into());
+        }
         let pixels = pixels.into_iter().map(is_glyph_ink).collect();
         Ok(Self {
             spec,
@@ -66,6 +74,7 @@ impl BitmapFont {
         self.draw_text_limited(fb, text, x, y, scale, color, usize::MAX);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_text_limited(
         &self,
         fb: &mut Framebuffer,

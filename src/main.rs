@@ -22,7 +22,7 @@ mod text_input;
 mod text_wrap;
 mod toodle;
 
-const PALETTE_PATH: &str = "na16-1x.png";
+const PALETTE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/na16-1x.png");
 
 #[allow(dead_code)]
 pub(crate) mod palette_color {
@@ -116,6 +116,14 @@ pub(crate) struct Image {
 impl Image {
     pub(crate) fn load(path: &str, palette: &Palette) -> Result<Self, Box<dyn Error>> {
         let (width, height, pixels) = decode_png_with_size(path)?;
+        if pixels.len() != width * height {
+            return Err(format!(
+                "PNG pixel count mismatch for {path}: got {}, expected {}",
+                pixels.len(),
+                width * height
+            )
+            .into());
+        }
         let pixels = pixels
             .into_iter()
             .map(|color| {
@@ -177,6 +185,7 @@ impl Framebuffer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_scaled_region(
         &mut self,
         image: &Image,
@@ -354,6 +363,11 @@ pub(crate) fn decode_png_with_size(
             let trns = reader.info().trns.as_deref().unwrap_or(&[]);
             for &idx in bytes {
                 let base = idx as usize * 3;
+                if base + 2 >= palette.len() {
+                    return Err(
+                        format!("indexed PNG palette index {idx} out of bounds in {path}").into(),
+                    );
+                }
                 let a = trns.get(idx as usize).copied().unwrap_or(255);
                 pixels.push(Rgba {
                     r: palette[base],
@@ -623,16 +637,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut running = true;
     while running {
+        let mut drew_frame = false;
         let terminal_events = app.drain_events();
         running = terminal_events.running;
         if terminal_events.dirty {
             app.render_puter(&mut fb, &palette);
             xwin.draw(&fb)?;
+            drew_frame = true;
         }
 
         if app.drain_replies() {
             app.render_fwends(&mut fb, &palette);
             xwin.draw(&fb)?;
+            drew_frame = true;
         }
 
         while let Some(event) = xwin.conn.poll_for_event()? {
@@ -640,27 +657,32 @@ fn main() -> Result<(), Box<dyn Error>> {
                 XEvent::Expose(_) => {
                     app.render(&mut fb, &palette);
                     xwin.draw(&fb)?;
+                    drew_frame = true;
                 }
                 XEvent::KeyPress(event) => {
                     app.handle_key_press(event.detail, event.state.into())?;
                     app.render_focused_widget(&mut fb, &palette);
                     xwin.draw(&fb)?;
+                    drew_frame = true;
                 }
                 XEvent::ButtonPress(event) => match event.detail {
                     WHEEL_UP => {
                         app.scroll_up(event.event_x, event.event_y);
                         app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
+                        drew_frame = true;
                     }
                     WHEEL_DOWN => {
                         app.scroll_down(event.event_x, event.event_y);
                         app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
+                        drew_frame = true;
                     }
                     detail if detail == ButtonIndex::M1.into() => {
                         app.click(event.event_x, event.event_y)?;
                         app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
+                        drew_frame = true;
                     }
                     _ => {}
                 },
@@ -669,12 +691,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         app.release(event.event_x, event.event_y);
                         app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
+                        drew_frame = true;
                     }
                 }
                 XEvent::MotionNotify(event) => {
                     if app.motion(event.event_x, event.event_y) {
                         app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
+                        drew_frame = true;
                     }
                 }
                 XEvent::DestroyNotify(_) => running = false,
@@ -682,7 +706,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        std::thread::sleep(Duration::from_millis(4));
+        std::thread::sleep(Duration::from_millis(if drew_frame { 1 } else { 16 }));
     }
 
     app.shutdown();

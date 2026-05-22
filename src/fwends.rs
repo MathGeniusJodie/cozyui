@@ -1,7 +1,8 @@
 use std::env;
 use std::error::Error;
 use std::fs;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -46,11 +47,12 @@ const STICKY_BOTTOM_CAP: usize = 20;
 const SCROLL_STEP: usize = 24;
 const LINE_H: usize = 16;
 const MAX_INPUT_CHARS: usize = 96;
-const SYSTEM_PROMPT_PATH: &str = "fwends_system_prompt.txt";
+const SYSTEM_PROMPT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fwends_system_prompt.txt");
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const FOCUS_PENCIL_PATH: &str = "assets/focus_pencil.png";
-const USER_STICKY_PATH: &str = "assets/sticky.png";
-const INPUT_STICKY_PATH: &str = "assets/sticky_stack.png";
+const REQUEST_TIMEOUT_SECS: &str = "30";
+const FOCUS_PENCIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/focus_pencil.png");
+const USER_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky.png");
+const INPUT_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky_stack.png");
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
 
@@ -59,25 +61,25 @@ const MODELS: [Model; 4] = [
         _name: "Claude",
         id: "anthropic/claude-haiku-4.5",
         _think_id: "anthropic/claude-opus-4.5",
-        asset_path: "assets/claw.png",
+        asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/claw.png"),
     },
     Model {
         _name: "DeepSeek",
         id: "deepseek/deepseek-v4-flash",
         _think_id: "deepseek/deepseek-v4-pro",
-        asset_path: "assets/deep.png",
+        asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/deep.png"),
     },
     Model {
         _name: "Qwen",
         id: "qwen/qwen3.6-35b-a3b",
         _think_id: "qwen/qwen3.6-plus",
-        asset_path: "assets/qwen.png",
+        asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/qwen.png"),
     },
     Model {
         _name: "Kimi",
         id: "moonshotai/kimi-k2.6",
         _think_id: "moonshotai/kimi-k2.6",
-        asset_path: "assets/kimi.png",
+        asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/kimi.png"),
     },
 ];
 
@@ -113,17 +115,24 @@ impl Fwends {
             .map(|avatar| avatar.height)
             .max()
             .unwrap_or(1);
+        let selected_model = 0;
 
         Ok(Self {
             avatars,
-            bubble: Image::load("assets/bubble.png", palette)?,
+            bubble: Image::load(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/assets/bubble.png"),
+                palette,
+            )?,
             user_sticky: Image::load(USER_STICKY_PATH, palette)?,
             input_sticky: Image::load(INPUT_STICKY_PATH, palette)?,
             pencil: Image::load(FOCUS_PENCIL_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
-            messages: vec![Message::assistant("pick a fwend and say hi".to_string())],
+            messages: vec![Message::assistant(
+                "pick a fwend and say hi".to_string(),
+                selected_model,
+            )],
             input: String::new(),
-            selected_model: 0,
+            selected_model,
             focused: false,
             scroll_y: 0,
             model_slot_w,
@@ -238,7 +247,8 @@ impl Fwends {
             self.scroll_to_bottom();
             return true;
         }
-        self.messages.push(Message::assistant(text));
+        self.messages
+            .push(Message::assistant(text, self.selected_model));
         self.scroll_to_bottom();
         true
     }
@@ -269,10 +279,12 @@ impl Fwends {
 
         self.input.clear();
         self.messages.push(Message::user(text.clone()));
-        self.messages.push(Message::assistant("...".to_string()));
+        let selected_model = self.selected_model;
+        self.messages
+            .push(Message::assistant("...".to_string(), selected_model));
         self.scroll_to_bottom();
 
-        let model = MODELS[self.selected_model].id.to_string();
+        let model = MODELS[selected_model].id.to_string();
         let system_prompt = self.system_prompt.clone();
         let history = request_history(&self.messages);
         let (tx, rx) = mpsc::channel();
@@ -334,7 +346,7 @@ impl Fwends {
             }
 
             if !layout.from_user {
-                self.draw_speaker_avatar(fb, y, layout.h);
+                self.draw_speaker_avatar(fb, y, layout.h, layout.model_index);
             }
             self.draw_bubble(fb, layout.x, y, layout.w, layout.h, layout.from_user);
             let text_x = layout.x + message_pad_left(layout.from_user);
@@ -432,6 +444,7 @@ impl Fwends {
             };
             layouts.push(MessageLayout {
                 from_user: message.from_user,
+                model_index: message.model_index,
                 lines,
                 x,
                 y,
@@ -447,8 +460,14 @@ impl Fwends {
         PAD + self.model_slot_w + SPEAKER_GAP
     }
 
-    fn draw_speaker_avatar(&self, fb: &mut Framebuffer, bubble_y: isize, bubble_h: usize) {
-        let avatar = &self.avatars[self.selected_model];
+    fn draw_speaker_avatar(
+        &self,
+        fb: &mut Framebuffer,
+        bubble_y: isize,
+        bubble_h: usize,
+        model_index: usize,
+    ) {
+        let avatar = &self.avatars[model_index.min(self.avatars.len() - 1)];
         let avatar_x = PAD + self.model_slot_w.saturating_sub(avatar.width) / 2;
         let avatar_y = bubble_y + bubble_h as isize - avatar.height as isize;
         let clip_top = CHAT_Y as isize;
@@ -566,10 +585,12 @@ struct Message {
     role: Role,
     text: String,
     from_user: bool,
+    model_index: usize,
 }
 
 struct MessageLayout {
     from_user: bool,
+    model_index: usize,
     lines: Vec<String>,
     x: usize,
     y: usize,
@@ -583,14 +604,16 @@ impl Message {
             role: Role::User,
             text,
             from_user: true,
+            model_index: 0,
         }
     }
 
-    fn assistant(text: String) -> Self {
+    fn assistant(text: String, model_index: usize) -> Self {
         Self {
             role: Role::Assistant,
             text,
             from_user: false,
+            model_index,
         }
     }
 }
@@ -623,26 +646,53 @@ fn send_openrouter_request(
     let api_key =
         env::var("OPENROUTER_API_KEY").map_err(|_| "OPENROUTER_API_KEY is not set".to_string())?;
     let body = chat_body(model, system_prompt, history, latest_text);
-    let output = Command::new("curl")
+    let mut child = Command::new("curl")
         .args([
             "-sS",
-            OPENROUTER_URL,
-            "-H",
-            &format!("Authorization: Bearer {api_key}"),
-            "-H",
-            "Content-Type: application/json",
-            "-d",
+            "--max-time",
+            REQUEST_TIMEOUT_SECS,
+            "--config",
+            "-",
+            "--data-binary",
             &body,
         ])
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("curl failed: {err}"))?;
+    let config = format!(
+        "url = \"{}\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\n",
+        OPENROUTER_URL,
+        curl_config_escape(&api_key)
+    );
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "curl stdin was not available".to_string())?;
+    stdin
+        .write_all(config.as_bytes())
+        .map_err(|err| format!("curl config write failed: {err}"))?;
+    drop(stdin);
+    let output = child
+        .wait_with_output()
         .map_err(|err| format!("curl failed: {err}"))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(if stderr.trim().is_empty() {
+            format!("OpenRouter request failed with status {}", output.status)
+        } else {
+            stderr.trim().to_string()
+        });
     }
 
     let response = String::from_utf8_lossy(&output.stdout);
     extract_content(&response).ok_or_else(|| compact_error(&response))
+}
+
+fn curl_config_escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text: &str) -> String {
@@ -692,22 +742,30 @@ fn json_escape(text: &str) -> String {
 }
 
 fn extract_content(json: &str) -> Option<String> {
-    let key = "\"content\"";
-    let mut offset = 0;
-    while let Some(found) = json[offset..].find(key) {
-        let start = offset + found + key.len();
-        let after_colon = json[start..].find(':')? + start + 1;
-        let value_start = json[after_colon..].find('"')? + after_colon + 1;
-        if let Some((value, end)) = parse_json_string(&json[value_start..]) {
-            if !value.trim().is_empty() {
-                return Some(value);
-            }
-            offset = value_start + end;
-        } else {
-            offset = value_start;
+    let choices = find_json_key(json, "choices", 0)?;
+    let message = find_json_key(json, "message", choices)?;
+    let content = find_json_key(json, "content", message)?;
+    string_value_at(json, content).filter(|value| !value.trim().is_empty())
+}
+
+fn find_json_key(json: &str, key: &str, offset: usize) -> Option<usize> {
+    let needle = format!("\"{}\"", json_escape(key));
+    let mut cursor = offset;
+    while let Some(found) = json[cursor..].find(&needle) {
+        let key_start = cursor + found;
+        let after_key = key_start + needle.len();
+        if json[after_key..].trim_start().starts_with(':') {
+            return Some(after_key);
         }
+        cursor = after_key;
     }
     None
+}
+
+fn string_value_at(json: &str, key_end: usize) -> Option<String> {
+    let after_colon = json[key_end..].find(':')? + key_end + 1;
+    let value_start = json[after_colon..].find('"')? + after_colon + 1;
+    parse_json_string(&json[value_start..]).map(|(value, _)| value)
 }
 
 fn parse_json_string(text: &str) -> Option<(String, usize)> {
@@ -853,7 +911,7 @@ fn chat_contains(x: i16, y: i16) -> bool {
     }
     let x = x as usize / SCALE;
     let y = y as usize / SCALE;
-    x >= PAD && x < W - PAD && y >= CHAT_Y && y < CHAT_Y + CHAT_H
+    (PAD..W - PAD).contains(&x) && (CHAT_Y..CHAT_Y + CHAT_H).contains(&y)
 }
 
 fn message_pad_left(from_user: bool) -> usize {
@@ -949,4 +1007,21 @@ fn stretch_source_coord(
     let src_middle = src_len - start_cap - end_cap;
     let dest_middle = dest_len - start_cap - end_cap;
     start_cap + (dest - start_cap) * src_middle / dest_middle
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_assistant_message_content() {
+        let json = r#"{"content":"wrong","choices":[{"message":{"role":"assistant","content":"hello\nthere"}}]}"#;
+
+        assert_eq!(extract_content(json).as_deref(), Some("hello there"));
+    }
+
+    #[test]
+    fn escapes_json_control_characters() {
+        assert_eq!(json_escape("a\"\n\\b"), "a\\\"\\n\\\\b");
+    }
 }

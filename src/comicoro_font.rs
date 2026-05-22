@@ -2,7 +2,8 @@
 // units_per_pixel=64, range=U+0020..U+007E
 use crate::bitmap_font::FontSpec;
 
-pub(crate) const COMICORO_ATLAS_PATH: &str = "assets/comicoro_ascii.png";
+pub(crate) const COMICORO_ATLAS_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/comicoro_ascii.png");
 pub(crate) const COMICORO_CELL_W: usize = 10;
 pub(crate) const COMICORO_CELL_H: usize = 15;
 pub(crate) const COMICORO_COLS: usize = 16;

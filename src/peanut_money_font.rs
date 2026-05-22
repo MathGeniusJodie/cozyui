@@ -2,7 +2,8 @@
 // units_per_pixel=64, range=U+0020..U+007E
 use crate::bitmap_font::FontSpec;
 
-pub(crate) const PEANUT_MONEY_ATLAS_PATH: &str = "assets/peanut_money_ascii.png";
+pub(crate) const PEANUT_MONEY_ATLAS_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/peanut_money_ascii.png");
 pub(crate) const PEANUT_MONEY_CELL_W: usize = 12;
 pub(crate) const PEANUT_MONEY_CELL_H: usize = 14;
 pub(crate) const PEANUT_MONEY_COLS: usize = 16;
