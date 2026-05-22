@@ -1,6 +1,6 @@
 [x] advance the secret chicken agenda
-sddssashqushuqhsufwfwf
-mew
-edge
-goon
+[x] sddssashqushuqhsufwfwf
+[x] mew
+[x] edge
+[x] goon
 

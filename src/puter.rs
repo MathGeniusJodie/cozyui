@@ -15,8 +15,8 @@ use alacritty_terminal::tty;
 use crate::palette_color;
 use crate::{Framebuffer, Image, Palette, Rgba, decode_png_with_size};
 
-const BG_SCALE: usize = 2;
-const GLYPH_SCALE: usize = 2;
+const BG_SCALE: usize = 1;
+const GLYPH_SCALE: usize = 1;
 const GLYPH_W: usize = 6;
 const GLYPH_H: usize = 12;
 
@@ -142,7 +142,7 @@ impl Puter {
         Ok(())
     }
 
-    pub(crate) fn drain_terminal_events(&self) -> bool {
+    pub(crate) fn drain_terminal_events(&self) -> TerminalEvents {
         self.terminal().drain_events()
     }
 
@@ -346,9 +346,11 @@ impl Terminal {
         &self.term
     }
 
-    fn drain_events(&self) -> bool {
+    fn drain_events(&self) -> TerminalEvents {
         let mut running = true;
+        let mut dirty = false;
         while let Ok(event) = self.rx.try_recv() {
+            dirty = true;
             match event {
                 Event::Exit | Event::ChildExit(_) => running = false,
                 Event::PtyWrite(text) => {
@@ -361,7 +363,7 @@ impl Terminal {
                 _ => {}
             }
         }
-        running
+        TerminalEvents { running, dirty }
     }
 
     fn handle_key_press(&self, keycode: u8, state: u16) {
@@ -383,6 +385,11 @@ impl Terminal {
             let _ = event_thread.join();
         }
     }
+}
+
+pub(crate) struct TerminalEvents {
+    pub(crate) running: bool,
+    pub(crate) dirty: bool,
 }
 
 #[derive(Clone, Copy)]

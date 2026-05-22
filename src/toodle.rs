@@ -9,7 +9,7 @@ use crate::peanut_money_font;
 use crate::text_input::{EditKey, edit_key};
 use crate::{Framebuffer, Image, Palette, Rgba};
 
-const SCALE: usize = 2;
+const SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
 const LINE_COUNT: usize = 6;
 const CHECK_VARIANTS: usize = 4;

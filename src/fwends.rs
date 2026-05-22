@@ -821,7 +821,7 @@ fn push_display_char(out: &mut String, ch: char) {
         '😐' | '😑' | '😶' => out.push_str(":|"),
         '😕' | '🙁' | '☹' => out.push_str(":/"),
         '😭' => out.push_str("D;"),
-        '😞' | '😢'  => out.push_str(";("),
+        '😞' | '😢' => out.push_str(";("),
         '😮' | '😲' => out.push_str(":o"),
         '😎' => out.push_str("B)"),
         '👍' => out.push_str("+1"),

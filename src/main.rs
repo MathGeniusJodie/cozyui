@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::Event as XEvent;
@@ -475,7 +475,12 @@ impl App {
 
     fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
+        self.render_puter(fb, palette);
+        self.render_toodle(fb, palette);
+        self.render_fwends(fb, palette);
+    }
 
+    fn render_puter(&self, fb: &mut Framebuffer, palette: &Palette) {
         let mut puter_fb = Framebuffer::new(
             self.puter_rect.w,
             self.puter_rect.h,
@@ -483,7 +488,9 @@ impl App {
         );
         self.puter.render(&mut puter_fb, palette);
         fb.blit_from(&puter_fb, self.puter_rect.x, self.puter_rect.y);
+    }
 
+    fn render_toodle(&self, fb: &mut Framebuffer, palette: &Palette) {
         let mut toodle_fb = Framebuffer::new(
             self.toodle_rect.w,
             self.toodle_rect.h,
@@ -491,7 +498,9 @@ impl App {
         );
         self.toodle.render(&mut toodle_fb, palette);
         fb.blit_from(&toodle_fb, self.toodle_rect.x, self.toodle_rect.y);
+    }
 
+    fn render_fwends(&self, fb: &mut Framebuffer, palette: &Palette) {
         let mut fwends_fb = Framebuffer::new(
             self.fwends_rect.w,
             self.fwends_rect.h,
@@ -501,7 +510,15 @@ impl App {
         fb.blit_from(&fwends_fb, self.fwends_rect.x, self.fwends_rect.y);
     }
 
-    fn drain_events(&self) -> bool {
+    fn render_focused_widget(&self, fb: &mut Framebuffer, palette: &Palette) {
+        match self.focus {
+            FocusedWidget::Puter => self.render_puter(fb, palette),
+            FocusedWidget::Toodle => self.render_toodle(fb, palette),
+            FocusedWidget::Fwends => self.render_fwends(fb, palette),
+        }
+    }
+
+    fn drain_events(&self) -> puter::TerminalEvents {
         self.puter.drain_terminal_events()
     }
 
@@ -604,12 +621,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     app.render(&mut fb, &palette);
     xwin.draw(&fb)?;
 
-    let mut last_draw = Instant::now();
     let mut running = true;
     while running {
-        running = app.drain_events();
+        let terminal_events = app.drain_events();
+        running = terminal_events.running;
+        if terminal_events.dirty {
+            app.render_puter(&mut fb, &palette);
+            xwin.draw(&fb)?;
+        }
+
         if app.drain_replies() {
-            app.render(&mut fb, &palette);
+            app.render_fwends(&mut fb, &palette);
             xwin.draw(&fb)?;
         }
 
@@ -621,7 +643,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 XEvent::KeyPress(event) => {
                     app.handle_key_press(event.detail, event.state.into())?;
-                    app.render(&mut fb, &palette);
+                    app.render_focused_widget(&mut fb, &palette);
                     xwin.draw(&fb)?;
                 }
                 XEvent::ButtonPress(event) => match event.detail {
@@ -658,12 +680,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 XEvent::DestroyNotify(_) => running = false,
                 _ => {}
             }
-        }
-
-        if last_draw.elapsed() >= Duration::from_millis(16) {
-            app.render(&mut fb, &palette);
-            xwin.draw(&fb)?;
-            last_draw = Instant::now();
         }
 
         std::thread::sleep(Duration::from_millis(4));
