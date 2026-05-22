@@ -77,6 +77,7 @@ const MODELS: [Model; 4] = [
         _name: "Qwen",
         id: "qwen/qwen3.6-35b-a3b",
         _think_id: "qwen/qwen3.6-plus",
+        //_think_id: "qwen/qwen3.7-max",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/qwen.png"),
     },
     Model {
