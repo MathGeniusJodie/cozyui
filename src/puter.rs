@@ -630,7 +630,7 @@ fn key_bytes(input: &KeyInput) -> Option<String> {
     if input.ctrl()
         && let Some(byte) = control_byte(input)
     {
-        return Some(String::from_utf8(vec![byte]).ok()?);
+        return String::from_utf8(vec![byte]).ok();
     }
 
     let text = match input.sym_raw() {

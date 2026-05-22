@@ -1,10 +1,14 @@
 use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
 use std::time::Duration;
 
+use memmap2::MmapMut;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event as XEvent;
+use x11rb::protocol::shm::{ConnectionExt as ShmConnectionExt, Seg};
 use x11rb::protocol::xproto::ConnectionExt as XprotoConnectionExt;
 use x11rb::protocol::xproto::{
     AtomEnum, ButtonIndex, ChangeWindowAttributesAux, CreateGCAux, CreateWindowAux, EventMask,
@@ -227,9 +231,19 @@ impl Framebuffer {
     }
 
     pub(crate) fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: Rgba) {
-        for py in y..(y + h).min(self.height) {
-            for px in x..(x + w).min(self.width) {
-                self.set_pixel(px, py, color);
+        if x >= self.width || y >= self.height {
+            return;
+        }
+
+        let width = w.min(self.width - x);
+        let height = h.min(self.height - y);
+        let color = Self::color_bytes(color);
+        for py in y..y + height {
+            for pixel in self
+                .row_bytes_mut(py, x, width)
+                .chunks_exact_mut(Self::BYTES_PER_PIXEL)
+            {
+                pixel.copy_from_slice(&color);
             }
         }
     }
@@ -277,6 +291,13 @@ struct XWindow {
     gc: Gcontext,
     depth: u8,
     keyboard: text_input::Keyboard,
+    upload_buffer: Vec<u8>,
+    shm_image: Option<ShmImage>,
+}
+
+struct ShmImage {
+    seg: Seg,
+    mmap: MmapMut,
 }
 
 impl XWindow {
@@ -334,6 +355,7 @@ impl XWindow {
         conn.map_window(window)?;
         conn.flush()?;
         let keyboard = text_input::Keyboard::new(&conn)?;
+        let shm_image = Self::open_shm_image(&conn, width, height).ok();
 
         Ok(Self {
             conn,
@@ -341,10 +363,64 @@ impl XWindow {
             gc,
             depth,
             keyboard,
+            upload_buffer: Vec::new(),
+            shm_image,
         })
     }
 
-    fn draw(&self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
+    #[cfg(unix)]
+    fn open_shm_image(
+        conn: &XCBConnection,
+        width: usize,
+        height: usize,
+    ) -> Result<ShmImage, Box<dyn Error>> {
+        let version = conn.shm_query_version()?.reply()?;
+        if version.major_version < 1 || (version.major_version == 1 && version.minor_version < 2) {
+            return Err("MIT-SHM is too old for fd-backed segments".into());
+        }
+
+        let seg = conn.generate_id()?;
+        let size = (width * height * Framebuffer::BYTES_PER_PIXEL) as u32;
+        let reply = conn.shm_create_segment(seg, size, false)?.reply()?;
+        let fd: OwnedFd = reply.shm_fd;
+        let file = File::from(fd);
+        let mmap = unsafe { MmapMut::map_mut(&file)? };
+        Ok(ShmImage { seg, mmap })
+    }
+
+    #[cfg(not(unix))]
+    fn open_shm_image(
+        _conn: &XCBConnection,
+        _width: usize,
+        _height: usize,
+    ) -> Result<ShmImage, Box<dyn Error>> {
+        Err("MIT-SHM fd passing requires Unix".into())
+    }
+
+    fn draw(&mut self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
+        if let Some(shm_image) = &mut self.shm_image {
+            shm_image.mmap[..fb.ximage_bytes().len()].copy_from_slice(fb.ximage_bytes());
+            self.conn.shm_put_image(
+                self.window,
+                self.gc,
+                fb.width as u16,
+                fb.height as u16,
+                0,
+                0,
+                fb.width as u16,
+                fb.height as u16,
+                0,
+                0,
+                self.depth,
+                u8::from(ImageFormat::Z_PIXMAP),
+                false,
+                shm_image.seg,
+                0,
+            )?;
+            self.conn.flush()?;
+            return Ok(());
+        }
+
         let data = fb.ximage_bytes();
         self.conn.put_image(
             ImageFormat::Z_PIXMAP,
@@ -360,6 +436,79 @@ impl XWindow {
         )?;
         self.conn.flush()?;
         Ok(())
+    }
+
+    fn draw_rect(&mut self, fb: &Framebuffer, rect: Rect) -> Result<(), Box<dyn Error>> {
+        if rect.x == 0 && rect.y == 0 && rect.w == fb.width && rect.h == fb.height {
+            return self.draw(fb);
+        }
+
+        let byte_len = rect.w * rect.h * Framebuffer::BYTES_PER_PIXEL;
+        if let Some(shm_image) = &mut self.shm_image {
+            for y in 0..rect.h {
+                let dst_start = y * rect.w * Framebuffer::BYTES_PER_PIXEL;
+                let dst_end = dst_start + rect.w * Framebuffer::BYTES_PER_PIXEL;
+                shm_image.mmap[dst_start..dst_end].copy_from_slice(fb.row_bytes(
+                    rect.y + y,
+                    rect.x,
+                    rect.w,
+                ));
+            }
+            self.conn.shm_put_image(
+                self.window,
+                self.gc,
+                rect.w as u16,
+                rect.h as u16,
+                0,
+                0,
+                rect.w as u16,
+                rect.h as u16,
+                rect.x as i16,
+                rect.y as i16,
+                self.depth,
+                u8::from(ImageFormat::Z_PIXMAP),
+                false,
+                shm_image.seg,
+                0,
+            )?;
+            self.conn.flush()?;
+            return Ok(());
+        }
+
+        self.upload_buffer.resize(byte_len, 0);
+        for y in 0..rect.h {
+            let dst_start = y * rect.w * Framebuffer::BYTES_PER_PIXEL;
+            let dst_end = dst_start + rect.w * Framebuffer::BYTES_PER_PIXEL;
+            self.upload_buffer[dst_start..dst_end].copy_from_slice(fb.row_bytes(
+                rect.y + y,
+                rect.x,
+                rect.w,
+            ));
+        }
+
+        self.conn.put_image(
+            ImageFormat::Z_PIXMAP,
+            self.window,
+            self.gc,
+            rect.w as u16,
+            rect.h as u16,
+            rect.x as i16,
+            rect.y as i16,
+            0,
+            self.depth,
+            &self.upload_buffer,
+        )?;
+        self.conn.flush()?;
+        Ok(())
+    }
+}
+
+impl Drop for XWindow {
+    fn drop(&mut self) {
+        if let Some(shm_image) = &self.shm_image {
+            let _ = self.conn.shm_detach(shm_image.seg);
+            let _ = self.conn.flush();
+        }
     }
 }
 
@@ -438,7 +587,7 @@ fn color_distance(a: Rgba, b: Rgba) -> u32 {
 
 const WIDGET_GAP: usize = 16;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Rect {
     x: usize,
     y: usize,
@@ -469,6 +618,9 @@ struct App {
     puter: puter::Puter,
     toodle: toodle::Toodle,
     fwends: fwends::Fwends,
+    puter_fb: Framebuffer,
+    toodle_fb: Framebuffer,
+    fwends_fb: Framebuffer,
     puter_rect: Rect,
     toodle_rect: Rect,
     fwends_rect: Rect,
@@ -499,11 +651,17 @@ impl App {
             w: fwends.width(),
             h: fwends.height(),
         };
+        let puter_fb = Framebuffer::new(puter_rect.w, puter_rect.h, puter.fill_color(palette));
+        let toodle_fb = Framebuffer::new(toodle_rect.w, toodle_rect.h, toodle.fill_color(palette));
+        let fwends_fb = Framebuffer::new(fwends_rect.w, fwends_rect.h, fwends.fill_color(palette));
 
         Ok(Self {
             puter,
             toodle,
             fwends,
+            puter_fb,
+            toodle_fb,
+            fwends_fb,
             puter_rect,
             toodle_rect,
             fwends_rect,
@@ -533,48 +691,54 @@ impl App {
         self.puter.start_terminal(window_id)
     }
 
-    fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
         self.render_puter(fb, palette);
         self.render_toodle(fb, palette);
         self.render_fwends(fb, palette);
     }
 
-    fn render_puter(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let mut puter_fb = Framebuffer::new(
-            self.puter_rect.w,
-            self.puter_rect.h,
-            self.puter.fill_color(palette),
-        );
-        self.puter.render(&mut puter_fb, palette);
-        fb.blit_from(&puter_fb, self.puter_rect.x, self.puter_rect.y);
+    fn render_puter(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        self.puter_fb.clear(self.puter.fill_color(palette));
+        self.puter.render(&mut self.puter_fb, palette);
+        fb.blit_from(&self.puter_fb, self.puter_rect.x, self.puter_rect.y);
     }
 
-    fn render_toodle(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let mut toodle_fb = Framebuffer::new(
-            self.toodle_rect.w,
-            self.toodle_rect.h,
-            self.toodle.fill_color(palette),
-        );
-        self.toodle.render(&mut toodle_fb, palette);
-        fb.blit_from(&toodle_fb, self.toodle_rect.x, self.toodle_rect.y);
+    fn render_toodle(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        self.toodle_fb.clear(self.toodle.fill_color(palette));
+        self.toodle.render(&mut self.toodle_fb, palette);
+        fb.blit_from(&self.toodle_fb, self.toodle_rect.x, self.toodle_rect.y);
     }
 
-    fn render_fwends(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let mut fwends_fb = Framebuffer::new(
-            self.fwends_rect.w,
-            self.fwends_rect.h,
-            self.fwends.fill_color(palette),
-        );
-        self.fwends.render(&mut fwends_fb, palette);
-        fb.blit_from(&fwends_fb, self.fwends_rect.x, self.fwends_rect.y);
+    fn render_fwends(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        self.fwends_fb.clear(self.fwends.fill_color(palette));
+        self.fwends.render(&mut self.fwends_fb, palette);
+        fb.blit_from(&self.fwends_fb, self.fwends_rect.x, self.fwends_rect.y);
     }
 
-    fn render_focused_widget(&self, fb: &mut Framebuffer, palette: &Palette) {
+    fn render_focused_widget(&mut self, fb: &mut Framebuffer, palette: &Palette) {
         match self.focus {
             FocusedWidget::Puter => self.render_puter(fb, palette),
             FocusedWidget::Toodle => self.render_toodle(fb, palette),
             FocusedWidget::Fwends => self.render_fwends(fb, palette),
+        }
+    }
+
+    fn render_rect(&mut self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
+        if rect == self.puter_rect {
+            self.render_puter(fb, palette);
+        } else if rect == self.toodle_rect {
+            self.render_toodle(fb, palette);
+        } else if rect == self.fwends_rect {
+            self.render_fwends(fb, palette);
+        }
+    }
+
+    fn focused_rect(&self) -> Rect {
+        match self.focus {
+            FocusedWidget::Puter => self.puter_rect,
+            FocusedWidget::Toodle => self.toodle_rect,
+            FocusedWidget::Fwends => self.fwends_rect,
         }
     }
 
@@ -624,12 +788,15 @@ impl App {
         Ok(())
     }
 
-    fn release(&mut self, x: i16, y: i16) {
+    fn release(&mut self, x: i16, y: i16) -> bool {
         if self.puter_pressed {
             let (x, y) = self.puter_rect.local(x, y);
             self.puter.release_button(x, y);
             self.puter_pressed = false;
+            return true;
         }
+
+        false
     }
 
     fn motion(&mut self, x: i16, y: i16) -> bool {
@@ -641,28 +808,34 @@ impl App {
         }
     }
 
-    fn scroll_up(&mut self, x: i16, y: i16) {
+    fn scroll_up(&mut self, x: i16, y: i16) -> Option<Rect> {
         if self.fwends_rect.contains(x, y) {
             let (x, y) = self.fwends_rect.local(x, y);
             self.fwends.scroll_up(x, y);
-            return;
+            return Some(self.fwends_rect);
         }
 
         if self.puter_rect.contains(x, y) {
             self.puter.scroll_up();
+            return Some(self.puter_rect);
         }
+
+        None
     }
 
-    fn scroll_down(&mut self, x: i16, y: i16) {
+    fn scroll_down(&mut self, x: i16, y: i16) -> Option<Rect> {
         if self.fwends_rect.contains(x, y) {
             let (x, y) = self.fwends_rect.local(x, y);
             self.fwends.scroll_down(x, y);
-            return;
+            return Some(self.fwends_rect);
         }
 
         if self.puter_rect.contains(x, y) {
             self.puter.scroll_down();
+            return Some(self.puter_rect);
         }
+
+        None
     }
 
     fn shutdown(&mut self) {
@@ -688,13 +861,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         running = terminal_events.running;
         if terminal_events.dirty {
             app.render_puter(&mut fb, &palette);
-            xwin.draw(&fb)?;
+            xwin.draw_rect(&fb, app.puter_rect)?;
             drew_frame = true;
         }
 
         if app.drain_replies() {
             app.render_fwends(&mut fb, &palette);
-            xwin.draw(&fb)?;
+            xwin.draw_rect(&fb, app.fwends_rect)?;
             drew_frame = true;
         }
 
@@ -709,7 +882,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let input = xwin.keyboard.press(event.detail, event.state.into());
                     app.handle_key_press(&input)?;
                     app.render_focused_widget(&mut fb, &palette);
-                    xwin.draw(&fb)?;
+                    xwin.draw_rect(&fb, app.focused_rect())?;
                     drew_frame = true;
                 }
                 XEvent::KeyRelease(event) => {
@@ -717,37 +890,40 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 XEvent::ButtonPress(event) => match event.detail {
                     WHEEL_UP => {
-                        app.scroll_up(event.event_x, event.event_y);
-                        app.render(&mut fb, &palette);
-                        xwin.draw(&fb)?;
-                        drew_frame = true;
+                        if let Some(rect) = app.scroll_up(event.event_x, event.event_y) {
+                            app.render_rect(&mut fb, &palette, rect);
+                            xwin.draw_rect(&fb, rect)?;
+                            drew_frame = true;
+                        }
                     }
                     WHEEL_DOWN => {
-                        app.scroll_down(event.event_x, event.event_y);
-                        app.render(&mut fb, &palette);
-                        xwin.draw(&fb)?;
-                        drew_frame = true;
+                        if let Some(rect) = app.scroll_down(event.event_x, event.event_y) {
+                            app.render_rect(&mut fb, &palette, rect);
+                            xwin.draw_rect(&fb, rect)?;
+                            drew_frame = true;
+                        }
                     }
                     detail if detail == u8::from(ButtonIndex::M1) => {
                         app.click(event.event_x, event.event_y)?;
-                        app.render(&mut fb, &palette);
-                        xwin.draw(&fb)?;
+                        app.render_focused_widget(&mut fb, &palette);
+                        xwin.draw_rect(&fb, app.focused_rect())?;
                         drew_frame = true;
                     }
                     _ => {}
                 },
                 XEvent::ButtonRelease(event) => {
-                    if event.detail == u8::from(ButtonIndex::M1) {
-                        app.release(event.event_x, event.event_y);
-                        app.render(&mut fb, &palette);
-                        xwin.draw(&fb)?;
+                    if event.detail == u8::from(ButtonIndex::M1)
+                        && app.release(event.event_x, event.event_y)
+                    {
+                        app.render_puter(&mut fb, &palette);
+                        xwin.draw_rect(&fb, app.puter_rect)?;
                         drew_frame = true;
                     }
                 }
                 XEvent::MotionNotify(event) => {
                     if app.motion(event.event_x, event.event_y) {
-                        app.render(&mut fb, &palette);
-                        xwin.draw(&fb)?;
+                        app.render_toodle(&mut fb, &palette);
+                        xwin.draw_rect(&fb, app.toodle_rect)?;
                         drew_frame = true;
                     }
                 }
