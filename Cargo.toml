@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 alacritty_terminal = "0.26.0"
 png = "0.17"
+serde_json = "1"
 x11rb = "0.13"

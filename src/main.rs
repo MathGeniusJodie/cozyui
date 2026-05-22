@@ -678,7 +678,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         xwin.draw(&fb)?;
                         drew_frame = true;
                     }
-                    detail if detail == ButtonIndex::M1.into() => {
+                    detail if detail == u8::from(ButtonIndex::M1) => {
                         app.click(event.event_x, event.event_y)?;
                         app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
@@ -687,7 +687,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     _ => {}
                 },
                 XEvent::ButtonRelease(event) => {
-                    if event.detail == ButtonIndex::M1.into() {
+                    if event.detail == u8::from(ButtonIndex::M1) {
                         app.release(event.event_x, event.event_y);
                         app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;

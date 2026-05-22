@@ -1,16 +1,20 @@
 use std::env;
 use std::error::Error;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
 use crate::text_input::{EditKey, edit_key};
 use crate::{Framebuffer, Image, Palette, Rgba};
+use serde_json::{Value, json};
 
 const SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
@@ -646,25 +650,19 @@ fn send_openrouter_request(
     let api_key =
         env::var("OPENROUTER_API_KEY").map_err(|_| "OPENROUTER_API_KEY is not set".to_string())?;
     let body = chat_body(model, system_prompt, history, latest_text);
+    let body_file = CurlBodyFile::new(body.as_bytes())?;
     let mut child = Command::new("curl")
-        .args([
-            "-sS",
-            "--max-time",
-            REQUEST_TIMEOUT_SECS,
-            "--config",
-            "-",
-            "--data-binary",
-            &body,
-        ])
+        .args(["-sS", "--max-time", REQUEST_TIMEOUT_SECS, "--config", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("curl failed: {err}"))?;
     let config = format!(
-        "url = \"{}\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\n",
+        "url = \"{}\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\n",
         OPENROUTER_URL,
-        curl_config_escape(&api_key)
+        curl_config_escape(&api_key),
+        curl_config_escape(&body_file.path_string())
     );
     let mut stdin = child
         .stdin
@@ -688,162 +686,131 @@ fn send_openrouter_request(
     }
 
     let response = String::from_utf8_lossy(&output.stdout);
-    extract_content(&response).ok_or_else(|| compact_error(&response))
+    extract_content(&response).map_err(|err| format!("{err}: {}", compact_error(&response)))
 }
 
 fn curl_config_escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+struct CurlBodyFile {
+    path: PathBuf,
+}
+
+impl CurlBodyFile {
+    fn new(contents: &[u8]) -> Result<Self, String> {
+        let path = unique_temp_path();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|err| format!("request body temp file failed: {err}"))?;
+        file.write_all(contents)
+            .map_err(|err| format!("request body temp write failed: {err}"))?;
+        file.sync_all()
+            .map_err(|err| format!("request body temp sync failed: {err}"))?;
+        Ok(Self { path })
+    }
+
+    fn path_string(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for CurlBodyFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn unique_temp_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let mut path = env::temp_dir();
+    path.push(format!(
+        "cozyui-openrouter-{}-{}-{:?}.json",
+        std::process::id(),
+        nanos,
+        thread::current().id()
+    ));
+    path
+}
+
 fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text: &str) -> String {
-    let mut messages = vec![format!(
-        "{{\"role\":\"system\",\"content\":\"{}\"}}",
-        json_escape(system_prompt.trim())
-    )];
+    let mut messages = vec![json!({
+        "role": "system",
+        "content": system_prompt.trim(),
+    })];
     for message in history {
-        messages.push(format!(
-            "{{\"role\":\"{}\",\"content\":\"{}\"}}",
-            match message.role {
+        messages.push(json!({
+            "role": match message.role {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             },
-            json_escape(&message.text)
-        ));
+            "content": message.text,
+        }));
     }
     if history.last().map(|message| message.text.as_str()) != Some(latest_text) {
-        messages.push(format!(
-            "{{\"role\":\"user\",\"content\":\"{}\"}}",
-            json_escape(latest_text)
-        ));
+        messages.push(json!({
+            "role": "user",
+            "content": latest_text,
+        }));
     }
 
-    format!(
-        "{{\"model\":\"{}\",\"messages\":[{}],\"reasoning\":{{\"exclude\":true}},\"include_reasoning\":false}}",
-        json_escape(model),
-        messages.join(",")
-    )
+    json!({
+        "model": model,
+        "messages": messages,
+        "reasoning": { "exclude": true },
+        "include_reasoning": false,
+    })
+    .to_string()
 }
 
-fn json_escape(text: &str) -> String {
-    let mut out = String::new();
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if ch.is_control() => out.push(' '),
-            ch if ch.is_ascii() => out.push(ch),
-            _ => out.push('?'),
-        }
-    }
-    out
-}
-
-fn extract_content(json: &str) -> Option<String> {
-    let choices = find_json_key(json, "choices", 0)?;
-    let message = find_json_key(json, "message", choices)?;
-    let content = find_json_key(json, "content", message)?;
-    string_value_at(json, content).filter(|value| !value.trim().is_empty())
-}
-
-fn find_json_key(json: &str, key: &str, offset: usize) -> Option<usize> {
-    let needle = format!("\"{}\"", json_escape(key));
-    let mut cursor = offset;
-    while let Some(found) = json[cursor..].find(&needle) {
-        let key_start = cursor + found;
-        let after_key = key_start + needle.len();
-        if json[after_key..].trim_start().starts_with(':') {
-            return Some(after_key);
-        }
-        cursor = after_key;
-    }
-    None
-}
-
-fn string_value_at(json: &str, key_end: usize) -> Option<String> {
-    let after_colon = json[key_end..].find(':')? + key_end + 1;
-    let value_start = json[after_colon..].find('"')? + after_colon + 1;
-    parse_json_string(&json[value_start..]).map(|(value, _)| value)
-}
-
-fn parse_json_string(text: &str) -> Option<(String, usize)> {
-    let mut out = String::new();
-    let mut escaped = false;
-    let mut chars = text.char_indices();
-    while let Some((index, ch)) = chars.next() {
-        if escaped {
-            match ch {
-                '"' => out.push('"'),
-                '\\' => out.push('\\'),
-                '/' => out.push('/'),
-                'n' | 'r' => out.push(' '),
-                't' => out.push('\t'),
-                'u' => push_unicode_escape(&mut out, &mut chars),
-                other => out.push(other),
-            }
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            return Some((out, index + 1));
-        } else {
-            push_display_char(&mut out, ch);
-        }
-    }
-    None
-}
-
-fn push_unicode_escape(out: &mut String, chars: &mut std::str::CharIndices<'_>) {
-    let Some(code) = read_hex_escape(chars) else {
-        out.push('?');
-        return;
+fn extract_content(response: &str) -> Result<String, &'static str> {
+    let value: Value = serde_json::from_str(response).map_err(|_| "invalid OpenRouter JSON")?;
+    let Some(content) = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+    else {
+        return Err("OpenRouter response did not include assistant content");
     };
 
-    if (0xD800..=0xDBFF).contains(&code) {
-        let mut lookahead = chars.clone();
-        let Some((_, '\\')) = lookahead.next() else {
-            out.push('?');
-            return;
-        };
-        let Some((_, 'u')) = lookahead.next() else {
-            out.push('?');
-            return;
-        };
-        let Some(low) = read_hex_escape(&mut lookahead) else {
-            out.push('?');
-            return;
-        };
-        if !(0xDC00..=0xDFFF).contains(&low) {
-            out.push('?');
-            return;
-        }
-
-        *chars = lookahead;
-        let scalar = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-        if let Some(ch) = char::from_u32(scalar) {
-            push_display_char(out, ch);
-        } else {
-            out.push('?');
-        }
-        return;
-    }
-
-    if let Some(ch) = char::from_u32(code) {
-        push_display_char(out, ch);
+    let text = content_text(content);
+    if text.trim().is_empty() {
+        Err("OpenRouter assistant content was empty")
     } else {
-        out.push('?');
+        Ok(normalize_display_text(&text))
     }
 }
 
-fn read_hex_escape(chars: &mut std::str::CharIndices<'_>) -> Option<u32> {
-    let mut code = 0;
-    for _ in 0..4 {
-        let (_, ch) = chars.next()?;
-        code = code * 16 + ch.to_digit(16)?;
+fn content_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| part.get("content").and_then(Value::as_str))
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
     }
-    Some(code)
+}
+
+fn normalize_display_text(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        push_display_char(&mut out, ch);
+    }
+    out
 }
 
 fn push_display_char(out: &mut String, ch: char) {
@@ -1017,11 +984,14 @@ mod tests {
     fn extracts_assistant_message_content() {
         let json = r#"{"content":"wrong","choices":[{"message":{"role":"assistant","content":"hello\nthere"}}]}"#;
 
-        assert_eq!(extract_content(json).as_deref(), Some("hello there"));
+        assert_eq!(extract_content(json).as_deref(), Ok("hello there"));
     }
 
     #[test]
-    fn escapes_json_control_characters() {
-        assert_eq!(json_escape("a\"\n\\b"), "a\\\"\\n\\\\b");
+    fn chat_body_preserves_unicode_and_escapes_json() {
+        let body = chat_body("model", "system", &[], "hi \"there\" 🩷");
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(parsed["messages"][1]["content"], "hi \"there\" 🩷");
     }
 }
