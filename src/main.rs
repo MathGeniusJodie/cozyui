@@ -152,20 +152,68 @@ impl Image {
 pub(crate) struct Framebuffer {
     pub(crate) width: usize,
     pub(crate) height: usize,
-    pixels: Vec<Rgba>,
+    pixels: Vec<u8>,
 }
 
 impl Framebuffer {
+    const BYTES_PER_PIXEL: usize = 4;
+
     fn new(width: usize, height: usize, fill: Rgba) -> Self {
+        Self::new_filled(width, height, fill)
+    }
+
+    fn color_bytes(color: Rgba) -> [u8; Self::BYTES_PER_PIXEL] {
+        [color.b, color.g, color.r, 0]
+    }
+
+    fn pixel_offset(&self, x: usize, y: usize) -> usize {
+        (y * self.width + x) * Self::BYTES_PER_PIXEL
+    }
+
+    fn set_pixel(&mut self, x: usize, y: usize, color: Rgba) {
+        let offset = self.pixel_offset(x, y);
+        self.pixels[offset..offset + Self::BYTES_PER_PIXEL]
+            .copy_from_slice(&Self::color_bytes(color));
+    }
+
+    fn row_bytes(&self, y: usize, x: usize, width: usize) -> &[u8] {
+        let start = self.pixel_offset(x, y);
+        let end = start + width * Self::BYTES_PER_PIXEL;
+        &self.pixels[start..end]
+    }
+
+    fn row_bytes_mut(&mut self, y: usize, x: usize, width: usize) -> &mut [u8] {
+        let start = self.pixel_offset(x, y);
+        let end = start + width * Self::BYTES_PER_PIXEL;
+        &mut self.pixels[start..end]
+    }
+
+    fn ximage_bytes(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    fn filled_bytes(width: usize, height: usize, fill: Rgba) -> Vec<u8> {
+        let mut pixels = vec![0; width * height * Self::BYTES_PER_PIXEL];
+        let color = Self::color_bytes(fill);
+        for pixel in pixels.chunks_exact_mut(Self::BYTES_PER_PIXEL) {
+            pixel.copy_from_slice(&color);
+        }
+        pixels
+    }
+
+    fn new_filled(width: usize, height: usize, fill: Rgba) -> Self {
         Self {
             width,
             height,
-            pixels: vec![fill; width * height],
+            pixels: Self::filled_bytes(width, height, fill),
         }
     }
 
     pub(crate) fn clear(&mut self, color: Rgba) {
-        self.pixels.fill(color);
+        let color = Self::color_bytes(color);
+        for pixel in self.pixels.chunks_exact_mut(Self::BYTES_PER_PIXEL) {
+            pixel.copy_from_slice(&color);
+        }
     }
 
     pub(crate) fn clear_scaled(&mut self, image: &Image, scale: usize) {
@@ -173,7 +221,7 @@ impl Framebuffer {
             for x in 0..self.width {
                 let sx = (x / scale).min(image.width - 1);
                 let sy = (y / scale).min(image.height - 1);
-                self.pixels[y * self.width + x] = image.at(sx, sy);
+                self.set_pixel(x, y, image.at(sx, sy));
             }
         }
     }
@@ -181,7 +229,7 @@ impl Framebuffer {
     pub(crate) fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: Rgba) {
         for py in y..(y + h).min(self.height) {
             for px in x..(x + w).min(self.width) {
-                self.pixels[py * self.width + px] = color;
+                self.set_pixel(px, py, color);
             }
         }
     }
@@ -210,24 +258,16 @@ impl Framebuffer {
     }
 
     fn blit_from(&mut self, src: &Framebuffer, dest_x: usize, dest_y: usize) {
-        for y in 0..src.height {
-            for x in 0..src.width {
-                let px = dest_x + x;
-                let py = dest_y + y;
-                if px >= self.width || py >= self.height {
-                    continue;
-                }
-                self.pixels[py * self.width + px] = src.pixels[y * src.width + x];
-            }
+        if dest_x >= self.width || dest_y >= self.height {
+            return;
         }
-    }
 
-    fn ximage_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.width * self.height * 4);
-        for p in &self.pixels {
-            bytes.extend_from_slice(&[p.b, p.g, p.r, 0]);
+        let copy_width = src.width.min(self.width - dest_x);
+        let copy_height = src.height.min(self.height - dest_y);
+        for y in 0..copy_height {
+            self.row_bytes_mut(dest_y + y, dest_x, copy_width)
+                .copy_from_slice(src.row_bytes(y, 0, copy_width));
         }
-        bytes
     }
 }
 
@@ -316,7 +356,7 @@ impl XWindow {
             0,
             0,
             self.depth,
-            &data,
+            data,
         )?;
         self.conn.flush()?;
         Ok(())
