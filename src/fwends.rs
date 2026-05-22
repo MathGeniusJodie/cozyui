@@ -13,7 +13,7 @@ use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Image, Palette, Rgba};
+use crate::{Framebuffer, Image, Palette, Rect, Rgba};
 use serde_json::{Value, json};
 
 const SCALE: usize = 1;
@@ -62,28 +62,19 @@ const PENCIL_TIP_Y: usize = 24;
 
 const MODELS: [Model; 4] = [
     Model {
-        _name: "Claude",
         id: "anthropic/claude-haiku-4.5",
-        _think_id: "anthropic/claude-opus-4.5",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/claw.png"),
     },
     Model {
-        _name: "DeepSeek",
         id: "deepseek/deepseek-v4-flash",
-        _think_id: "deepseek/deepseek-v4-pro",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/deep.png"),
     },
     Model {
-        _name: "Qwen",
         id: "qwen/qwen3.6-35b-a3b",
-        _think_id: "qwen/qwen3.6-plus",
-        //_think_id: "qwen/qwen3.7-max",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/qwen.png"),
     },
     Model {
-        _name: "Kimi",
         id: "moonshotai/kimi-k2.6",
-        _think_id: "moonshotai/kimi-k2.6",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/kimi.png"),
     },
 ];
@@ -132,7 +123,7 @@ impl Fwends {
             input_sticky: Image::load(INPUT_STICKY_PATH, palette)?,
             pencil: Image::load(FOCUS_PENCIL_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
-            messages: vec![Message::assistant(
+            messages: vec![Message::intro(
                 "pick a fwend and say hi".to_string(),
                 selected_model,
             )],
@@ -241,10 +232,10 @@ impl Fwends {
             Err(err) => format!("oops: {err}"),
         };
         if let Some(message) = self.messages.last_mut()
-            && message.text == "..."
-            && !message.from_user
+            && message.kind == MessageKind::Pending
         {
             message.text = text;
+            message.kind = MessageKind::Normal;
             self.scroll_to_bottom();
             return true;
         }
@@ -281,8 +272,7 @@ impl Fwends {
         self.input.clear();
         self.messages.push(Message::user(text.clone()));
         let selected_model = self.selected_model;
-        self.messages
-            .push(Message::assistant("...".to_string(), selected_model));
+        self.messages.push(Message::pending(selected_model));
         self.scroll_to_bottom();
 
         let model = MODELS[selected_model].id.to_string();
@@ -319,14 +309,10 @@ impl Fwends {
 
         let avatar_x = x + self.model_slot_w.saturating_sub(avatar.width) / 2;
         let avatar_y = MODEL_Y + self.model_slot_h.saturating_sub(avatar.height);
-        fb.draw_scaled_region(
+        fb.draw_image(
             avatar,
-            0,
-            0,
-            avatar_x * SCALE,
-            avatar_y * SCALE,
-            avatar.width,
-            avatar.height,
+            (avatar_x * SCALE) as isize,
+            (avatar_y * SCALE) as isize,
             SCALE,
         );
     }
@@ -346,12 +332,12 @@ impl Fwends {
                 continue;
             }
 
-            if !layout.from_user {
+            if layout.style.show_avatar {
                 self.draw_speaker_avatar(fb, y, layout.h, layout.model_index);
             }
-            self.draw_bubble(fb, layout.x, y, layout.w, layout.h, layout.from_user);
-            let text_x = layout.x + message_pad_left(layout.from_user);
-            let mut text_y = y + message_pad_top(layout.from_user) as isize;
+            self.draw_bubble(fb, layout.x, y, layout.w, layout.h, layout.style);
+            let text_x = layout.x + layout.style.pad_left;
+            let mut text_y = y + layout.style.pad_top as isize;
             for line in layout.lines {
                 if text_y >= viewport_top as isize
                     && text_y + self.font.cell_h() as isize <= viewport_bottom as isize
@@ -377,10 +363,14 @@ impl Fwends {
         y: isize,
         w: usize,
         h: usize,
-        from_user: bool,
+        style: MessageStyle,
     ) {
         let clip_top = CHAT_Y;
         let clip_bottom = CHAT_Y + CHAT_H;
+        let image = match style.skin {
+            MessageSkin::Bubble => &self.bubble,
+            MessageSkin::Sticky => &self.user_sticky,
+        };
 
         for dy in 0..h {
             let py = y + dy as isize;
@@ -389,25 +379,8 @@ impl Fwends {
             }
             for dx in 0..w {
                 let px = x + dx;
-                let image = if from_user {
-                    &self.user_sticky
-                } else {
-                    &self.bubble
-                };
-                let sx = stretch_source_coord(
-                    dx,
-                    w,
-                    image.width,
-                    message_left_cap(from_user),
-                    message_right_cap(from_user),
-                );
-                let sy = stretch_source_coord(
-                    dy,
-                    h,
-                    image.height,
-                    message_top_cap(from_user),
-                    message_bottom_cap(from_user),
-                );
+                let sx = stretch_source_coord(dx, w, image.width, style.left_cap, style.right_cap);
+                let sy = stretch_source_coord(dy, h, image.height, style.top_cap, style.bottom_cap);
                 let color = image.at(sx, sy);
                 if color.a == 0 {
                     continue;
@@ -421,30 +394,24 @@ impl Fwends {
         let mut layouts = Vec::new();
         let mut y = 0;
         for message in &self.messages {
-            let max_text_w = BUBBLE_MAX_W
-                - message_pad_left(message.from_user)
-                - message_pad_right(message.from_user);
+            let style = message.style();
+            let max_text_w = BUBBLE_MAX_W - style.pad_left - style.pad_right;
             let lines = self.font.wrap_lines(&message.text, max_text_w);
             let text_w = lines
                 .iter()
                 .map(|line| self.font.text_width(line))
                 .max()
                 .unwrap_or(0);
-            let w = (text_w
-                + message_pad_left(message.from_user)
-                + message_pad_right(message.from_user))
-            .clamp(BUBBLE_MIN_W, BUBBLE_MAX_W);
-            let h = (lines.len() * LINE_H
-                + message_pad_top(message.from_user)
-                + message_pad_bottom(message.from_user))
-            .max(message_top_cap(message.from_user) + message_bottom_cap(message.from_user) + 1);
-            let x = if message.from_user {
+            let w = (text_w + style.pad_left + style.pad_right).clamp(BUBBLE_MIN_W, BUBBLE_MAX_W);
+            let h = (lines.len() * LINE_H + style.pad_top + style.pad_bottom)
+                .max(style.top_cap + style.bottom_cap + 1);
+            let x = if style.align_right {
                 W - PAD - w
             } else {
                 self.assistant_bubble_x()
             };
             layouts.push(MessageLayout {
-                from_user: message.from_user,
+                style,
                 model_index: message.model_index,
                 lines,
                 x,
@@ -474,25 +441,20 @@ impl Fwends {
         let clip_top = CHAT_Y as isize;
         let clip_bottom = (CHAT_Y + CHAT_H) as isize;
 
-        for sy in 0..avatar.height {
-            let py = avatar_y + sy as isize;
-            if py < clip_top || py >= clip_bottom {
-                continue;
-            }
-            for sx in 0..avatar.width {
-                let color = avatar.at(sx, sy);
-                if color.a == 0 {
-                    continue;
-                }
-                fb.fill_rect(
-                    (avatar_x + sx) * SCALE,
-                    py as usize * SCALE,
-                    SCALE,
-                    SCALE,
-                    color,
-                );
-            }
-        }
+        fb.draw_image_region_mapped(
+            avatar,
+            Rect::new(0, 0, avatar.width, avatar.height),
+            (avatar_x * SCALE) as isize,
+            avatar_y * SCALE as isize,
+            SCALE,
+            Some(Rect::new(
+                0,
+                clip_top as usize,
+                W * SCALE,
+                (clip_bottom - clip_top) as usize,
+            )),
+            Some,
+        );
     }
 
     fn content_height(&self) -> usize {
@@ -511,14 +473,10 @@ impl Fwends {
     }
 
     fn draw_input(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.draw_scaled_region(
+        fb.draw_image(
             &self.input_sticky,
-            0,
-            0,
-            INPUT_X * SCALE,
-            INPUT_Y * SCALE,
-            self.input_sticky.width,
-            self.input_sticky.height,
+            (INPUT_X * SCALE) as isize,
+            (INPUT_Y * SCALE) as isize,
             SCALE,
         );
 
@@ -550,14 +508,10 @@ impl Fwends {
         let (cursor_x, cursor_y) = self.input_cursor_position();
         let dest_x = cursor_x.saturating_sub(PENCIL_TIP_X);
         let dest_y = cursor_y.saturating_sub(PENCIL_TIP_Y);
-        fb.draw_scaled_region(
+        fb.draw_image(
             &self.pencil,
-            0,
-            0,
-            dest_x * SCALE,
-            dest_y * SCALE,
-            self.pencil.width,
-            self.pencil.height,
+            (dest_x * SCALE) as isize,
+            (dest_y * SCALE) as isize,
             SCALE,
         );
     }
@@ -575,9 +529,7 @@ impl Fwends {
 
 #[derive(Clone, Copy)]
 struct Model {
-    _name: &'static str,
     id: &'static str,
-    _think_id: &'static str,
     asset_path: &'static str,
 }
 
@@ -585,12 +537,12 @@ struct Model {
 struct Message {
     role: Role,
     text: String,
-    from_user: bool,
     model_index: usize,
+    kind: MessageKind,
 }
 
 struct MessageLayout {
-    from_user: bool,
+    style: MessageStyle,
     model_index: usize,
     lines: Vec<String>,
     x: usize,
@@ -604,8 +556,8 @@ impl Message {
         Self {
             role: Role::User,
             text,
-            from_user: true,
             model_index: 0,
+            kind: MessageKind::Normal,
         }
     }
 
@@ -613,8 +565,29 @@ impl Message {
         Self {
             role: Role::Assistant,
             text,
-            from_user: false,
             model_index,
+            kind: MessageKind::Normal,
+        }
+    }
+
+    fn intro(text: String, model_index: usize) -> Self {
+        Self {
+            kind: MessageKind::Intro,
+            ..Self::assistant(text, model_index)
+        }
+    }
+
+    fn pending(model_index: usize) -> Self {
+        Self {
+            kind: MessageKind::Pending,
+            ..Self::assistant("...".to_string(), model_index)
+        }
+    }
+
+    fn style(&self) -> MessageStyle {
+        match self.role {
+            Role::User => USER_MESSAGE_STYLE,
+            Role::Assistant => ASSISTANT_MESSAGE_STYLE,
         }
     }
 }
@@ -625,10 +598,66 @@ enum Role {
     Assistant,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MessageKind {
+    Normal,
+    Intro,
+    Pending,
+}
+
+#[derive(Clone, Copy)]
+struct MessageStyle {
+    skin: MessageSkin,
+    pad_left: usize,
+    pad_right: usize,
+    pad_top: usize,
+    pad_bottom: usize,
+    left_cap: usize,
+    right_cap: usize,
+    top_cap: usize,
+    bottom_cap: usize,
+    align_right: bool,
+    show_avatar: bool,
+}
+
+#[derive(Clone, Copy)]
+enum MessageSkin {
+    Bubble,
+    Sticky,
+}
+
+const ASSISTANT_MESSAGE_STYLE: MessageStyle = MessageStyle {
+    skin: MessageSkin::Bubble,
+    pad_left: BUBBLE_PAD_X,
+    pad_right: BUBBLE_PAD_X,
+    pad_top: BUBBLE_PAD_TOP,
+    pad_bottom: BUBBLE_PAD_BOTTOM,
+    left_cap: BUBBLE_LEFT_CAP,
+    right_cap: BUBBLE_RIGHT_CAP,
+    top_cap: BUBBLE_TOP_CAP,
+    bottom_cap: BUBBLE_BOTTOM_CAP,
+    align_right: false,
+    show_avatar: true,
+};
+
+const USER_MESSAGE_STYLE: MessageStyle = MessageStyle {
+    skin: MessageSkin::Sticky,
+    pad_left: STICKY_PAD_LEFT,
+    pad_right: STICKY_PAD_RIGHT,
+    pad_top: STICKY_PAD_TOP,
+    pad_bottom: STICKY_PAD_BOTTOM,
+    left_cap: STICKY_LEFT_CAP,
+    right_cap: STICKY_RIGHT_CAP,
+    top_cap: STICKY_TOP_CAP,
+    bottom_cap: STICKY_BOTTOM_CAP,
+    align_right: true,
+    show_avatar: false,
+};
+
 fn request_history(messages: &[Message]) -> Vec<Message> {
     messages
         .iter()
-        .filter(|message| message.text != "..." && message.text != "pick a fwend and say hi")
+        .filter(|message| message.kind == MessageKind::Normal)
         .rev()
         .take(8)
         .cloned()
@@ -838,70 +867,6 @@ fn chat_contains(x: i16, y: i16) -> bool {
     let x = x as usize / SCALE;
     let y = y as usize / SCALE;
     (PAD..W - PAD).contains(&x) && (CHAT_Y..CHAT_Y + CHAT_H).contains(&y)
-}
-
-fn message_pad_left(from_user: bool) -> usize {
-    if from_user {
-        STICKY_PAD_LEFT
-    } else {
-        BUBBLE_PAD_X
-    }
-}
-
-fn message_pad_right(from_user: bool) -> usize {
-    if from_user {
-        STICKY_PAD_RIGHT
-    } else {
-        BUBBLE_PAD_X
-    }
-}
-
-fn message_pad_top(from_user: bool) -> usize {
-    if from_user {
-        STICKY_PAD_TOP
-    } else {
-        BUBBLE_PAD_TOP
-    }
-}
-
-fn message_pad_bottom(from_user: bool) -> usize {
-    if from_user {
-        STICKY_PAD_BOTTOM
-    } else {
-        BUBBLE_PAD_BOTTOM
-    }
-}
-
-fn message_left_cap(from_user: bool) -> usize {
-    if from_user {
-        STICKY_LEFT_CAP
-    } else {
-        BUBBLE_LEFT_CAP
-    }
-}
-
-fn message_right_cap(from_user: bool) -> usize {
-    if from_user {
-        STICKY_RIGHT_CAP
-    } else {
-        BUBBLE_RIGHT_CAP
-    }
-}
-
-fn message_top_cap(from_user: bool) -> usize {
-    if from_user {
-        STICKY_TOP_CAP
-    } else {
-        BUBBLE_TOP_CAP
-    }
-}
-
-fn message_bottom_cap(from_user: bool) -> usize {
-    if from_user {
-        STICKY_BOTTOM_CAP
-    } else {
-        BUBBLE_BOTTOM_CAP
-    }
 }
 
 fn stretch_source_coord(

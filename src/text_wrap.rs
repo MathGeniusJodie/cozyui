@@ -30,29 +30,36 @@ where
     F: Fn(char) -> usize,
 {
     let mut line = String::new();
+    let mut line_width = 0;
     for word in text.split_whitespace() {
-        let candidate = if line.is_empty() {
-            word.to_string()
-        } else {
-            format!("{line} {word}")
-        };
+        let word_width = text_width(word, char_width);
+        let gap_width = if line.is_empty() { 0 } else { char_width(' ') };
 
-        if text_width(&candidate, char_width) <= max_width {
-            line = candidate;
+        if line_width + gap_width + word_width <= max_width {
+            if !line.is_empty() {
+                line.push(' ');
+                line_width += gap_width;
+            }
+            line.push_str(word);
+            line_width += word_width;
             continue;
         }
 
         if !line.is_empty() {
             lines.push(line);
             line = String::new();
+            line_width = 0;
         }
 
         for ch in word.chars() {
-            if text_width(&line, char_width) + char_width(ch) > max_width && !line.is_empty() {
+            let ch_width = char_width(ch);
+            if line_width + ch_width > max_width && !line.is_empty() {
                 lines.push(line);
                 line = String::new();
+                line_width = 0;
             }
             line.push(ch);
+            line_width += ch_width;
         }
     }
 

@@ -7,7 +7,7 @@ use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::peanut_money_font;
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Image, Palette, Rgba};
+use crate::{Framebuffer, Image, Palette, Rect, Rgba};
 
 const SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
@@ -136,14 +136,10 @@ impl Toodle {
             self.render_page(fb, palette, logical_page, visual_page);
         }
 
-        fb.draw_scaled_region(
+        fb.draw_image(
             &self.eraser,
-            0,
-            0,
-            ERASER_X * SCALE,
-            ERASER_Y * SCALE,
-            self.eraser.width,
-            self.eraser.height,
+            (ERASER_X * SCALE) as isize,
+            (ERASER_Y * SCALE) as isize,
             SCALE,
         );
         self.draw_goldstar(fb, palette);
@@ -159,16 +155,7 @@ impl Toodle {
     ) {
         let page_image = &self.pages[visual_page];
         draw_page_image(fb, page_image, page_color(logical_page), palette);
-        fb.draw_scaled_region(
-            &self.checkboxes,
-            0,
-            0,
-            PAGE_OFFSET_X * SCALE,
-            0,
-            self.checkboxes.width,
-            self.checkboxes.height,
-            SCALE,
-        );
+        fb.draw_image(&self.checkboxes, (PAGE_OFFSET_X * SCALE) as isize, 0, SCALE);
         if visual_page == 0 {
             self.draw_focused_pencil_shadow(fb, palette);
         }
@@ -275,14 +262,15 @@ impl Toodle {
         let dest_y = (CHECK_Y[line] - 4) * SCALE;
 
         if self.eraser_hovered {
-            draw_tinted_scaled_region(
-                fb,
+            let tint = palette.color(palette_color::GUNMETAL);
+            fb.draw_image_region_mapped(
                 &self.checks,
-                (src_x, 0),
-                (dest_x, dest_y),
-                (CHECK_SPRITE_W, CHECK_SPRITE_H),
+                Rect::new(src_x, 0, CHECK_SPRITE_W, CHECK_SPRITE_H),
+                dest_x as isize,
+                dest_y as isize,
                 SCALE,
-                palette.color(palette_color::GUNMETAL),
+                None,
+                |color| (color.a != 0).then_some(tint),
             );
         } else {
             fb.draw_scaled_region(
@@ -368,14 +356,10 @@ impl Toodle {
 
     fn draw_goldstar(&self, fb: &mut Framebuffer, palette: &Palette) {
         let star_x = PAGE_OFFSET_X + self.pages[0].width - self.goldstar.width;
-        fb.draw_scaled_region(
+        fb.draw_image(
             &self.goldstar,
-            0,
-            0,
-            star_x * SCALE,
-            GOLDSTAR_Y * SCALE,
-            self.goldstar.width,
-            self.goldstar.height,
+            (star_x * SCALE) as isize,
+            (GOLDSTAR_Y * SCALE) as isize,
             SCALE,
         );
 
@@ -428,16 +412,7 @@ impl Toodle {
         let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X) * SCALE;
         let dest_y = y.saturating_sub(PENCIL_TIP_Y) * SCALE;
 
-        fb.draw_scaled_region(
-            &self.pencil,
-            0,
-            0,
-            dest_x,
-            dest_y,
-            self.pencil.width,
-            self.pencil.height,
-            SCALE,
-        );
+        fb.draw_image(&self.pencil, dest_x as isize, dest_y as isize, SCALE);
     }
 
     fn draw_focused_pencil_shadow(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -603,27 +578,41 @@ fn recover_archive_transaction(marker_path: &str) -> Result<(), Box<dyn Error>> 
 
     let marker = fs::read_to_string(marker_path)?;
     let writes = serde_json::from_str::<serde_json::Value>(&marker)?;
-    let Some(writes) = writes.as_array() else {
+    let Some(records) = writes.as_array() else {
         return Err("archive transaction marker is not a JSON array".into());
     };
 
-    for write in writes {
-        let path = write
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("archive transaction marker is missing path")?;
-        let temp_path = write
-            .get("temp_path")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("archive transaction marker is missing temp_path")?;
-
-        if Path::new(temp_path).exists() {
-            fs::rename(temp_path, path)?;
+    for record in records.iter().map(ArchiveWriteRecord::from_json) {
+        let record = record?;
+        if Path::new(&record.temp_path).exists() {
+            fs::rename(&record.temp_path, &record.path)?;
         }
     }
 
     fs::remove_file(marker_path)?;
     Ok(())
+}
+
+struct ArchiveWriteRecord {
+    path: String,
+    temp_path: String,
+}
+
+impl ArchiveWriteRecord {
+    fn from_json(value: &serde_json::Value) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            path: value
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("archive transaction marker is missing path")?
+                .to_string(),
+            temp_path: value
+                .get("temp_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("archive transaction marker is missing temp_path")?
+                .to_string(),
+        })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -662,33 +651,15 @@ impl TodoItem {
 }
 
 fn draw_page_image(fb: &mut Framebuffer, image: &Image, page_color: PageColor, palette: &Palette) {
-    draw_swapped_scaled_image(fb, image, PAGE_OFFSET_X * SCALE, 0, page_color, palette);
-}
-
-fn draw_swapped_scaled_image(
-    fb: &mut Framebuffer,
-    image: &Image,
-    dest_x: usize,
-    dest_y: usize,
-    page_color: PageColor,
-    palette: &Palette,
-) {
-    for y in 0..image.height {
-        for x in 0..image.width {
-            let color = image.at(x, y);
-            if color.a == 0 {
-                continue;
-            }
-
-            fb.fill_rect(
-                dest_x + x * SCALE,
-                dest_y + y * SCALE,
-                SCALE,
-                SCALE,
-                swap_page_color(color, page_color, palette),
-            );
-        }
-    }
+    fb.draw_image_region_mapped(
+        image,
+        Rect::new(0, 0, image.width, image.height),
+        (PAGE_OFFSET_X * SCALE) as isize,
+        0,
+        SCALE,
+        None,
+        |color| Some(swap_page_color(color, page_color, palette)),
+    );
 }
 
 fn draw_pencil_shadow(
@@ -700,22 +671,22 @@ fn draw_pencil_shadow(
     palette: &Palette,
     pencil_on_second_line: bool,
 ) {
-    for y in 0..image.height {
-        for x in 0..image.width {
-            let color = image.at(x, y);
-            if color.a == 0 {
-                continue;
-            }
-
-            fb.fill_rect(
-                dest_x + x * SCALE,
-                dest_y + y * SCALE,
-                SCALE,
-                SCALE,
-                swap_pencil_shadow_color(color, page_color, palette, pencil_on_second_line),
-            );
-        }
-    }
+    fb.draw_image_region_mapped(
+        image,
+        Rect::new(0, 0, image.width, image.height),
+        dest_x as isize,
+        dest_y as isize,
+        SCALE,
+        None,
+        |color| {
+            Some(swap_pencil_shadow_color(
+                color,
+                page_color,
+                palette,
+                pencil_on_second_line,
+            ))
+        },
+    );
 }
 
 fn page_color(page: usize) -> PageColor {
@@ -775,52 +746,61 @@ fn source_palette_color(color: Rgba) -> Option<usize> {
 }
 
 fn mapped_page_color(page_color: PageColor, source_color: usize) -> usize {
-    match page_color {
-        PageColor::Pink => match source_color {
-            palette_color::LIME => palette_color::CRIMSON,
-            palette_color::PINE => palette_color::ROSE,
-            _ => source_color,
-        },
-        PageColor::Yellow => match source_color {
-            palette_color::LAVENDER => palette_color::CYAN,
-            palette_color::GUNMETAL => palette_color::GUNMETAL,
-            palette_color::PLUM => palette_color::PLUM,
-            palette_color::BROWN => palette_color::BROWN,
-            palette_color::PEACH => palette_color::CREAM,
-            palette_color::CREAM => palette_color::CREAM,
-            palette_color::LIME => palette_color::CRIMSON,
-            palette_color::GREEN => palette_color::GREEN,
-            palette_color::ORANGE => palette_color::ORANGE,
-            palette_color::CRIMSON => palette_color::BROWN,
-            palette_color::ROSE => palette_color::ORANGE,
-            palette_color::PURPLE => palette_color::PURPLE,
-            palette_color::CYAN => palette_color::CYAN,
-            palette_color::BLUE => palette_color::BLUE,
-            palette_color::PINE => palette_color::ROSE,
-            palette_color::BLACK => palette_color::BLACK,
-            _ => source_color,
-        },
-        PageColor::Green => match source_color {
-            palette_color::LAVENDER => palette_color::LAVENDER,
-            palette_color::GUNMETAL => palette_color::GUNMETAL,
-            palette_color::PLUM => palette_color::PLUM,
-            palette_color::BROWN => palette_color::BROWN,
-            palette_color::PEACH => palette_color::LIME,
-            palette_color::CREAM => palette_color::CREAM,
-            palette_color::LIME => palette_color::GUNMETAL,
-            palette_color::GREEN => palette_color::GREEN,
-            palette_color::ORANGE => palette_color::GREEN,
-            palette_color::CRIMSON => palette_color::PINE,
-            palette_color::ROSE => palette_color::GREEN,
-            palette_color::PURPLE => palette_color::PURPLE,
-            palette_color::CYAN => palette_color::CYAN,
-            palette_color::BLUE => palette_color::BLUE,
-            palette_color::PINE => palette_color::BROWN,
-            palette_color::BLACK => palette_color::BLACK,
-            _ => source_color,
-        },
-    }
+    let remap = match page_color {
+        PageColor::Pink => &PINK_PAGE_REMAP,
+        PageColor::Yellow => &YELLOW_PAGE_REMAP,
+        PageColor::Green => &GREEN_PAGE_REMAP,
+    };
+    remap.get(source_color).copied().unwrap_or(source_color)
 }
+
+const IDENTITY_PAGE_REMAP: [usize; 16] = [
+    palette_color::LAVENDER,
+    palette_color::GUNMETAL,
+    palette_color::PLUM,
+    palette_color::BROWN,
+    palette_color::PEACH,
+    palette_color::CREAM,
+    palette_color::LIME,
+    palette_color::GREEN,
+    palette_color::ORANGE,
+    palette_color::CRIMSON,
+    palette_color::ROSE,
+    palette_color::PURPLE,
+    palette_color::CYAN,
+    palette_color::BLUE,
+    palette_color::PINE,
+    palette_color::BLACK,
+];
+
+const PINK_PAGE_REMAP: [usize; 16] = {
+    let mut remap = IDENTITY_PAGE_REMAP;
+    remap[palette_color::LIME] = palette_color::CRIMSON;
+    remap[palette_color::PINE] = palette_color::ROSE;
+    remap
+};
+
+const YELLOW_PAGE_REMAP: [usize; 16] = {
+    let mut remap = IDENTITY_PAGE_REMAP;
+    remap[palette_color::LAVENDER] = palette_color::CYAN;
+    remap[palette_color::PEACH] = palette_color::CREAM;
+    remap[palette_color::LIME] = palette_color::CRIMSON;
+    remap[palette_color::CRIMSON] = palette_color::BROWN;
+    remap[palette_color::ROSE] = palette_color::ORANGE;
+    remap[palette_color::PINE] = palette_color::ROSE;
+    remap
+};
+
+const GREEN_PAGE_REMAP: [usize; 16] = {
+    let mut remap = IDENTITY_PAGE_REMAP;
+    remap[palette_color::PEACH] = palette_color::LIME;
+    remap[palette_color::LIME] = palette_color::GUNMETAL;
+    remap[palette_color::ORANGE] = palette_color::GREEN;
+    remap[palette_color::CRIMSON] = palette_color::PINE;
+    remap[palette_color::ROSE] = palette_color::GREEN;
+    remap[palette_color::PINE] = palette_color::BROWN;
+    remap
+};
 
 #[allow(clippy::too_many_arguments)]
 fn draw_todo_text(
@@ -856,29 +836,6 @@ fn draw_todo_text(
         scale,
         color,
     );
-}
-
-fn draw_tinted_scaled_region(
-    fb: &mut Framebuffer,
-    image: &Image,
-    src: (usize, usize),
-    dest: (usize, usize),
-    size: (usize, usize),
-    scale: usize,
-    tint: Rgba,
-) {
-    let (src_x, src_y) = src;
-    let (dest_x, dest_y) = dest;
-    let (width, height) = size;
-
-    for y in 0..height {
-        for x in 0..width {
-            if image.at(src_x + x, src_y + y).a == 0 {
-                continue;
-            }
-            fb.fill_rect(dest_x + x * scale, dest_y + y * scale, scale, scale, tint);
-        }
-    }
 }
 
 fn checkbox_at(x: usize, y: usize) -> Option<usize> {
