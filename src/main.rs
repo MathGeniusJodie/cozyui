@@ -15,6 +15,7 @@ use x11rb::xcb_ffi::XCBConnection;
 
 mod bitmap_font;
 mod comicoro_font;
+mod emojimap;
 mod fwends;
 mod peanut_money_font;
 mod puter;

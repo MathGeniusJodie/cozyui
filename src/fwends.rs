@@ -803,7 +803,8 @@ fn content_text(content: &Value) -> String {
 }
 
 fn normalize_display_text(text: &str) -> String {
-    let text = deunicode::deunicode(text);
+    let text = crate::emojimap::replace_emoji(text);
+    let text = deunicode::deunicode(&text);
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {

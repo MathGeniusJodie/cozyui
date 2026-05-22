@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 alacritty_terminal = "0.26.0"
 deunicode = "1"
+phf = { version = "0.11", features = ["macros"] }
 png = "0.17"
 serde_json = "1"
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
