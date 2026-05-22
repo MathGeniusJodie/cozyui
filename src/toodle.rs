@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::peanut_money_font;
-use crate::text_input::{EditKey, edit_key};
+use crate::text_input::{EditKey, KeyInput, edit_key};
 use crate::{Framebuffer, Image, Palette, Rgba};
 
 const SCALE: usize = 1;
@@ -236,16 +236,12 @@ impl Toodle {
         was_hovered != self.eraser_hovered
     }
 
-    pub(crate) fn handle_key_press(
-        &mut self,
-        keycode: u8,
-        state: u16,
-    ) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn handle_key_press(&mut self, input: &KeyInput) -> Result<(), Box<dyn Error>> {
         let Some(line) = self.focused_line else {
             return Ok(());
         };
 
-        match edit_key(keycode, state) {
+        match edit_key(input) {
             EditKey::Insert(ch) => {
                 let text = &mut self.todos[self.page].items[line].text;
                 if self.font.fits_with_insert(text, ch, max_text_width(line)) {

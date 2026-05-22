@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 alacritty_terminal = "0.26.0"
+deunicode = "1"
 png = "0.17"
 serde_json = "1"
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+xkbcommon = { version = "0.8", default-features = false, features = ["x11"] }

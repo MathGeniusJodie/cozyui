@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
-use crate::text_input::{EditKey, edit_key};
+use crate::text_input::{EditKey, KeyInput, edit_key};
 use crate::{Framebuffer, Image, Palette, Rgba};
 use serde_json::{Value, json};
 
@@ -200,12 +200,8 @@ impl Fwends {
         }
     }
 
-    pub(crate) fn handle_key_press(
-        &mut self,
-        keycode: u8,
-        state: u16,
-    ) -> Result<(), Box<dyn Error>> {
-        match edit_key(keycode, state) {
+    pub(crate) fn handle_key_press(&mut self, input: &KeyInput) -> Result<(), Box<dyn Error>> {
+        match edit_key(input) {
             EditKey::Insert(ch) if self.focused => {
                 if self.input.chars().count() < MAX_INPUT_CHARS {
                     self.input.push(ch);
@@ -806,56 +802,17 @@ fn content_text(content: &Value) -> String {
 }
 
 fn normalize_display_text(text: &str) -> String {
-    let mut out = String::new();
+    let text = deunicode::deunicode(text);
+    let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
-        push_display_char(&mut out, ch);
+        match ch {
+            '\n' | '\r' => out.push(' '),
+            ch if ch.is_ascii() && !ch.is_control() => out.push(ch),
+            '\t' => out.push(' '),
+            _ => {}
+        }
     }
     out
-}
-
-fn push_display_char(out: &mut String, ch: char) {
-    match ch {
-        '\n' | '\r' => out.push(' '),
-        ch if ch.is_ascii() => out.push(ch),
-        '‘' | '’' | '‚' | '‛' => out.push('\''),
-        '“' | '”' | '„' | '‟' => out.push('"'),
-        '‐' | '‑' | '‒' | '–' | '—' | '−' => out.push('-'),
-        '…' => out.push_str("..."),
-        ' ' => out.push(' '),
-        '​' | '‌' | '‍' | '︎' | '️' => {}
-        '•' | '⁃' | '∙' | '●' | '◦' => out.push('*'),
-        '←' => out.push_str("<-"),
-        '↑' => out.push('^'),
-        '→' => out.push_str("->"),
-        '↓' => out.push('v'),
-        '⇒' | '➡' => out.push_str("=>"),
-        '°' => out.push_str(" deg"),
-        '·' => out.push('*'),
-        '®' => out.push_str("(R)"),
-        '©' => out.push_str("(c)"),
-        '™' => out.push_str("TM"),
-        '☺' | '☻' | '🙂' => out.push_str(":)"),
-        '😁' | '😆' | '😀' | '😃' | '😄' => out.push_str(":D"),
-        '😅' => out.push_str("':)"),
-        '😂' | '🤣' => out.push_str("XD"),
-        '😉' => out.push_str(";)"),
-        '😊' | '😇' => out.push_str("^^"),
-        '😍' | '🥰' => out.push_str("<3"),
-        '😘' | '😗' | '😙' | '😚' => out.push_str(":*"),
-        '🤔' => out.push_str("hmm"),
-        '😐' | '😑' | '😶' => out.push_str(":|"),
-        '😕' | '🙁' | '☹' => out.push_str(":/"),
-        '😭' => out.push_str("D;"),
-        '😞' | '😢' => out.push_str(";("),
-        '😮' | '😲' => out.push_str(":o"),
-        '😎' => out.push_str("B)"),
-        '👍' => out.push_str("+1"),
-        '👎' => out.push_str("-1"),
-        '❤' | '💓'..='💟' => out.push_str("<3"),
-        '😀'..='🙏' => {}
-        '🌀'..='🫿' => {}
-        _ => out.push('?'),
-    }
 }
 
 fn compact_error(response: &str) -> String {

@@ -10,8 +10,8 @@ use x11rb::protocol::xproto::{
     AtomEnum, ButtonIndex, ChangeWindowAttributesAux, CreateGCAux, CreateWindowAux, EventMask,
     Gcontext, ImageFormat, PropMode, Window, WindowClass,
 };
-use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
+use x11rb::xcb_ffi::XCBConnection;
 
 mod bitmap_font;
 mod comicoro_font;
@@ -231,15 +231,16 @@ impl Framebuffer {
 }
 
 struct XWindow {
-    conn: RustConnection,
+    conn: XCBConnection,
     window: Window,
     gc: Gcontext,
     depth: u8,
+    keyboard: text_input::Keyboard,
 }
 
 impl XWindow {
     fn open(width: usize, height: usize) -> Result<Self, Box<dyn Error>> {
-        let (conn, screen_num) = RustConnection::connect(None)?;
+        let (conn, screen_num) = XCBConnection::connect(None)?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
         let depth = screen.root_depth;
@@ -260,6 +261,7 @@ impl XWindow {
             &CreateWindowAux::new().event_mask(
                 EventMask::EXPOSURE
                     | EventMask::KEY_PRESS
+                    | EventMask::KEY_RELEASE
                     | EventMask::BUTTON_PRESS
                     | EventMask::BUTTON_RELEASE
                     | EventMask::POINTER_MOTION
@@ -271,6 +273,7 @@ impl XWindow {
             &ChangeWindowAttributesAux::new().event_mask(
                 EventMask::EXPOSURE
                     | EventMask::KEY_PRESS
+                    | EventMask::KEY_RELEASE
                     | EventMask::BUTTON_PRESS
                     | EventMask::BUTTON_RELEASE
                     | EventMask::POINTER_MOTION
@@ -289,12 +292,14 @@ impl XWindow {
         )?;
         conn.map_window(window)?;
         conn.flush()?;
+        let keyboard = text_input::Keyboard::new(&conn)?;
 
         Ok(Self {
             conn,
             window,
             gc,
             depth,
+            keyboard,
         })
     }
 
@@ -540,14 +545,14 @@ impl App {
         self.fwends.drain_reply()
     }
 
-    fn handle_key_press(&mut self, keycode: u8, state: u16) -> Result<(), Box<dyn Error>> {
+    fn handle_key_press(&mut self, input: &text_input::KeyInput) -> Result<(), Box<dyn Error>> {
         match self.focus {
             FocusedWidget::Puter => {
-                self.puter.handle_key_press(keycode, state);
+                self.puter.handle_key_press(input);
                 Ok(())
             }
-            FocusedWidget::Toodle => self.toodle.handle_key_press(keycode, state),
-            FocusedWidget::Fwends => self.fwends.handle_key_press(keycode, state),
+            FocusedWidget::Toodle => self.toodle.handle_key_press(input),
+            FocusedWidget::Fwends => self.fwends.handle_key_press(input),
         }
     }
 
@@ -630,7 +635,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let width = app.width();
     let height = app.height();
     let mut fb = Framebuffer::new(width, height, app.fill_color(&palette));
-    let xwin = XWindow::open(width, height)?;
+    let mut xwin = XWindow::open(width, height)?;
     app.start(xwin.window as u64)?;
     app.render(&mut fb, &palette);
     xwin.draw(&fb)?;
@@ -660,10 +665,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     drew_frame = true;
                 }
                 XEvent::KeyPress(event) => {
-                    app.handle_key_press(event.detail, event.state.into())?;
+                    let input = xwin.keyboard.press(event.detail, event.state.into());
+                    app.handle_key_press(&input)?;
                     app.render_focused_widget(&mut fb, &palette);
                     xwin.draw(&fb)?;
                     drew_frame = true;
+                }
+                XEvent::KeyRelease(event) => {
+                    xwin.keyboard.release(event.detail);
                 }
                 XEvent::ButtonPress(event) => match event.detail {
                     WHEEL_UP => {

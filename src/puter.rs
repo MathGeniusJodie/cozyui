@@ -11,9 +11,10 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, point_to_viewport};
 use alacritty_terminal::tty;
+use xkbcommon::xkb::keysyms;
 
 use crate::palette_color;
-use crate::text_input::printable_key;
+use crate::text_input::KeyInput;
 use crate::{Framebuffer, Image, Palette, Rgba, decode_png_with_size};
 
 const BG_SCALE: usize = 1;
@@ -148,8 +149,8 @@ impl Puter {
         self.terminal().drain_events()
     }
 
-    pub(crate) fn handle_key_press(&self, keycode: u8, state: u16) {
-        self.terminal().handle_key_press(keycode, state);
+    pub(crate) fn handle_key_press(&self, input: &KeyInput) {
+        self.terminal().handle_key_press(input);
     }
 
     pub(crate) fn scroll_up(&self) {
@@ -376,12 +377,12 @@ impl Terminal {
         TerminalEvents { running, dirty }
     }
 
-    fn handle_key_press(&self, keycode: u8, state: u16) {
-        if let Some(scroll) = key_scroll(keycode, state) {
+    fn handle_key_press(&self, input: &KeyInput) {
+        if let Some(scroll) = key_scroll(input) {
             self.scroll(scroll);
-        } else if let Some(bytes) = key_bytes(keycode, state) {
+        } else if let Some(bytes) = key_bytes(input) {
             self.scroll(Scroll::Bottom);
-            let _ = self.tx.send(Msg::Input(bytes));
+            let _ = self.tx.send(Msg::Input(Cow::Owned(bytes.into_bytes())));
         }
     }
 
@@ -625,48 +626,57 @@ fn art_y(y: usize) -> usize {
     (y - ART_CROP_Y) * BG_SCALE
 }
 
-fn key_bytes(keycode: u8, state: u16) -> Option<Cow<'static, [u8]>> {
-    let ctrl = state & 4 != 0;
-    let text: Cow<'static, str> = match keycode {
-        9 => Cow::Borrowed("\x1b"),
-        22 => Cow::Borrowed("\x7f"),
-        23 => Cow::Borrowed("\t"),
-        36 => Cow::Borrowed("\r"),
-        111 => Cow::Borrowed("\x1b[A"),
-        116 => Cow::Borrowed("\x1b[B"),
-        113 => Cow::Borrowed("\x1b[D"),
-        114 => Cow::Borrowed("\x1b[C"),
-        110 => Cow::Borrowed("\x1b[H"),
-        115 => Cow::Borrowed("\x1b[F"),
-        112 => Cow::Borrowed("\x1b[5~"),
-        117 => Cow::Borrowed("\x1b[6~"),
-        _ => Cow::Owned(printable_key(keycode, state)?.to_string()),
-    };
-
-    if ctrl && text.len() == 1 {
-        let b = text.as_bytes()[0].to_ascii_lowercase();
-        if b.is_ascii_lowercase() {
-            return Some(Cow::Owned(vec![b - b'a' + 1]));
-        }
+fn key_bytes(input: &KeyInput) -> Option<String> {
+    if input.ctrl()
+        && let Some(byte) = control_byte(input)
+    {
+        return Some(String::from_utf8(vec![byte]).ok()?);
     }
 
-    Some(match text {
-        Cow::Borrowed(text) => Cow::Borrowed(text.as_bytes()),
-        Cow::Owned(text) => Cow::Owned(text.into_bytes()),
-    })
+    let text = match input.sym_raw() {
+        keysyms::KEY_Escape => "\x1b",
+        keysyms::KEY_BackSpace => "\x7f",
+        keysyms::KEY_Tab | keysyms::KEY_KP_Tab => "\t",
+        keysyms::KEY_Return | keysyms::KEY_KP_Enter => "\r",
+        keysyms::KEY_Up | keysyms::KEY_KP_Up => "\x1b[A",
+        keysyms::KEY_Down | keysyms::KEY_KP_Down => "\x1b[B",
+        keysyms::KEY_Left | keysyms::KEY_KP_Left => "\x1b[D",
+        keysyms::KEY_Right | keysyms::KEY_KP_Right => "\x1b[C",
+        keysyms::KEY_Home | keysyms::KEY_KP_Home => "\x1b[H",
+        keysyms::KEY_End | keysyms::KEY_KP_End => "\x1b[F",
+        keysyms::KEY_Prior | keysyms::KEY_KP_Prior => "\x1b[5~",
+        keysyms::KEY_Next | keysyms::KEY_KP_Next => "\x1b[6~",
+        _ => input.text(),
+    };
+
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
 }
 
-fn key_scroll(keycode: u8, state: u16) -> Option<Scroll> {
-    let shift = state & 1 != 0;
-    if !shift {
+fn control_byte(input: &KeyInput) -> Option<u8> {
+    let raw = input.sym_raw();
+    if (keysyms::KEY_a..=keysyms::KEY_z).contains(&raw) {
+        return Some((raw - keysyms::KEY_a + 1) as u8);
+    }
+    if (keysyms::KEY_A..=keysyms::KEY_Z).contains(&raw) {
+        return Some((raw - keysyms::KEY_A + 1) as u8);
+    }
+    None
+}
+
+fn key_scroll(input: &KeyInput) -> Option<Scroll> {
+    if !input.shift() {
         return None;
     }
 
-    match keycode {
-        110 => Some(Scroll::Top),
-        112 => Some(Scroll::PageUp),
-        115 => Some(Scroll::Bottom),
-        117 => Some(Scroll::PageDown),
+    match input.sym_raw() {
+        keysyms::KEY_Home | keysyms::KEY_KP_Home => Some(Scroll::Top),
+        keysyms::KEY_Prior | keysyms::KEY_KP_Prior => Some(Scroll::PageUp),
+        keysyms::KEY_End | keysyms::KEY_KP_End => Some(Scroll::Bottom),
+        keysyms::KEY_Next | keysyms::KEY_KP_Next => Some(Scroll::PageDown),
         _ => None,
     }
 }
