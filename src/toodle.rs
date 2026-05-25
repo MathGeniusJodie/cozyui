@@ -20,6 +20,10 @@ const THIRD_PAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/toodl
 const CHECKBOXES_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/checkboxes.png");
 const CHECKS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/checks.png");
 const ERASER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/eraser.png");
+const PRIORITY_URGENT_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/priority_urgent.png");
+const PRIORITY_FROG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/priority_frog.png");
+const PRIORITY_SNAIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/priority_snail.png");
 const GOLDSTAR_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/goldstar.png");
 const PENCIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/focus_pencil.png");
 const PENCIL_SHADOW_PATH: &str = concat!(
@@ -27,10 +31,12 @@ const PENCIL_SHADOW_PATH: &str = concat!(
     "/assets/toodle_pencil_shadow.png"
 );
 
-const TODO_FILES: [&str; 3] = [
+const PAGE_COUNT: usize = 4;
+const TODO_FILES: [&str; PAGE_COUNT] = [
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_top.txt"),
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_second.txt"),
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_third.txt"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_fourth.txt"),
 ];
 const DONE_TODOS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_done.txt");
 const ARCHIVE_TRANSACTION_PATH: &str = concat!(
@@ -38,8 +44,12 @@ const ARCHIVE_TRANSACTION_PATH: &str = concat!(
     "/toodle_archive_transaction.json"
 );
 const PAGE_OFFSET_X: usize = 14;
+const PAGE_STACK_OFFSET: usize = 4;
 const ERASER_X: usize = 0;
 const ERASER_Y: usize = 21;
+const PRIORITY_ICON_GAP: usize = 2;
+const PRIORITY_ICON_OFFSET_X: usize = 62;
+const PRIORITY_ICON_OFFSET_Y: usize = 4;
 const GOLDSTAR_Y: usize = 24;
 const LINE_Y: [usize; LINE_COUNT] = [73, 95, 117, 139, 161, 183];
 const TEXT_X: usize = 31;
@@ -69,18 +79,22 @@ enum PageColor {
     Pink,
     Yellow,
     Green,
+    Blue,
 }
 
 pub(crate) struct Toodle {
-    pages: [Image; 3],
+    pages: [Image; PAGE_COUNT],
     checkboxes: Image,
     checks: Image,
     eraser: Image,
+    priority_urgent: Image,
+    priority_frog: Image,
+    priority_snail: Image,
     goldstar: Image,
     pencil: Image,
     pencil_shadow: Image,
     font: BitmapFont,
-    todos: [TodoPage; 3],
+    todos: [TodoPage; PAGE_COUNT],
     done_count: usize,
     page: usize,
     focused_line: Option<usize>,
@@ -96,10 +110,14 @@ impl Toodle {
                 Image::load(TOP_PAGE_PATH, palette)?,
                 Image::load(SECOND_PAGE_PATH, palette)?,
                 Image::load(THIRD_PAGE_PATH, palette)?,
+                Image::load(THIRD_PAGE_PATH, palette)?,
             ],
             checkboxes: Image::load(CHECKBOXES_PATH, palette)?,
             checks: Image::load(CHECKS_PATH, palette)?,
             eraser: Image::load(ERASER_PATH, palette)?,
+            priority_urgent: Image::load(PRIORITY_URGENT_PATH, palette)?,
+            priority_frog: Image::load(PRIORITY_FROG_PATH, palette)?,
+            priority_snail: Image::load(PRIORITY_SNAIL_PATH, palette)?,
             goldstar: Image::load(GOLDSTAR_PATH, palette)?,
             pencil: Image::load(PENCIL_PATH, palette)?,
             pencil_shadow: Image::load(PENCIL_SHADOW_PATH, palette)?,
@@ -108,6 +126,7 @@ impl Toodle {
                 TodoPage::load(TODO_FILES[0])?,
                 TodoPage::load(TODO_FILES[1])?,
                 TodoPage::load(TODO_FILES[2])?,
+                TodoPage::load(TODO_FILES[3])?,
             ],
             done_count: done_todo_count(DONE_TODOS_PATH)?,
             page: 0,
@@ -117,11 +136,11 @@ impl Toodle {
     }
 
     pub(crate) fn width(&self) -> usize {
-        (PAGE_OFFSET_X + self.pages[0].width) * SCALE
+        (PAGE_OFFSET_X + self.pages[0].width + self.max_stack_offset()) * SCALE
     }
 
     pub(crate) fn height(&self) -> usize {
-        self.pages[0].height * SCALE
+        (self.pages[0].height + self.max_stack_offset()) * SCALE
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -142,6 +161,7 @@ impl Toodle {
             (ERASER_Y * SCALE) as isize,
             SCALE,
         );
+        self.draw_priority_icon(fb);
         self.draw_goldstar(fb, palette);
         self.draw_focused_pencil(fb);
     }
@@ -154,8 +174,23 @@ impl Toodle {
         visual_page: usize,
     ) {
         let page_image = &self.pages[visual_page];
-        draw_page_image(fb, page_image, page_color(logical_page), palette);
-        fb.draw_image(&self.checkboxes, (PAGE_OFFSET_X * SCALE) as isize, 0, SCALE);
+        let page_offset = visual_page * PAGE_STACK_OFFSET;
+        let page_x = PAGE_OFFSET_X + page_offset;
+        let page_y = page_offset;
+        draw_page_image(
+            fb,
+            page_image,
+            page_color(logical_page),
+            palette,
+            page_x,
+            page_y,
+        );
+        fb.draw_image(
+            &self.checkboxes,
+            (page_x * SCALE) as isize,
+            (page_y * SCALE) as isize,
+            SCALE,
+        );
         if visual_page == 0 {
             self.draw_focused_pencil_shadow(fb, palette);
         }
@@ -169,15 +204,15 @@ impl Toodle {
         for (line, _) in LINE_Y.iter().enumerate().take(LINE_COUNT) {
             let todo = &self.todos[logical_page].items[line];
             if todo.checked {
-                self.draw_check(fb, palette, logical_page, line);
+                self.draw_check(fb, palette, logical_page, line, page_offset);
             }
 
             draw_todo_text(
                 fb,
                 &self.font,
                 &todo.text,
-                (PAGE_OFFSET_X + TEXT_X) * SCALE,
-                (LINE_Y[line] - TEXT_Y_OFFSET) * SCALE,
+                (page_x + TEXT_X) * SCALE,
+                (page_y + LINE_Y[line] - TEXT_Y_OFFSET) * SCALE,
                 GLYPH_SCALE * SCALE,
                 if todo.checked {
                     completed_text_color
@@ -256,10 +291,17 @@ impl Toodle {
         self.save_current_page()
     }
 
-    fn draw_check(&self, fb: &mut Framebuffer, palette: &Palette, page: usize, line: usize) {
+    fn draw_check(
+        &self,
+        fb: &mut Framebuffer,
+        palette: &Palette,
+        page: usize,
+        line: usize,
+        page_offset: usize,
+    ) {
         let src_x = (page + line) % CHECK_VARIANTS * CHECK_SPRITE_W;
-        let dest_x = (PAGE_OFFSET_X + CHECK_X - 1) * SCALE;
-        let dest_y = (CHECK_Y[line] - 4) * SCALE;
+        let dest_x = (PAGE_OFFSET_X + page_offset + CHECK_X - 1) * SCALE;
+        let dest_y = (page_offset + CHECK_Y[line] - 4) * SCALE;
 
         if self.eraser_hovered {
             let tint = palette.color(palette_color::GUNMETAL);
@@ -292,7 +334,7 @@ impl Toodle {
 
     fn archive_completed_todos(&mut self) -> Result<(), Box<dyn Error>> {
         let mut archived = Vec::new();
-        let mut changed_pages = [false; 3];
+        let mut changed_pages = [false; PAGE_COUNT];
         let mut staged_pages = self.todos.clone();
 
         for (page_index, page) in staged_pages.iter_mut().enumerate() {
@@ -352,6 +394,33 @@ impl Toodle {
         self.done_count += archived.len();
 
         Ok(())
+    }
+
+    fn draw_priority_icon(&self, fb: &mut Framebuffer) {
+        let Some(icon) = self.priority_icon() else {
+            return;
+        };
+        let icon_x = ERASER_X + self.eraser.width + PRIORITY_ICON_GAP + PRIORITY_ICON_OFFSET_X;
+        let icon_y = ERASER_Y + PRIORITY_ICON_OFFSET_Y;
+        fb.draw_image(
+            icon,
+            (icon_x * SCALE) as isize,
+            (icon_y * SCALE) as isize,
+            SCALE,
+        );
+    }
+
+    fn priority_icon(&self) -> Option<&Image> {
+        match page_color(self.page) {
+            PageColor::Pink => Some(&self.priority_urgent),
+            PageColor::Yellow => None,
+            PageColor::Green => Some(&self.priority_frog),
+            PageColor::Blue => Some(&self.priority_snail),
+        }
+    }
+
+    fn max_stack_offset(&self) -> usize {
+        self.pages.len().saturating_sub(1) * PAGE_STACK_OFFSET
     }
 
     fn draw_goldstar(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -650,12 +719,19 @@ impl TodoItem {
     }
 }
 
-fn draw_page_image(fb: &mut Framebuffer, image: &Image, page_color: PageColor, palette: &Palette) {
+fn draw_page_image(
+    fb: &mut Framebuffer,
+    image: &Image,
+    page_color: PageColor,
+    palette: &Palette,
+    x: usize,
+    y: usize,
+) {
     fb.draw_image_region_mapped(
         image,
         Rect::new(0, 0, image.width, image.height),
-        (PAGE_OFFSET_X * SCALE) as isize,
-        0,
+        (x * SCALE) as isize,
+        (y * SCALE) as isize,
         SCALE,
         None,
         |color| Some(swap_page_color(color, page_color, palette)),
@@ -690,10 +766,11 @@ fn draw_pencil_shadow(
 }
 
 fn page_color(page: usize) -> PageColor {
-    match page % 3 {
+    match page % PAGE_COUNT {
         0 => PageColor::Pink,
         1 => PageColor::Yellow,
-        _ => PageColor::Green,
+        2 => PageColor::Green,
+        _ => PageColor::Blue,
     }
 }
 
@@ -750,6 +827,7 @@ fn mapped_page_color(page_color: PageColor, source_color: usize) -> usize {
         PageColor::Pink => &PINK_PAGE_REMAP,
         PageColor::Yellow => &YELLOW_PAGE_REMAP,
         PageColor::Green => &GREEN_PAGE_REMAP,
+        PageColor::Blue => &BLUE_PAGE_REMAP,
     };
     remap.get(source_color).copied().unwrap_or(source_color)
 }
@@ -799,6 +877,17 @@ const GREEN_PAGE_REMAP: [usize; 16] = {
     remap[palette_color::CRIMSON] = palette_color::PINE;
     remap[palette_color::ROSE] = palette_color::GREEN;
     remap[palette_color::PINE] = palette_color::BROWN;
+    remap
+};
+
+const BLUE_PAGE_REMAP: [usize; 16] = {
+    let mut remap = IDENTITY_PAGE_REMAP;
+    remap[palette_color::PEACH] = palette_color::CYAN;
+    remap[palette_color::LIME] = palette_color::BLUE;
+    remap[palette_color::ORANGE] = palette_color::PINE;
+    remap[palette_color::CRIMSON] = palette_color::PINE;
+    remap[palette_color::ROSE] = palette_color::BLUE;
+    remap[palette_color::PINE] = palette_color::GUNMETAL;
     remap
 };
 
