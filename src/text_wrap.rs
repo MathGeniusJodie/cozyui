@@ -31,36 +31,15 @@ where
 {
     let mut line = String::new();
     let mut line_width = 0;
-    for word in text.split_whitespace() {
-        let word_width = text_width(word, char_width);
-        let gap_width = if line.is_empty() { 0 } else { char_width(' ') };
-
-        if line_width + gap_width + word_width <= max_width {
-            if !line.is_empty() {
-                line.push(' ');
-                line_width += gap_width;
-            }
-            line.push_str(word);
-            line_width += word_width;
-            continue;
-        }
-
-        if !line.is_empty() {
+    for ch in text.chars() {
+        let ch_width = char_width(ch);
+        if line_width + ch_width > max_width && !line.is_empty() {
             lines.push(line);
             line = String::new();
             line_width = 0;
         }
-
-        for ch in word.chars() {
-            let ch_width = char_width(ch);
-            if line_width + ch_width > max_width && !line.is_empty() {
-                lines.push(line);
-                line = String::new();
-                line_width = 0;
-            }
-            line.push(ch);
-            line_width += ch_width;
-        }
+        line.push(ch);
+        line_width += ch_width;
     }
 
     if !line.is_empty() {
@@ -68,9 +47,22 @@ where
     }
 }
 
-fn text_width<F>(text: &str, char_width: &F) -> usize
-where
-    F: Fn(char) -> usize,
-{
-    text.chars().map(char_width).sum()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_lines_preserves_trailing_spaces() {
+        assert_eq!(wrap_lines("a ", 10, |_| 1), vec!["a ".to_string()]);
+    }
+
+    #[test]
+    fn wrap_lines_preserves_repeated_spaces() {
+        assert_eq!(wrap_lines("a  b", 10, |_| 1), vec!["a  b".to_string()]);
+    }
+
+    #[test]
+    fn fits_in_lines_counts_space_width() {
+        assert!(!fits_in_lines("abc ", 3, 1, |_| 1));
+    }
 }
