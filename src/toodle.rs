@@ -33,12 +33,17 @@ const PENCIL_SHADOW_PATH: &str = concat!(
 
 const PAGE_COUNT: usize = 4;
 const TODO_FILES: [&str; PAGE_COUNT] = [
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_top.txt"),
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_second.txt"),
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_third.txt"),
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_fourth.txt"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_urgent.txt"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_frog.txt"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_normal.txt"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_snail.txt"),
 ];
-const DONE_TODOS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_done.txt");
+const DONE_TODO_FILES: [&str; PAGE_COUNT] = [
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_urgent_done.txt"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_frog_done.txt"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_normal_done.txt"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_snail_done.txt"),
+];
 const ARCHIVE_TRANSACTION_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/toodle_archive_transaction.json"
@@ -95,7 +100,7 @@ pub(crate) struct Toodle {
     pencil_shadow: Image,
     font: BitmapFont,
     todos: [TodoPage; PAGE_COUNT],
-    done_count: usize,
+    done_counts: [usize; PAGE_COUNT],
     page: usize,
     focused_line: Option<usize>,
     eraser_hovered: bool,
@@ -128,7 +133,12 @@ impl Toodle {
                 TodoPage::load(TODO_FILES[2])?,
                 TodoPage::load(TODO_FILES[3])?,
             ],
-            done_count: done_todo_count(DONE_TODOS_PATH)?,
+            done_counts: [
+                done_todo_count(DONE_TODO_FILES[0])?,
+                done_todo_count(DONE_TODO_FILES[1])?,
+                done_todo_count(DONE_TODO_FILES[2])?,
+                done_todo_count(DONE_TODO_FILES[3])?,
+            ],
             page: 0,
             focused_line: None,
             eraser_hovered: false,
@@ -333,7 +343,7 @@ impl Toodle {
     }
 
     fn archive_completed_todos(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut archived = Vec::new();
+        let mut archived: [Vec<String>; PAGE_COUNT] = std::array::from_fn(|_| Vec::new());
         let mut changed_pages = [false; PAGE_COUNT];
         let mut staged_pages = self.todos.clone();
 
@@ -342,7 +352,7 @@ impl Toodle {
             for item in page.items.iter().cloned() {
                 if item.checked {
                     if !item.text.trim().is_empty() {
-                        archived.push(item.text.clone());
+                        archived[page_index].push(item.text.clone());
                     }
                     changed_pages[page_index] = true;
                 } else {
@@ -356,24 +366,26 @@ impl Toodle {
             }
         }
 
-        let mut done_text = if Path::new(DONE_TODOS_PATH).exists() {
-            fs::read_to_string(DONE_TODOS_PATH)?
-        } else {
-            String::new()
-        };
-        if !archived.is_empty() {
+        let mut staged_writes = Vec::new();
+        for (page_index, archived_page) in archived.iter().enumerate() {
+            if archived_page.is_empty() {
+                continue;
+            }
+
+            let done_path = DONE_TODO_FILES[page_index];
+            let mut done_text = if Path::new(done_path).exists() {
+                fs::read_to_string(done_path)?
+            } else {
+                String::new()
+            };
             if !done_text.is_empty() && !done_text.ends_with('\n') {
                 done_text.push('\n');
             }
-            for todo in &archived {
+            for todo in archived_page {
                 done_text.push_str(todo);
                 done_text.push('\n');
             }
-        }
-
-        let mut staged_writes = Vec::new();
-        if !archived.is_empty() {
-            staged_writes.push(AtomicWrite::stage(DONE_TODOS_PATH, done_text.into_bytes())?);
+            staged_writes.push(AtomicWrite::stage(done_path, done_text.into_bytes())?);
         }
         for (page_index, changed) in changed_pages.into_iter().enumerate() {
             if changed {
@@ -391,7 +403,9 @@ impl Toodle {
         fs::remove_file(ARCHIVE_TRANSACTION_PATH)?;
 
         self.todos = staged_pages;
-        self.done_count += archived.len();
+        for (page_index, archived_page) in archived.iter().enumerate() {
+            self.done_counts[page_index] += archived_page.len();
+        }
 
         Ok(())
     }
@@ -432,7 +446,7 @@ impl Toodle {
             SCALE,
         );
 
-        let count = self.done_count.to_string();
+        let count = self.done_counts[self.page].to_string();
         let text_scale = GLYPH_SCALE * SCALE;
         let text_w = self.font.text_width(&count) * text_scale;
         let text_h = self.font.cell_h() * text_scale;
@@ -768,8 +782,8 @@ fn draw_pencil_shadow(
 fn page_color(page: usize) -> PageColor {
     match page % PAGE_COUNT {
         0 => PageColor::Pink,
-        1 => PageColor::Yellow,
-        2 => PageColor::Green,
+        1 => PageColor::Green,
+        2 => PageColor::Yellow,
         _ => PageColor::Blue,
     }
 }
