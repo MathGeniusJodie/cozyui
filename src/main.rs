@@ -244,7 +244,11 @@ impl App {
                 self.puter_pressed = true;
                 self.puter.press_button(x, y);
             }
-            WidgetId::Toodle => self.toodle.click(x, y)?,
+            WidgetId::Toodle => {
+                if self.toodle.click(x, y)? {
+                    self.twirl.spin();
+                }
+            }
             WidgetId::Fwends => self.fwends.click(x, y),
             WidgetId::Twirl => self.twirl.click(x, y),
         }

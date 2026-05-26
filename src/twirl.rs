@@ -159,6 +159,10 @@ impl Twirl {
             return;
         }
 
+        self.spin();
+    }
+
+    pub(crate) fn spin(&mut self) {
         self.speed = START_SPEED_MIN + random_unit() * START_SPEED_RANGE;
         self.last_update = Instant::now();
         self.last_click_segment = self.pointer_segment();

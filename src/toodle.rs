@@ -234,34 +234,35 @@ impl Toodle {
         }
     }
 
-    pub(crate) fn click(&mut self, x: i16, y: i16) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn click(&mut self, x: i16, y: i16) -> Result<bool, Box<dyn Error>> {
         if self.eraser_at(x, y) {
             self.archive_completed_todos()?;
             self.focused_line = None;
-            return Ok(());
+            return Ok(false);
         }
 
         let x = x.max(0) as usize / SCALE;
         let y = y.max(0) as usize / SCALE;
         let Some(x) = x.checked_sub(PAGE_OFFSET_X) else {
             self.focused_line = None;
-            return Ok(());
+            return Ok(false);
         };
 
         if x >= PAGE_CURL_X && y >= PAGE_CURL_Y {
             self.page = (self.page + 1) % self.pages.len();
             self.focused_line = None;
-            return Ok(());
+            return Ok(false);
         }
 
         if let Some(line) = checkbox_at(x, y) {
-            self.todos[self.page].items[line].checked = !self.todos[self.page].items[line].checked;
+            let checked = !self.todos[self.page].items[line].checked;
+            self.todos[self.page].items[line].checked = checked;
             self.save_current_page()?;
-            return Ok(());
+            return Ok(checked && self.twirl_on_check_page());
         }
 
         self.focused_line = line_at(y);
-        Ok(())
+        Ok(false)
     }
 
     pub(crate) fn hover(&mut self, x: i16, y: i16) -> bool {
@@ -431,6 +432,10 @@ impl Toodle {
             PageColor::Green => Some(&self.priority_frog),
             PageColor::Blue => Some(&self.priority_snail),
         }
+    }
+
+    fn twirl_on_check_page(&self) -> bool {
+        matches!(page_color(self.page), PageColor::Pink | PageColor::Green)
     }
 
     fn max_stack_offset(&self) -> usize {
