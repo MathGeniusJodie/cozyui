@@ -8,8 +8,8 @@ use x11rb::connection::Connection;
 use x11rb::protocol::shm::{ConnectionExt as ShmConnectionExt, Seg};
 use x11rb::protocol::xproto::ConnectionExt as XprotoConnectionExt;
 use x11rb::protocol::xproto::{
-    AtomEnum, ChangeWindowAttributesAux, CreateGCAux, CreateWindowAux, EventMask, Gcontext,
-    ImageFormat, PropMode, Window, WindowClass,
+    AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, CreateGCAux, CreateWindowAux,
+    EventMask, Gcontext, ImageFormat, PropMode, Window, WindowClass,
 };
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
@@ -155,6 +155,22 @@ impl XWindow {
             self.depth,
             fb.ximage_bytes(),
         )?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn resize(&mut self, width: usize, height: usize) -> Result<(), Box<dyn Error>> {
+        self.conn.configure_window(
+            self.window,
+            &ConfigureWindowAux::new()
+                .width(width as u32)
+                .height(height as u32),
+        )?;
+
+        if let Some(shm_image) = self.shm_image.take() {
+            self.conn.shm_detach(shm_image.seg)?;
+        }
+        self.shm_image = Self::open_shm_image(&self.conn, width, height).ok();
         self.conn.flush()?;
         Ok(())
     }

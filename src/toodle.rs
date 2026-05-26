@@ -147,11 +147,11 @@ impl Toodle {
     }
 
     pub(crate) fn width(&self) -> usize {
-        (PAGE_OFFSET_X + self.pages[0].width + self.max_visible_stack_offset()) * SCALE
+        (PAGE_OFFSET_X + self.pages[0].width + self.stack_offset()) * SCALE
     }
 
     pub(crate) fn height(&self) -> usize {
-        (self.pages[0].height + self.max_visible_stack_offset()) * SCALE
+        (self.pages[0].height + self.stack_offset()) * SCALE
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -162,7 +162,7 @@ impl Toodle {
         fb.clear(self.fill_color(palette));
 
         let page_count = self.logical_page_count();
-        for visual_page in (0..self.pages.len()).rev() {
+        for visual_page in (0..page_count).rev() {
             let logical_page = (self.page + visual_page) % page_count;
             self.render_page(fb, palette, logical_page, visual_page);
         }
@@ -185,7 +185,7 @@ impl Toodle {
         logical_page: usize,
         visual_page: usize,
     ) {
-        let page_image = &self.pages[visual_page];
+        let page_image = &self.pages[visual_page.min(self.pages.len() - 1)];
         let PageRef { section, page } = self.page_ref(logical_page);
         let page_offset = visual_page * PAGE_STACK_OFFSET;
         let page_x = PAGE_OFFSET_X + page_offset;
@@ -455,8 +455,8 @@ impl Toodle {
         )
     }
 
-    fn max_visible_stack_offset(&self) -> usize {
-        self.pages.len().saturating_sub(1) * PAGE_STACK_OFFSET
+    fn stack_offset(&self) -> usize {
+        self.logical_page_count().saturating_sub(1) * PAGE_STACK_OFFSET
     }
 
     fn logical_page_count(&self) -> usize {

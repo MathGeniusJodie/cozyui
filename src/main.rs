@@ -200,6 +200,33 @@ impl App {
         xwin.draw_rect(fb, self.rect_for(widget))
     }
 
+    fn sync_dynamic_layout(&mut self, palette: &Palette) -> bool {
+        let mut changed = false;
+        let toodle_w = self.toodle.width();
+        let toodle_h = self.toodle.height();
+
+        if self.toodle_rect.w != toodle_w || self.toodle_rect.h != toodle_h {
+            self.toodle_rect.w = toodle_w;
+            self.toodle_rect.h = toodle_h;
+            self.toodle_fb = Framebuffer::new(toodle_w, toodle_h, self.toodle.fill_color(palette));
+            changed = true;
+        }
+
+        let fwends_y = self.toodle_rect.y + self.toodle_rect.h + WIDGET_GAP;
+        if self.fwends_rect.y != fwends_y {
+            self.fwends_rect.y = fwends_y;
+            changed = true;
+        }
+
+        let twirl_x = self.toodle_rect.x + self.toodle_rect.w + WIDGET_GAP;
+        if self.twirl_rect.x != twirl_x {
+            self.twirl_rect.x = twirl_x;
+            changed = true;
+        }
+
+        changed
+    }
+
     fn focused_rect(&self) -> Rect {
         self.rect_for(self.focus)
     }
@@ -368,8 +395,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 XEvent::KeyPress(event) => {
                     let input = xwin.keyboard.press(event.detail, event.state.into());
                     app.handle_key_press(&input)?;
-                    app.render_focused_widget(&mut fb, &palette);
-                    xwin.draw_rect(&fb, app.focused_rect())?;
+                    if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
+                        app.render(&mut fb, &palette);
+                        xwin.draw(&fb)?;
+                    } else {
+                        app.render_focused_widget(&mut fb, &palette);
+                        xwin.draw_rect(&fb, app.focused_rect())?;
+                    }
                     drew_frame = true;
                 }
                 XEvent::KeyRelease(event) => {
@@ -390,8 +422,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     detail if detail == u8::from(ButtonIndex::M1) => {
                         app.click(event.event_x, event.event_y)?;
-                        app.render_focused_widget(&mut fb, &palette);
-                        xwin.draw_rect(&fb, app.focused_rect())?;
+                        if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
+                            app.render(&mut fb, &palette);
+                            xwin.draw(&fb)?;
+                        } else {
+                            app.render_focused_widget(&mut fb, &palette);
+                            xwin.draw_rect(&fb, app.focused_rect())?;
+                        }
                         drew_frame = true;
                     }
                     _ => {}
@@ -420,4 +457,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     app.shutdown();
     Ok(())
+}
+
+fn sync_window_layout(
+    app: &mut App,
+    fb: &mut Framebuffer,
+    xwin: &mut XWindow,
+    palette: &Palette,
+) -> Result<bool, Box<dyn Error>> {
+    if !app.sync_dynamic_layout(palette) {
+        return Ok(false);
+    }
+
+    *fb = Framebuffer::new(app.width(), app.height(), app.fill_color(palette));
+    xwin.resize(fb.width, fb.height)?;
+    Ok(true)
 }
