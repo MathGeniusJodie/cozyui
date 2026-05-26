@@ -31,14 +31,15 @@ const PENCIL_SHADOW_PATH: &str = concat!(
     "/assets/toodle_pencil_shadow.png"
 );
 
-const PAGE_COUNT: usize = 4;
-const TODO_FILES: [&str; PAGE_COUNT] = [
+const SECTION_COUNT: usize = 4;
+const VISIBLE_PAGE_COUNT: usize = 4;
+const TODO_FILES: [&str; SECTION_COUNT] = [
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_urgent.txt"),
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_frog.txt"),
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_normal.txt"),
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_snail.txt"),
 ];
-const DONE_TODO_FILES: [&str; PAGE_COUNT] = [
+const DONE_TODO_FILES: [&str; SECTION_COUNT] = [
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_urgent_done.txt"),
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_frog_done.txt"),
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_normal_done.txt"),
@@ -88,7 +89,7 @@ enum PageColor {
 }
 
 pub(crate) struct Toodle {
-    pages: [Image; PAGE_COUNT],
+    pages: [Image; VISIBLE_PAGE_COUNT],
     checkboxes: Image,
     checks: Image,
     eraser: Image,
@@ -99,8 +100,8 @@ pub(crate) struct Toodle {
     pencil: Image,
     pencil_shadow: Image,
     font: BitmapFont,
-    todos: [TodoPage; PAGE_COUNT],
-    done_counts: [usize; PAGE_COUNT],
+    todos: [TodoList; SECTION_COUNT],
+    done_counts: [usize; SECTION_COUNT],
     page: usize,
     focused_line: Option<usize>,
     eraser_hovered: bool,
@@ -128,10 +129,10 @@ impl Toodle {
             pencil_shadow: Image::load(PENCIL_SHADOW_PATH, palette)?,
             font: BitmapFont::load(&peanut_money_font::PEANUT_MONEY_SPEC)?,
             todos: [
-                TodoPage::load(TODO_FILES[0])?,
-                TodoPage::load(TODO_FILES[1])?,
-                TodoPage::load(TODO_FILES[2])?,
-                TodoPage::load(TODO_FILES[3])?,
+                TodoList::load(TODO_FILES[0])?,
+                TodoList::load(TODO_FILES[1])?,
+                TodoList::load(TODO_FILES[2])?,
+                TodoList::load(TODO_FILES[3])?,
             ],
             done_counts: [
                 done_todo_count(DONE_TODO_FILES[0])?,
@@ -146,11 +147,11 @@ impl Toodle {
     }
 
     pub(crate) fn width(&self) -> usize {
-        (PAGE_OFFSET_X + self.pages[0].width + self.max_stack_offset()) * SCALE
+        (PAGE_OFFSET_X + self.pages[0].width + self.max_visible_stack_offset()) * SCALE
     }
 
     pub(crate) fn height(&self) -> usize {
-        (self.pages[0].height + self.max_stack_offset()) * SCALE
+        (self.pages[0].height + self.max_visible_stack_offset()) * SCALE
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -160,8 +161,9 @@ impl Toodle {
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
 
+        let page_count = self.logical_page_count();
         for visual_page in (0..self.pages.len()).rev() {
-            let logical_page = (self.page + visual_page) % self.pages.len();
+            let logical_page = (self.page + visual_page) % page_count;
             self.render_page(fb, palette, logical_page, visual_page);
         }
 
@@ -184,13 +186,14 @@ impl Toodle {
         visual_page: usize,
     ) {
         let page_image = &self.pages[visual_page];
+        let PageRef { section, page } = self.page_ref(logical_page);
         let page_offset = visual_page * PAGE_STACK_OFFSET;
         let page_x = PAGE_OFFSET_X + page_offset;
         let page_y = page_offset;
         draw_page_image(
             fb,
             page_image,
-            page_color(logical_page),
+            section_color(section),
             palette,
             page_x,
             page_y,
@@ -212,9 +215,9 @@ impl Toodle {
             text_color
         };
         for (line, _) in LINE_Y.iter().enumerate().take(LINE_COUNT) {
-            let todo = &self.todos[logical_page].items[line];
+            let todo = self.todos[section].item(page, line);
             if todo.checked {
-                self.draw_check(fb, palette, logical_page, line, page_offset);
+                self.draw_check(fb, palette, section, line, page_offset);
             }
 
             draw_todo_text(
@@ -249,15 +252,19 @@ impl Toodle {
         };
 
         if x >= PAGE_CURL_X && y >= PAGE_CURL_Y {
-            self.page = (self.page + 1) % self.pages.len();
+            self.page = (self.page + 1) % self.logical_page_count();
             self.focused_line = None;
             return Ok(false);
         }
 
         if let Some(line) = checkbox_at(x, y) {
-            let checked = !self.todos[self.page].items[line].checked;
-            self.todos[self.page].items[line].checked = checked;
-            self.save_current_page()?;
+            let PageRef { section, page } = self.current_page_ref();
+            let checked = {
+                let item = self.todos[section].item_mut(page, line);
+                item.checked = !item.checked;
+                item.checked
+            };
+            self.save_current_section()?;
             return Ok(checked && self.twirl_on_check_page());
         }
 
@@ -282,13 +289,15 @@ impl Toodle {
 
         match edit_key(input) {
             EditKey::Insert(ch) => {
-                let text = &mut self.todos[self.page].items[line].text;
+                let PageRef { section, page } = self.current_page_ref();
+                let text = &mut self.todos[section].item_mut(page, line).text;
                 if self.font.fits_with_insert(text, ch, max_text_width(line)) {
                     text.push(ch);
                 }
             }
             EditKey::Backspace => {
-                self.todos[self.page].items[line].text.pop();
+                let PageRef { section, page } = self.current_page_ref();
+                self.todos[section].item_mut(page, line).text.pop();
             }
             EditKey::Enter => {
                 self.focused_line = Some((line + 1).min(LINE_COUNT - 1));
@@ -299,7 +308,7 @@ impl Toodle {
             EditKey::Tab | EditKey::Left | EditKey::Right | EditKey::None => return Ok(()),
         }
 
-        self.save_current_page()
+        self.save_current_section()
     }
 
     fn draw_check(
@@ -339,13 +348,17 @@ impl Toodle {
         }
     }
 
-    fn save_current_page(&self) -> Result<(), Box<dyn Error>> {
-        self.todos[self.page].save(TODO_FILES[self.page])
+    fn save_current_section(&mut self) -> Result<(), Box<dyn Error>> {
+        let current_page = self.current_page_ref();
+        self.todos[current_page.section].save(TODO_FILES[current_page.section])?;
+        self.keep_section_page_visible(current_page);
+        Ok(())
     }
 
     fn archive_completed_todos(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut archived: [Vec<String>; PAGE_COUNT] = std::array::from_fn(|_| Vec::new());
-        let mut changed_pages = [false; PAGE_COUNT];
+        let current_page = self.current_page_ref();
+        let mut archived: [Vec<String>; SECTION_COUNT] = std::array::from_fn(|_| Vec::new());
+        let mut changed_pages = [false; SECTION_COUNT];
         let mut staged_pages = self.todos.clone();
 
         for (page_index, page) in staged_pages.iter_mut().enumerate() {
@@ -362,8 +375,8 @@ impl Toodle {
             }
 
             if changed_pages[page_index] {
-                page.items =
-                    std::array::from_fn(|index| remaining.get(index).cloned().unwrap_or_default());
+                page.items = remaining;
+                page.trim_trailing_blank_items();
             }
         }
 
@@ -407,6 +420,7 @@ impl Toodle {
         for (page_index, archived_page) in archived.iter().enumerate() {
             self.done_counts[page_index] += archived_page.len();
         }
+        self.keep_section_page_visible(current_page);
 
         Ok(())
     }
@@ -426,7 +440,7 @@ impl Toodle {
     }
 
     fn priority_icon(&self) -> Option<&Image> {
-        match page_color(self.page) {
+        match section_color(self.current_page_ref().section) {
             PageColor::Pink => Some(&self.priority_urgent),
             PageColor::Yellow => None,
             PageColor::Green => Some(&self.priority_frog),
@@ -435,11 +449,51 @@ impl Toodle {
     }
 
     fn twirl_on_check_page(&self) -> bool {
-        matches!(page_color(self.page), PageColor::Pink | PageColor::Green)
+        matches!(
+            section_color(self.current_page_ref().section),
+            PageColor::Pink | PageColor::Green
+        )
     }
 
-    fn max_stack_offset(&self) -> usize {
+    fn max_visible_stack_offset(&self) -> usize {
         self.pages.len().saturating_sub(1) * PAGE_STACK_OFFSET
+    }
+
+    fn logical_page_count(&self) -> usize {
+        self.todos.iter().map(TodoList::page_count).sum()
+    }
+
+    fn current_page_ref(&self) -> PageRef {
+        self.page_ref(self.page)
+    }
+
+    fn page_ref(&self, mut page: usize) -> PageRef {
+        for (section, todos) in self.todos.iter().enumerate() {
+            let section_pages = todos.page_count();
+            if page < section_pages {
+                return PageRef { section, page };
+            }
+            page -= section_pages;
+        }
+
+        PageRef {
+            section: SECTION_COUNT - 1,
+            page: self.todos[SECTION_COUNT - 1].page_count() - 1,
+        }
+    }
+
+    fn page_index_for(&self, section: usize, section_page: usize) -> usize {
+        self.todos
+            .iter()
+            .take(section)
+            .map(TodoList::page_count)
+            .sum::<usize>()
+            + section_page.min(self.todos[section].page_count() - 1)
+    }
+
+    fn keep_section_page_visible(&mut self, page: PageRef) {
+        let section_pages = self.todos[page.section].page_count();
+        self.page = self.page_index_for(page.section, page.page.min(section_pages - 1));
     }
 
     fn draw_goldstar(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -451,7 +505,7 @@ impl Toodle {
             SCALE,
         );
 
-        let count = self.done_counts[self.page].to_string();
+        let count = self.done_counts[self.current_page_ref().section].to_string();
         let text_scale = GLYPH_SCALE * SCALE;
         let text_w = self.font.text_width(&count) * text_scale;
         let text_h = self.font.cell_h() * text_scale;
@@ -489,7 +543,7 @@ impl Toodle {
                 &self.pencil_shadow,
                 dest_x,
                 dest_y,
-                page_color(self.page),
+                section_color(self.current_page_ref().section),
                 palette,
                 pencil_on_second_line,
             );
@@ -530,7 +584,8 @@ impl Toodle {
 
     fn focused_pencil_position(&self) -> Option<(usize, usize, usize, bool)> {
         let line = self.focused_line?;
-        let todo = &self.todos[self.page].items[line];
+        let PageRef { section, page } = self.current_page_ref();
+        let todo = self.todos[section].item(page, line);
         let (cursor_x, cursor_y) = pencil_cursor_position(&self.font, line, &todo.text);
         Some((
             line,
@@ -541,7 +596,8 @@ impl Toodle {
     }
 
     fn should_draw_pencil_shadow(&self, line: usize) -> bool {
-        let char_count = self.todos[self.page].items[line].text.chars().count();
+        let PageRef { section, page } = self.current_page_ref();
+        let char_count = self.todos[section].item(page, line).text.chars().count();
         match line {
             line if line == LINE_COUNT - 2 => char_count <= PENULTIMATE_LINE_SHADOW_MAX_CHARS,
             line if line == LINE_COUNT - 1 => char_count <= LAST_LINE_SHADOW_MAX_CHARS,
@@ -557,9 +613,10 @@ impl Toodle {
     }
 }
 
-#[derive(Clone)]
-struct TodoPage {
-    items: [TodoItem; LINE_COUNT],
+#[derive(Clone, Copy)]
+struct PageRef {
+    section: usize,
+    page: usize,
 }
 
 fn done_todo_count(path: &str) -> Result<usize, Box<dyn Error>> {
@@ -570,27 +627,74 @@ fn done_todo_count(path: &str) -> Result<usize, Box<dyn Error>> {
     Ok(fs::read_to_string(path)?.lines().count())
 }
 
-impl TodoPage {
+#[derive(Clone)]
+struct TodoList {
+    items: Vec<TodoItem>,
+}
+
+impl TodoList {
     fn load(path: &str) -> Result<Self, Box<dyn Error>> {
-        let mut items = std::array::from_fn(|_| TodoItem::default());
-        if Path::new(path).exists() {
-            for (index, line) in fs::read_to_string(path)?
+        let items = if Path::new(path).exists() {
+            fs::read_to_string(path)?
                 .lines()
-                .take(LINE_COUNT)
-                .enumerate()
-            {
-                items[index] = TodoItem::parse(line);
-            }
-        }
-        Ok(Self { items })
+                .map(TodoItem::parse)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut list = Self { items };
+        list.trim_trailing_blank_items();
+        Ok(list)
     }
 
-    fn save(&self, path: &str) -> Result<(), Box<dyn Error>> {
+    fn save(&mut self, path: &str) -> Result<(), Box<dyn Error>> {
+        self.trim_trailing_blank_items();
         atomic_write(path, self.serialized_text().as_bytes())?;
         Ok(())
     }
 
+    fn page_count(&self) -> usize {
+        let pages_with_items = self.items.len().div_ceil(LINE_COUNT).max(1);
+        let last_page_start = (pages_with_items - 1) * LINE_COUNT;
+        let last_page_full = self.items.len() > 0
+            && (last_page_start..last_page_start + LINE_COUNT)
+                .all(|index| self.items.get(index).is_some_and(|item| !item.is_blank()));
+        if last_page_full {
+            pages_with_items + 1
+        } else {
+            pages_with_items
+        }
+    }
+
+    fn item(&self, page: usize, line: usize) -> &TodoItem {
+        static BLANK_ITEM: TodoItem = TodoItem {
+            text: String::new(),
+            checked: false,
+        };
+        self.items
+            .get(page * LINE_COUNT + line)
+            .unwrap_or(&BLANK_ITEM)
+    }
+
+    fn item_mut(&mut self, page: usize, line: usize) -> &mut TodoItem {
+        let index = page * LINE_COUNT + line;
+        if self.items.len() <= index {
+            self.items.resize_with(index + 1, TodoItem::default);
+        }
+        &mut self.items[index]
+    }
+
+    fn trim_trailing_blank_items(&mut self) {
+        while self.items.last().is_some_and(TodoItem::is_blank) {
+            self.items.pop();
+        }
+    }
+
     fn serialized_text(&self) -> String {
+        if self.items.is_empty() {
+            return String::new();
+        }
+
         let text = self
             .items
             .iter()
@@ -736,6 +840,10 @@ impl TodoItem {
             self.text.clone()
         }
     }
+
+    fn is_blank(&self) -> bool {
+        !self.checked && self.text.is_empty()
+    }
 }
 
 fn draw_page_image(
@@ -784,8 +892,8 @@ fn draw_pencil_shadow(
     );
 }
 
-fn page_color(page: usize) -> PageColor {
-    match page % PAGE_COUNT {
+fn section_color(section: usize) -> PageColor {
+    match section % SECTION_COUNT {
         0 => PageColor::Pink,
         1 => PageColor::Green,
         2 => PageColor::Yellow,
@@ -1003,15 +1111,49 @@ mod tests {
     }
 
     #[test]
-    fn todo_page_serializes_fixed_line_count() {
-        let mut page = TodoPage {
-            items: std::array::from_fn(|_| TodoItem::default()),
+    fn todo_list_serializes_only_needed_lines() {
+        let mut list = TodoList {
+            items: vec![TodoItem::default(); LINE_COUNT],
         };
-        page.items[0] = TodoItem::parse("[x] done");
-        page.items[1] = TodoItem::parse("next");
+        list.items[0] = TodoItem::parse("[x] done");
+        list.items[1] = TodoItem::parse("next");
+        list.trim_trailing_blank_items();
 
-        assert_eq!(page.serialized_text().lines().count(), LINE_COUNT);
-        assert!(page.serialized_text().starts_with("[x] done\nnext\n"));
+        assert_eq!(list.serialized_text().lines().count(), 2);
+        assert_eq!(list.serialized_text(), "[x] done\nnext\n");
+    }
+
+    #[test]
+    fn todo_list_adds_blank_page_after_full_page() {
+        let mut list = TodoList { items: Vec::new() };
+        for line in 0..LINE_COUNT {
+            list.item_mut(0, line).text = format!("todo {line}");
+        }
+
+        assert_eq!(list.page_count(), 2);
+
+        list.items.pop();
+        assert_eq!(list.page_count(), 1);
+    }
+
+    #[test]
+    fn todo_list_does_not_add_page_after_sparse_page() {
+        let mut list = TodoList {
+            items: vec![TodoItem::default(); LINE_COUNT],
+        };
+        list.items[0].text = "first".to_string();
+        list.items[LINE_COUNT - 1].text = "last".to_string();
+
+        assert_eq!(list.page_count(), 1);
+    }
+
+    #[test]
+    fn todo_list_uses_one_file_for_overflow_pages() {
+        let mut list = TodoList { items: Vec::new() };
+        list.item_mut(1, 0).text = "overflow".to_string();
+
+        assert_eq!(list.serialized_text().lines().count(), LINE_COUNT + 1);
+        assert!(list.serialized_text().ends_with("overflow\n"));
     }
 
     #[test]
