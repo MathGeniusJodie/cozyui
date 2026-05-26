@@ -10,12 +10,12 @@ use crate::palette_color;
 use crate::{Framebuffer, Image, Palette, Rgba};
 
 const WHEEL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/wheel.png");
+const TOTAL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/twirl_total.txt");
 
 const SEGMENT_COUNT: usize = 12;
 const SEGMENT_NUMBERS: [&str; SEGMENT_COUNT] = [
     "1", "2", "1", "3", "1", "4", "1", "5", "1", "10", "1", "100",
 ];
-
 
 const SEGMENT_LIGHT_COLORS: [usize; SEGMENT_COUNT] = [
     palette_color::LAVENDER,
@@ -55,6 +55,7 @@ const POINTER_ANGLE: f32 = -std::f32::consts::FRAC_PI_2;
 const CLICK_SAMPLE_RATE: u32 = 22_050;
 const CLICK_DURATION_SECONDS: f32 = 0.012;
 const CLICK_VOLUME: f32 = 1200.0;
+const TOTAL_GAP: usize = 4;
 
 pub(crate) struct Twirl {
     wheel: Image,
@@ -63,6 +64,7 @@ pub(crate) struct Twirl {
     speed: f32,
     last_update: Instant,
     last_click_segment: usize,
+    total: u64,
 }
 
 impl Twirl {
@@ -74,6 +76,7 @@ impl Twirl {
             speed: 0.0,
             last_update: Instant::now(),
             last_click_segment: 0,
+            total: load_total(TOTAL_PATH)?,
         })
     }
 
@@ -82,7 +85,7 @@ impl Twirl {
     }
 
     pub(crate) fn height(&self) -> usize {
-        self.wheel.height
+        self.wheel.height + TOTAL_GAP + self.font.cell_h()
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -107,15 +110,16 @@ impl Twirl {
         }
 
         self.draw_numbers(fb, palette);
+        self.draw_total(fb, palette);
     }
 
-    pub(crate) fn update(&mut self) -> bool {
+    pub(crate) fn update(&mut self) -> Result<bool, Box<dyn Error>> {
         let now = Instant::now();
         let dt = now.duration_since(self.last_update);
         self.last_update = now;
 
         if self.speed <= 0.0 {
-            return false;
+            return Ok(false);
         }
 
         let previous_segment = self.pointer_segment();
@@ -130,10 +134,11 @@ impl Twirl {
 
         if self.speed < STOP_SPEED {
             self.speed = 0.0;
+            self.add_landed_value()?;
             play_jingle();
         }
 
-        true
+        Ok(true)
     }
 
     pub(crate) fn click(&mut self, x: i16, y: i16) {
@@ -191,6 +196,22 @@ impl Twirl {
         }
     }
 
+    fn draw_total(&self, fb: &mut Framebuffer, palette: &Palette) {
+        let total = self.total.to_string();
+        let text_w = self.font.text_width(&total);
+        let x = self.wheel.width.saturating_sub(text_w) / 2;
+        let y = self.wheel.height + TOTAL_GAP;
+        self.font
+            .draw_text(fb, &total, x, y, 1, palette.color(palette_color::CREAM));
+    }
+
+    fn add_landed_value(&mut self) -> Result<(), Box<dyn Error>> {
+        self.total = self
+            .total
+            .saturating_add(segment_value(self.pointer_segment())?);
+        save_total(TOTAL_PATH, self.total)
+    }
+
     fn pointer_segment(&self) -> usize {
         segment_for_angle(POINTER_ANGLE + self.angle)
     }
@@ -227,6 +248,24 @@ fn random_unit() -> f32 {
         .unwrap_or(Duration::ZERO)
         .subsec_nanos();
     (nanos % 10_000) as f32 / 10_000.0
+}
+
+fn segment_value(segment: usize) -> Result<u64, Box<dyn Error>> {
+    Ok(SEGMENT_NUMBERS[segment].parse()?)
+}
+
+fn load_total(path: &str) -> Result<u64, Box<dyn Error>> {
+    if !std::path::Path::new(path).exists() {
+        return Ok(0);
+    }
+
+    let text = fs::read_to_string(path)?;
+    Ok(text.trim().parse()?)
+}
+
+fn save_total(path: &str, total: u64) -> Result<(), Box<dyn Error>> {
+    fs::write(path, format!("{total}\n"))?;
+    Ok(())
 }
 
 fn play_click() {
@@ -351,5 +390,11 @@ mod tests {
         assert_eq!(&bytes[8..12], b"WAVE");
         assert_eq!(&bytes[36..40], b"data");
         assert_eq!(bytes.len(), 50);
+    }
+
+    #[test]
+    fn segment_value_uses_customizable_numbers() {
+        assert_eq!(segment_value(0).unwrap(), 1);
+        assert_eq!(segment_value(SEGMENT_COUNT - 1).unwrap(), 100);
     }
 }

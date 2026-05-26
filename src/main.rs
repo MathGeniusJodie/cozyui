@@ -308,7 +308,7 @@ impl App {
         })
     }
 
-    fn update_twirl(&mut self) -> bool {
+    fn update_twirl(&mut self) -> Result<bool, Box<dyn Error>> {
         self.twirl.update()
     }
 
@@ -349,7 +349,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
-        if app.update_twirl() {
+        if app.update_twirl()? {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Twirl)?;
             drew_frame = true;
         }
