@@ -50,6 +50,39 @@ impl BitmapFont {
         text.chars().map(|ch| self.advance(ch)).sum()
     }
 
+    pub(crate) fn text_ink_bounds(&self, text: &str) -> Option<TextInkBounds> {
+        let mut bounds: Option<TextInkBounds> = None;
+        let mut cursor_x = 0_isize;
+        for ch in text.chars() {
+            for gy in 0..self.spec.cell_h {
+                for gx in 0..self.spec.cell_w {
+                    if !self.is_on(ch, gx, gy) {
+                        continue;
+                    }
+
+                    let x = cursor_x + gx as isize - self.spec.x_origin as isize;
+                    let y = gy;
+                    bounds = Some(match bounds {
+                        Some(bounds) => TextInkBounds {
+                            min_x: bounds.min_x.min(x),
+                            min_y: bounds.min_y.min(y),
+                            max_x: bounds.max_x.max(x + 1),
+                            max_y: bounds.max_y.max(y + 1),
+                        },
+                        None => TextInkBounds {
+                            min_x: x,
+                            min_y: y,
+                            max_x: x + 1,
+                            max_y: y + 1,
+                        },
+                    });
+                }
+            }
+            cursor_x += self.advance(ch) as isize;
+        }
+        bounds
+    }
+
     pub(crate) fn wrap_lines(&self, text: &str, max_width: usize) -> Vec<String> {
         text_wrap::wrap_lines(text, max_width, |ch| self.advance(ch))
     }
@@ -121,6 +154,23 @@ impl BitmapFont {
                 fb.fill_rect(dest_x as usize, y + gy * scale, scale, scale, color);
             }
         }
+    }
+}
+
+pub(crate) struct TextInkBounds {
+    pub(crate) min_x: isize,
+    pub(crate) min_y: usize,
+    pub(crate) max_x: isize,
+    pub(crate) max_y: usize,
+}
+
+impl TextInkBounds {
+    pub(crate) fn width(&self) -> usize {
+        (self.max_x - self.min_x).max(0) as usize
+    }
+
+    pub(crate) fn height(&self) -> usize {
+        self.max_y.saturating_sub(self.min_y)
     }
 }
 

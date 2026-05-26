@@ -359,25 +359,10 @@ impl Alarm {
             return;
         }
 
-        let active = palette.color(palette_color::ROSE);
         let text = palette.color(palette_color::LAVENDER);
-        let inactive = palette.color(palette_color::LAVENDER);
         let count = self.stations.len();
         for (index, station) in self.stations.iter().enumerate() {
             let center = station_center(index, count);
-            let color = if index == self.station {
-                active
-            } else {
-                inactive
-            };
-            fb.fill_rect(
-                center.saturating_sub(TUNER_MARK_SIZE / 2),
-                TUNER_MARK_Y,
-                TUNER_MARK_SIZE,
-                TUNER_MARK_SIZE,
-                color,
-            );
-
             let label_w = self.font.text_width(&station.label);
             let label_x = center.saturating_sub(label_w / 2);
             let label_y = if index % 2 == 0 {
@@ -388,6 +373,19 @@ impl Alarm {
             self.font
                 .draw_text(fb, &station.label, label_x, label_y, 1, text);
         }
+
+        let marker_x = if self.player.is_some() {
+            station_center(self.station, count)
+        } else {
+            TUNER_X.saturating_sub(TUNER_MARK_SIZE + 2)
+        };
+        fb.fill_rect(
+            marker_x.saturating_sub(TUNER_MARK_SIZE / 2),
+            TUNER_MARK_Y,
+            TUNER_MARK_SIZE,
+            TUNER_MARK_SIZE,
+            palette.color(palette_color::ROSE),
+        );
     }
 
     fn draw_knob(&self, fb: &mut Framebuffer, palette: &Palette) {

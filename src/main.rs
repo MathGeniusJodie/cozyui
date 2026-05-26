@@ -8,13 +8,22 @@ use x11rb::protocol::xproto::ButtonIndex;
 mod alarm;
 mod bitmap_font;
 mod comicoro_font;
+mod day;
 mod emojimap;
 mod fwends;
 mod graphics;
 mod peanut_money_font;
 #[allow(dead_code)]
+mod pixolde_bold_font;
+#[allow(dead_code)]
+mod pixolde_font;
+#[allow(dead_code)]
+mod pixolde_italic_font;
+#[allow(dead_code)]
 mod poco_font;
 mod puter;
+#[allow(dead_code)]
+mod rozha_one_48_font;
 mod text_input;
 mod text_wrap;
 mod toodle;
@@ -58,15 +67,17 @@ enum WidgetId {
     Fwends,
     Twirl,
     Alarm,
+    Day,
 }
 
 impl WidgetId {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Puter,
         Self::Toodle,
         Self::Fwends,
         Self::Twirl,
         Self::Alarm,
+        Self::Day,
     ];
 }
 
@@ -76,16 +87,19 @@ struct App {
     fwends: fwends::Fwends,
     twirl: twirl::Twirl,
     alarm: alarm::Alarm,
+    day: day::Day,
     puter_fb: Framebuffer,
     toodle_fb: Framebuffer,
     fwends_fb: Framebuffer,
     twirl_fb: Framebuffer,
     alarm_fb: Framebuffer,
+    day_fb: Framebuffer,
     puter_rect: Rect,
     toodle_rect: Rect,
     fwends_rect: Rect,
     twirl_rect: Rect,
     alarm_rect: Rect,
+    day_rect: Rect,
     focus: WidgetId,
     puter_pressed: bool,
 }
@@ -97,6 +111,7 @@ impl App {
         let fwends = fwends::Fwends::load(palette)?;
         let twirl = twirl::Twirl::load(palette)?;
         let alarm = alarm::Alarm::load(palette)?;
+        let day = day::Day::load()?;
         let puter_rect = Rect {
             x: 0,
             y: 0,
@@ -127,11 +142,18 @@ impl App {
             w: alarm.width(),
             h: alarm.height(),
         };
+        let day_rect = Rect {
+            x: twirl_rect.x,
+            y: alarm_rect.y + alarm.height() + WIDGET_GAP,
+            w: day.width(),
+            h: day.height(),
+        };
         let puter_fb = Framebuffer::new(puter_rect.w, puter_rect.h, puter.fill_color(palette));
         let toodle_fb = Framebuffer::new(toodle_rect.w, toodle_rect.h, toodle.fill_color(palette));
         let fwends_fb = Framebuffer::new(fwends_rect.w, fwends_rect.h, fwends.fill_color(palette));
         let twirl_fb = Framebuffer::new(twirl_rect.w, twirl_rect.h, twirl.fill_color(palette));
         let alarm_fb = Framebuffer::new(alarm_rect.w, alarm_rect.h, alarm.fill_color(palette));
+        let day_fb = Framebuffer::new(day_rect.w, day_rect.h, day.fill_color(palette));
 
         Ok(Self {
             puter,
@@ -139,16 +161,19 @@ impl App {
             fwends,
             twirl,
             alarm,
+            day,
             puter_fb,
             toodle_fb,
             fwends_fb,
             twirl_fb,
             alarm_fb,
+            day_fb,
             puter_rect,
             toodle_rect,
             fwends_rect,
             twirl_rect,
             alarm_rect,
+            day_rect,
             focus: WidgetId::Toodle,
             puter_pressed: false,
         })
@@ -161,6 +186,7 @@ impl App {
             .max(self.fwends_rect.x + self.fwends_rect.w)
             .max(self.twirl_rect.x + self.twirl_rect.w)
             .max(self.alarm_rect.x + self.alarm_rect.w)
+            .max(self.day_rect.x + self.day_rect.w)
     }
 
     fn height(&self) -> usize {
@@ -169,6 +195,7 @@ impl App {
             .max(self.fwends_rect.y + self.fwends_rect.h)
             .max(self.twirl_rect.y + self.twirl_rect.h)
             .max(self.alarm_rect.y + self.alarm_rect.h)
+            .max(self.day_rect.y + self.day_rect.h)
     }
 
     fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -212,6 +239,11 @@ impl App {
                 self.alarm_fb.clear(self.alarm.fill_color(palette));
                 self.alarm.render(&mut self.alarm_fb, palette);
                 fb.blit_from(&self.alarm_fb, self.alarm_rect.x, self.alarm_rect.y);
+            }
+            WidgetId::Day => {
+                self.day_fb.clear(self.day.fill_color(palette));
+                self.day.render(&mut self.day_fb, palette);
+                fb.blit_from(&self.day_fb, self.day_rect.x, self.day_rect.y);
             }
         }
     }
@@ -263,6 +295,14 @@ impl App {
             changed = true;
         }
 
+        let day_x = self.twirl_rect.x;
+        let day_y = self.alarm_rect.y + self.alarm_rect.h + WIDGET_GAP;
+        if self.day_rect.x != day_x || self.day_rect.y != day_y {
+            self.day_rect.x = day_x;
+            self.day_rect.y = day_y;
+            changed = true;
+        }
+
         changed
     }
 
@@ -277,6 +317,7 @@ impl App {
             WidgetId::Fwends => self.fwends_rect,
             WidgetId::Twirl => self.twirl_rect,
             WidgetId::Alarm => self.alarm_rect,
+            WidgetId::Day => self.day_rect,
         }
     }
 
@@ -296,7 +337,7 @@ impl App {
             }
             WidgetId::Toodle => self.toodle.handle_key_press(input),
             WidgetId::Fwends => self.fwends.handle_key_press(input),
-            WidgetId::Twirl | WidgetId::Alarm => Ok(()),
+            WidgetId::Twirl | WidgetId::Alarm | WidgetId::Day => Ok(()),
         }
     }
 
@@ -321,6 +362,7 @@ impl App {
             WidgetId::Alarm => {
                 self.alarm.click(x, y);
             }
+            WidgetId::Day => {}
         }
         Ok(())
     }
@@ -385,7 +427,7 @@ impl App {
             }
             (WidgetId::Alarm, ScrollDirection::Up) => self.alarm.scroll_up(x, y),
             (WidgetId::Alarm, ScrollDirection::Down) => self.alarm.scroll_down(x, y),
-            (WidgetId::Toodle | WidgetId::Twirl, _) => return None,
+            (WidgetId::Toodle | WidgetId::Twirl | WidgetId::Day, _) => return None,
         };
         handled.then_some(widget)
     }
@@ -393,6 +435,7 @@ impl App {
     fn widget_at(&self, x: i16, y: i16) -> Option<(WidgetId, i16, i16)> {
         [
             WidgetId::Alarm,
+            WidgetId::Day,
             WidgetId::Twirl,
             WidgetId::Fwends,
             WidgetId::Toodle,
@@ -414,6 +457,10 @@ impl App {
 
     fn update_alarm(&mut self) -> bool {
         self.alarm.update()
+    }
+
+    fn update_day(&mut self) -> bool {
+        self.day.update()
     }
 
     fn shutdown(&mut self) {
@@ -461,6 +508,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if app.update_alarm() {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Alarm)?;
+            drew_frame = true;
+        }
+
+        if app.update_day() {
+            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Day)?;
             drew_frame = true;
         }
 
