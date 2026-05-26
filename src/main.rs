@@ -5,6 +5,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event as XEvent;
 use x11rb::protocol::xproto::ButtonIndex;
 
+mod alarm;
 mod bitmap_font;
 mod comicoro_font;
 mod emojimap;
@@ -50,16 +51,23 @@ const WHEEL_DOWN: u8 = 5;
 
 const WIDGET_GAP: usize = 16;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum WidgetId {
     Puter,
     Toodle,
     Fwends,
     Twirl,
+    Alarm,
 }
 
 impl WidgetId {
-    const ALL: [Self; 4] = [Self::Puter, Self::Toodle, Self::Fwends, Self::Twirl];
+    const ALL: [Self; 5] = [
+        Self::Puter,
+        Self::Toodle,
+        Self::Fwends,
+        Self::Twirl,
+        Self::Alarm,
+    ];
 }
 
 struct App {
@@ -67,14 +75,17 @@ struct App {
     toodle: toodle::Toodle,
     fwends: fwends::Fwends,
     twirl: twirl::Twirl,
+    alarm: alarm::Alarm,
     puter_fb: Framebuffer,
     toodle_fb: Framebuffer,
     fwends_fb: Framebuffer,
     twirl_fb: Framebuffer,
+    alarm_fb: Framebuffer,
     puter_rect: Rect,
     toodle_rect: Rect,
     fwends_rect: Rect,
     twirl_rect: Rect,
+    alarm_rect: Rect,
     focus: WidgetId,
     puter_pressed: bool,
 }
@@ -85,6 +96,7 @@ impl App {
         let toodle = toodle::Toodle::load(palette)?;
         let fwends = fwends::Fwends::load(palette)?;
         let twirl = twirl::Twirl::load(palette)?;
+        let alarm = alarm::Alarm::load(palette)?;
         let puter_rect = Rect {
             x: 0,
             y: 0,
@@ -109,24 +121,34 @@ impl App {
             w: twirl.width(),
             h: twirl.height(),
         };
+        let alarm_rect = Rect {
+            x: twirl_rect.x,
+            y: twirl.height() + WIDGET_GAP,
+            w: alarm.width(),
+            h: alarm.height(),
+        };
         let puter_fb = Framebuffer::new(puter_rect.w, puter_rect.h, puter.fill_color(palette));
         let toodle_fb = Framebuffer::new(toodle_rect.w, toodle_rect.h, toodle.fill_color(palette));
         let fwends_fb = Framebuffer::new(fwends_rect.w, fwends_rect.h, fwends.fill_color(palette));
         let twirl_fb = Framebuffer::new(twirl_rect.w, twirl_rect.h, twirl.fill_color(palette));
+        let alarm_fb = Framebuffer::new(alarm_rect.w, alarm_rect.h, alarm.fill_color(palette));
 
         Ok(Self {
             puter,
             toodle,
             fwends,
             twirl,
+            alarm,
             puter_fb,
             toodle_fb,
             fwends_fb,
             twirl_fb,
+            alarm_fb,
             puter_rect,
             toodle_rect,
             fwends_rect,
             twirl_rect,
+            alarm_rect,
             focus: WidgetId::Toodle,
             puter_pressed: false,
         })
@@ -138,6 +160,7 @@ impl App {
             .saturating_add(self.toodle_rect.w)
             .max(self.fwends_rect.x + self.fwends_rect.w)
             .max(self.twirl_rect.x + self.twirl_rect.w)
+            .max(self.alarm_rect.x + self.alarm_rect.w)
     }
 
     fn height(&self) -> usize {
@@ -145,6 +168,7 @@ impl App {
             .h
             .max(self.fwends_rect.y + self.fwends_rect.h)
             .max(self.twirl_rect.y + self.twirl_rect.h)
+            .max(self.alarm_rect.y + self.alarm_rect.h)
     }
 
     fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -183,6 +207,11 @@ impl App {
                 self.twirl_fb.clear(self.twirl.fill_color(palette));
                 self.twirl.render(&mut self.twirl_fb, palette);
                 fb.blit_from(&self.twirl_fb, self.twirl_rect.x, self.twirl_rect.y);
+            }
+            WidgetId::Alarm => {
+                self.alarm_fb.clear(self.alarm.fill_color(palette));
+                self.alarm.render(&mut self.alarm_fb, palette);
+                fb.blit_from(&self.alarm_fb, self.alarm_rect.x, self.alarm_rect.y);
             }
         }
     }
@@ -226,6 +255,14 @@ impl App {
             changed = true;
         }
 
+        let alarm_x = self.twirl_rect.x;
+        let alarm_y = self.twirl_rect.y + self.twirl_rect.h + WIDGET_GAP;
+        if self.alarm_rect.x != alarm_x || self.alarm_rect.y != alarm_y {
+            self.alarm_rect.x = alarm_x;
+            self.alarm_rect.y = alarm_y;
+            changed = true;
+        }
+
         changed
     }
 
@@ -239,6 +276,7 @@ impl App {
             WidgetId::Toodle => self.toodle_rect,
             WidgetId::Fwends => self.fwends_rect,
             WidgetId::Twirl => self.twirl_rect,
+            WidgetId::Alarm => self.alarm_rect,
         }
     }
 
@@ -258,7 +296,7 @@ impl App {
             }
             WidgetId::Toodle => self.toodle.handle_key_press(input),
             WidgetId::Fwends => self.fwends.handle_key_press(input),
-            WidgetId::Twirl => Ok(()),
+            WidgetId::Twirl | WidgetId::Alarm => Ok(()),
         }
     }
 
@@ -280,27 +318,41 @@ impl App {
             }
             WidgetId::Fwends => self.fwends.click(x, y),
             WidgetId::Twirl => self.twirl.click(x, y),
+            WidgetId::Alarm => {
+                self.alarm.click(x, y);
+            }
         }
         Ok(())
     }
 
-    fn release(&mut self, x: i16, y: i16) -> bool {
+    fn release(&mut self, x: i16, y: i16) -> Option<WidgetId> {
+        if self.focus == WidgetId::Alarm && self.alarm.release() {
+            return Some(WidgetId::Alarm);
+        }
+
         if self.puter_pressed {
             let (x, y) = self.puter_rect.local(x, y);
             self.puter.release_button(x, y);
             self.puter_pressed = false;
-            return true;
+            return Some(WidgetId::Puter);
         }
 
-        false
+        None
     }
 
-    fn motion(&mut self, x: i16, y: i16) -> bool {
+    fn motion(&mut self, x: i16, y: i16) -> Option<WidgetId> {
+        if self.focus == WidgetId::Alarm {
+            let (local_x, local_y) = self.alarm_rect.local(x, y);
+            if self.alarm.motion(local_x, local_y) {
+                return Some(WidgetId::Alarm);
+            }
+        }
+
         if self.toodle_rect.contains(x, y) {
             let (x, y) = self.toodle_rect.local(x, y);
-            self.toodle.hover(x, y)
+            self.toodle.hover(x, y).then_some(WidgetId::Toodle)
         } else {
-            self.toodle.hover(-1, -1)
+            self.toodle.hover(-1, -1).then_some(WidgetId::Toodle)
         }
     }
 
@@ -314,18 +366,33 @@ impl App {
 
     fn scroll(&mut self, x: i16, y: i16, direction: ScrollDirection) -> Option<WidgetId> {
         let (widget, x, y) = self.widget_at(x, y)?;
-        match (widget, direction) {
-            (WidgetId::Fwends, ScrollDirection::Up) => self.fwends.scroll_up(x, y),
-            (WidgetId::Fwends, ScrollDirection::Down) => self.fwends.scroll_down(x, y),
-            (WidgetId::Puter, ScrollDirection::Up) => self.puter.scroll_up(),
-            (WidgetId::Puter, ScrollDirection::Down) => self.puter.scroll_down(),
+        let handled = match (widget, direction) {
+            (WidgetId::Fwends, ScrollDirection::Up) => {
+                self.fwends.scroll_up(x, y);
+                true
+            }
+            (WidgetId::Fwends, ScrollDirection::Down) => {
+                self.fwends.scroll_down(x, y);
+                true
+            }
+            (WidgetId::Puter, ScrollDirection::Up) => {
+                self.puter.scroll_up();
+                true
+            }
+            (WidgetId::Puter, ScrollDirection::Down) => {
+                self.puter.scroll_down();
+                true
+            }
+            (WidgetId::Alarm, ScrollDirection::Up) => self.alarm.scroll_up(x, y),
+            (WidgetId::Alarm, ScrollDirection::Down) => self.alarm.scroll_down(x, y),
             (WidgetId::Toodle | WidgetId::Twirl, _) => return None,
-        }
-        Some(widget)
+        };
+        handled.then_some(widget)
     }
 
     fn widget_at(&self, x: i16, y: i16) -> Option<(WidgetId, i16, i16)> {
         [
+            WidgetId::Alarm,
             WidgetId::Twirl,
             WidgetId::Fwends,
             WidgetId::Toodle,
@@ -345,7 +412,12 @@ impl App {
         self.twirl.update()
     }
 
+    fn update_alarm(&mut self) -> bool {
+        self.alarm.update()
+    }
+
     fn shutdown(&mut self) {
+        self.alarm.shutdown();
         self.puter.shutdown_terminal();
     }
 }
@@ -384,6 +456,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if app.update_twirl()? {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Twirl)?;
+            drew_frame = true;
+        }
+
+        if app.update_alarm() {
+            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Alarm)?;
             drew_frame = true;
         }
 
@@ -437,15 +514,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 },
                 XEvent::ButtonRelease(event) => {
                     if event.detail == u8::from(ButtonIndex::M1)
-                        && app.release(event.event_x, event.event_y)
+                        && let Some(widget) = app.release(event.event_x, event.event_y)
                     {
-                        app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Puter)?;
+                        app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
                         drew_frame = true;
                     }
                 }
                 XEvent::MotionNotify(event) => {
-                    if app.motion(event.event_x, event.event_y) {
-                        app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Toodle)?;
+                    if let Some(widget) = app.motion(event.event_x, event.event_y) {
+                        app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
                         drew_frame = true;
                     }
                 }
