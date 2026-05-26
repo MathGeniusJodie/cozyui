@@ -15,6 +15,7 @@ mod puter;
 mod text_input;
 mod text_wrap;
 mod toodle;
+mod twirl;
 mod x_window;
 
 pub(crate) use graphics::{Framebuffer, Image, Palette, Rect, Rgba, decode_png_with_size};
@@ -52,22 +53,26 @@ enum WidgetId {
     Puter,
     Toodle,
     Fwends,
+    Twirl,
 }
 
 impl WidgetId {
-    const ALL: [Self; 3] = [Self::Puter, Self::Toodle, Self::Fwends];
+    const ALL: [Self; 4] = [Self::Puter, Self::Toodle, Self::Fwends, Self::Twirl];
 }
 
 struct App {
     puter: puter::Puter,
     toodle: toodle::Toodle,
     fwends: fwends::Fwends,
+    twirl: twirl::Twirl,
     puter_fb: Framebuffer,
     toodle_fb: Framebuffer,
     fwends_fb: Framebuffer,
+    twirl_fb: Framebuffer,
     puter_rect: Rect,
     toodle_rect: Rect,
     fwends_rect: Rect,
+    twirl_rect: Rect,
     focus: WidgetId,
     puter_pressed: bool,
 }
@@ -77,6 +82,7 @@ impl App {
         let puter = puter::Puter::load(palette)?;
         let toodle = toodle::Toodle::load(palette)?;
         let fwends = fwends::Fwends::load(palette)?;
+        let twirl = twirl::Twirl::load(palette)?;
         let puter_rect = Rect {
             x: 0,
             y: 0,
@@ -95,20 +101,30 @@ impl App {
             w: fwends.width(),
             h: fwends.height(),
         };
+        let twirl_rect = Rect {
+            x: toodle_rect.x + toodle.width() + WIDGET_GAP,
+            y: 0,
+            w: twirl.width(),
+            h: twirl.height(),
+        };
         let puter_fb = Framebuffer::new(puter_rect.w, puter_rect.h, puter.fill_color(palette));
         let toodle_fb = Framebuffer::new(toodle_rect.w, toodle_rect.h, toodle.fill_color(palette));
         let fwends_fb = Framebuffer::new(fwends_rect.w, fwends_rect.h, fwends.fill_color(palette));
+        let twirl_fb = Framebuffer::new(twirl_rect.w, twirl_rect.h, twirl.fill_color(palette));
 
         Ok(Self {
             puter,
             toodle,
             fwends,
+            twirl,
             puter_fb,
             toodle_fb,
             fwends_fb,
+            twirl_fb,
             puter_rect,
             toodle_rect,
             fwends_rect,
+            twirl_rect,
             focus: WidgetId::Toodle,
             puter_pressed: false,
         })
@@ -119,12 +135,14 @@ impl App {
             .x
             .saturating_add(self.toodle_rect.w)
             .max(self.fwends_rect.x + self.fwends_rect.w)
+            .max(self.twirl_rect.x + self.twirl_rect.w)
     }
 
     fn height(&self) -> usize {
         self.puter_rect
             .h
             .max(self.fwends_rect.y + self.fwends_rect.h)
+            .max(self.twirl_rect.y + self.twirl_rect.h)
     }
 
     fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -159,6 +177,11 @@ impl App {
                 self.fwends.render(&mut self.fwends_fb, palette);
                 fb.blit_from(&self.fwends_fb, self.fwends_rect.x, self.fwends_rect.y);
             }
+            WidgetId::Twirl => {
+                self.twirl_fb.clear(self.twirl.fill_color(palette));
+                self.twirl.render(&mut self.twirl_fb, palette);
+                fb.blit_from(&self.twirl_fb, self.twirl_rect.x, self.twirl_rect.y);
+            }
         }
     }
 
@@ -186,6 +209,7 @@ impl App {
             WidgetId::Puter => self.puter_rect,
             WidgetId::Toodle => self.toodle_rect,
             WidgetId::Fwends => self.fwends_rect,
+            WidgetId::Twirl => self.twirl_rect,
         }
     }
 
@@ -205,6 +229,7 @@ impl App {
             }
             WidgetId::Toodle => self.toodle.handle_key_press(input),
             WidgetId::Fwends => self.fwends.handle_key_press(input),
+            WidgetId::Twirl => Ok(()),
         }
     }
 
@@ -221,6 +246,7 @@ impl App {
             }
             WidgetId::Toodle => self.toodle.click(x, y)?,
             WidgetId::Fwends => self.fwends.click(x, y),
+            WidgetId::Twirl => self.twirl.click(x, y),
         }
         Ok(())
     }
@@ -260,21 +286,30 @@ impl App {
             (WidgetId::Fwends, ScrollDirection::Down) => self.fwends.scroll_down(x, y),
             (WidgetId::Puter, ScrollDirection::Up) => self.puter.scroll_up(),
             (WidgetId::Puter, ScrollDirection::Down) => self.puter.scroll_down(),
-            (WidgetId::Toodle, _) => return None,
+            (WidgetId::Toodle | WidgetId::Twirl, _) => return None,
         }
         Some(widget)
     }
 
     fn widget_at(&self, x: i16, y: i16) -> Option<(WidgetId, i16, i16)> {
-        [WidgetId::Fwends, WidgetId::Toodle, WidgetId::Puter]
-            .into_iter()
-            .find_map(|widget| {
-                let rect = self.rect_for(widget);
-                rect.contains(x, y).then(|| {
-                    let (x, y) = rect.local(x, y);
-                    (widget, x, y)
-                })
+        [
+            WidgetId::Twirl,
+            WidgetId::Fwends,
+            WidgetId::Toodle,
+            WidgetId::Puter,
+        ]
+        .into_iter()
+        .find_map(|widget| {
+            let rect = self.rect_for(widget);
+            rect.contains(x, y).then(|| {
+                let (x, y) = rect.local(x, y);
+                (widget, x, y)
             })
+        })
+    }
+
+    fn update_twirl(&mut self) -> bool {
+        self.twirl.update()
     }
 
     fn shutdown(&mut self) {
@@ -311,6 +346,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if app.drain_replies() {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Fwends)?;
+            drew_frame = true;
+        }
+
+        if app.update_twirl() {
+            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Twirl)?;
             drew_frame = true;
         }
 
