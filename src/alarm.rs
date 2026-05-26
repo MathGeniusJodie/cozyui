@@ -59,6 +59,7 @@ pub(crate) struct Alarm {
     stations: Vec<Station>,
     station: usize,
     volume: u8,
+    clock_24h: bool,
     dragging_knob: bool,
     last_clock_text: String,
     last_clock_check: Instant,
@@ -75,8 +76,9 @@ impl Alarm {
             stations: load_stations(STATIONS_PATH),
             station: 0,
             volume,
+            clock_24h: false,
             dragging_knob: false,
-            last_clock_text: clock_text(),
+            last_clock_text: clock_text(false),
             last_clock_check: Instant::now(),
             last_volume_check: Instant::now(),
             player: None,
@@ -108,7 +110,7 @@ impl Alarm {
 
         if now.duration_since(self.last_clock_check) >= CLOCK_REFRESH {
             self.last_clock_check = now;
-            let text = clock_text();
+            let text = clock_text(self.clock_24h);
             if text != self.last_clock_text {
                 self.last_clock_text = text;
                 dirty = true;
@@ -134,6 +136,12 @@ impl Alarm {
         }
         let x = x as usize;
         let y = y as usize;
+
+        if self.clock_contains(x, y) {
+            self.clock_24h = !self.clock_24h;
+            self.last_clock_text = clock_text(self.clock_24h);
+            return true;
+        }
 
         if self.knob_contains(x, y) {
             self.dragging_knob = true;
@@ -179,6 +187,11 @@ impl Alarm {
 
     fn tuner_contains(&self, x: usize, y: usize) -> bool {
         (TUNER_X..TUNER_X + TUNER_W).contains(&x) && (TUNER_Y..TUNER_Y + TUNER_H).contains(&y)
+    }
+
+    fn clock_contains(&self, x: usize, y: usize) -> bool {
+        (DISPLAY_X..DISPLAY_X + CLOCK_CLEAR_W).contains(&x)
+            && (DISPLAY_Y..DISPLAY_Y + CLOCK_CLEAR_H).contains(&y)
     }
 
     fn knob_contains(&self, x: usize, y: usize) -> bool {
@@ -282,7 +295,11 @@ impl Alarm {
         let count = self.stations.len();
         for (index, station) in self.stations.iter().enumerate() {
             let center = station_center(index, count);
-            let color = if index == self.station { active } else { inactive };
+            let color = if index == self.station {
+                active
+            } else {
+                inactive
+            };
             fb.fill_rect(
                 center.saturating_sub(TUNER_MARK_SIZE / 2),
                 TUNER_MARK_Y,
@@ -677,10 +694,17 @@ fn set_system_volume(volume: u8) {
         .spawn();
 }
 
-fn clock_text() -> String {
+fn clock_text(clock_24h: bool) -> String {
     let Some((hour, minute)) = local_hour_minute() else {
         return "00:00".to_string();
     };
+    if !clock_24h {
+        let hour = match hour % 12 {
+            0 => 12,
+            hour => hour,
+        };
+        return format!("{hour:02}:{minute:02}");
+    }
     format!("{hour:02}:{minute:02}")
 }
 
