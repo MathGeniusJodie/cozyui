@@ -11,6 +11,8 @@ mod emojimap;
 mod fwends;
 mod graphics;
 mod peanut_money_font;
+#[allow(dead_code)]
+mod poco_font;
 mod puter;
 mod text_input;
 mod text_wrap;
