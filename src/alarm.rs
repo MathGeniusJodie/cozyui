@@ -25,12 +25,14 @@ const CLOCK_COLON_SRC_X: usize = 50;
 const CLOCK_COLON_SRC_Y: usize = 26;
 const CLOCK_COLON_H: usize = 22;
 
-const TUNER_X: usize = 93;
+const TUNER_X: usize = 114;
 const TUNER_Y: usize = 22;
-const TUNER_W: usize = 88;
+const TUNER_W: usize = 72;
 const TUNER_H: usize = 26;
-const TUNER_MARK_Y: usize = 28;
-const LABEL_Y: usize = 37;
+const TUNER_MARK_Y: usize = 33;
+const TUNER_MARK_SIZE: usize = 5;
+const LABEL_ABOVE_Y: usize = 20;
+const LABEL_BELOW_Y: usize = 34;
 
 const KNOB_X: usize = 204;
 const KNOB_Y: usize = 33;
@@ -275,18 +277,29 @@ impl Alarm {
         }
 
         let active = palette.color(palette_color::ROSE);
-        let text = palette.color(palette_color::CREAM);
-        let dark = palette.color(palette_color::PLUM);
+        let text = palette.color(palette_color::LAVENDER);
+        let inactive = palette.color(palette_color::LAVENDER);
         let count = self.stations.len();
         for (index, station) in self.stations.iter().enumerate() {
             let center = station_center(index, count);
-            let color = if index == self.station { active } else { dark };
-            fb.fill_rect(center, TUNER_MARK_Y, 2, 2, color);
+            let color = if index == self.station { active } else { inactive };
+            fb.fill_rect(
+                center.saturating_sub(TUNER_MARK_SIZE / 2),
+                TUNER_MARK_Y,
+                TUNER_MARK_SIZE,
+                TUNER_MARK_SIZE,
+                color,
+            );
 
             let label_w = self.font.text_width(&station.label);
             let label_x = center.saturating_sub(label_w / 2);
+            let label_y = if index % 2 == 0 {
+                LABEL_ABOVE_Y
+            } else {
+                LABEL_BELOW_Y
+            };
             self.font
-                .draw_text(fb, &station.label, label_x, LABEL_Y, 1, text);
+                .draw_text(fb, &station.label, label_x, label_y, 1, text);
         }
     }
 
@@ -415,7 +428,7 @@ struct SourceRect {
 fn clock_segment_rect(segment: usize) -> SourceRect {
     match segment {
         0 => SourceRect {
-            x: CLOCK_EIGHT_SRC_X+2,
+            x: CLOCK_EIGHT_SRC_X + 2,
             y: CLOCK_EIGHT_SRC_Y,
             w: DIGIT_W - 4,
             h: 3,
