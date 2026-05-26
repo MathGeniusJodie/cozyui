@@ -1,6 +1,9 @@
 use std::error::Error;
 use std::f32::consts::{FRAC_PI_2, PI};
 use std::fs;
+use std::io::Write;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -34,6 +37,13 @@ const TUNER_MARK_SIZE: usize = 5;
 const LABEL_ABOVE_Y: usize = 20;
 const LABEL_BELOW_Y: usize = 34;
 
+const MEDIA_BUTTON_X: usize = 173;
+const MEDIA_BUTTON_Y: usize = 4;
+const MEDIA_BUTTON_W: usize = 13;
+const MEDIA_BUTTON_H: usize = 12;
+const MEDIA_BUTTON_GAP: usize = 1;
+const MEDIA_BUTTON_COUNT: usize = 4;
+
 const KNOB_X: usize = 204;
 const KNOB_Y: usize = 33;
 const KNOB_RADIUS: usize = 18;
@@ -50,7 +60,15 @@ const VOLUME_REFRESH: Duration = Duration::from_secs(3);
 #[derive(Clone)]
 struct Station {
     label: String,
-    args: Vec<String>,
+    mpv_args: String,
+}
+
+#[derive(Clone, Copy)]
+enum MediaButton {
+    PlayPause,
+    Stop,
+    Back,
+    Forward,
 }
 
 pub(crate) struct Alarm {
@@ -65,6 +83,7 @@ pub(crate) struct Alarm {
     last_clock_check: Instant,
     last_volume_check: Instant,
     player: Option<Child>,
+    player_ipc_path: Option<PathBuf>,
 }
 
 impl Alarm {
@@ -82,6 +101,7 @@ impl Alarm {
             last_clock_check: Instant::now(),
             last_volume_check: Instant::now(),
             player: None,
+            player_ipc_path: None,
         })
     }
 
@@ -136,6 +156,11 @@ impl Alarm {
         }
         let x = x as usize;
         let y = y as usize;
+
+        if let Some(button) = media_button_at(x, y) {
+            self.press_media_button(button);
+            return true;
+        }
 
         if self.clock_contains(x, y) {
             self.clock_24h = !self.clock_24h;
@@ -251,14 +276,56 @@ impl Alarm {
         let Some(station) = self.stations.get(self.station) else {
             return;
         };
-        if station.args.is_empty() {
+        if station.mpv_args.trim().is_empty() {
             return;
         }
 
-        let mut command = Command::new("mpv");
-        command.args(&station.args);
+        let ipc_path = mpv_ipc_path();
+        let _ = fs::remove_file(&ipc_path);
+        let command_line = format!(
+            "exec mpv --input-terminal=no --input-ipc-server=\"$COZYUI_MPV_IPC\" {}",
+            station.mpv_args
+        );
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(command_line)
+            .env("COZYUI_MPV_IPC", &ipc_path);
         if let Ok(child) = command.spawn() {
             self.player = Some(child);
+            self.player_ipc_path = Some(ipc_path);
+        }
+    }
+
+    fn press_media_button(&mut self, button: MediaButton) {
+        match button {
+            MediaButton::PlayPause => {
+                if self.player.is_some() {
+                    self.send_mpv_command(&["cycle", "pause"]);
+                } else {
+                    self.play_station();
+                }
+            }
+            MediaButton::Stop => self.stop_player(),
+            MediaButton::Back => self.send_mpv_command(&["playlist-prev", "force"]),
+            MediaButton::Forward => self.send_mpv_command(&["playlist-next", "force"]),
+        }
+    }
+
+    fn send_mpv_command(&mut self, command: &[&str]) {
+        if self.player.is_none() {
+            return;
+        }
+        let Some(path) = self.player_ipc_path.as_ref() else {
+            return;
+        };
+
+        let Ok(mut stream) = UnixStream::connect(path) else {
+            return;
+        };
+        let message = serde_json::json!({ "command": command }).to_string();
+        if stream.write_all(message.as_bytes()).is_ok() {
+            let _ = stream.write_all(b"\n");
         }
     }
 
@@ -268,6 +335,9 @@ impl Alarm {
         };
         let _ = child.kill();
         let _ = child.wait();
+        if let Some(path) = self.player_ipc_path.take() {
+            let _ = fs::remove_file(path);
+        }
     }
 
     fn draw_clock(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -328,6 +398,39 @@ impl Alarm {
 
 fn station_center(index: usize, count: usize) -> usize {
     TUNER_X + ((index * 2 + 1) * TUNER_W / (count * 2))
+}
+
+fn media_button_at(x: usize, y: usize) -> Option<MediaButton> {
+    if !(MEDIA_BUTTON_Y..MEDIA_BUTTON_Y + MEDIA_BUTTON_H).contains(&y) {
+        return None;
+    }
+
+    let total_w = MEDIA_BUTTON_COUNT * MEDIA_BUTTON_W + (MEDIA_BUTTON_COUNT - 1) * MEDIA_BUTTON_GAP;
+    if !(MEDIA_BUTTON_X..MEDIA_BUTTON_X + total_w).contains(&x) {
+        return None;
+    }
+
+    let rel_x = x - MEDIA_BUTTON_X;
+    let slot_w = MEDIA_BUTTON_W + MEDIA_BUTTON_GAP;
+    if rel_x % slot_w >= MEDIA_BUTTON_W {
+        return None;
+    }
+
+    match rel_x / slot_w {
+        0 => Some(MediaButton::PlayPause),
+        1 => Some(MediaButton::Stop),
+        2 => Some(MediaButton::Back),
+        3 => Some(MediaButton::Forward),
+        _ => None,
+    }
+}
+
+fn mpv_ipc_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos();
+    std::env::temp_dir().join(format!("cozyui-mpv-{}-{nanos}.sock", std::process::id()))
 }
 
 fn volume_angle(volume: u8) -> f32 {
@@ -562,56 +665,15 @@ fn parse_station(line: &str) -> Option<Station> {
     if line.is_empty() || line.starts_with('#') {
         return None;
     }
-    let (label, args) = line.split_once('|')?;
+    let (label, mpv_args) = line.split_once('|')?;
     let label = label.trim();
     if label.is_empty() {
         return None;
     }
     Some(Station {
         label: label.chars().take(5).collect(),
-        args: split_args(args),
+        mpv_args: mpv_args.trim().to_string(),
     })
-}
-
-fn split_args(input: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-
-    for ch in input.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if let Some(end_quote) = quote {
-            if ch == end_quote {
-                quote = None;
-            } else {
-                current.push(ch);
-            }
-            continue;
-        }
-        if ch == '"' || ch == '\'' {
-            quote = Some(ch);
-        } else if ch.is_whitespace() {
-            if !current.is_empty() {
-                args.push(std::mem::take(&mut current));
-            }
-        } else {
-            current.push(ch);
-        }
-    }
-
-    if !current.is_empty() {
-        args.push(current);
-    }
-    args
 }
 
 fn default_stations() -> Vec<Station> {
@@ -638,9 +700,9 @@ fn default_stations() -> Vec<Station> {
         ),
     ]
     .into_iter()
-    .map(|(label, args)| Station {
+    .map(|(label, mpv_args)| Station {
         label: label.to_string(),
-        args: split_args(args),
+        mpv_args: mpv_args.to_string(),
     })
     .collect()
 }
