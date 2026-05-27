@@ -5,15 +5,16 @@ use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::pixolde_bold_font;
 use crate::rozha_one_48_font;
-use crate::{Framebuffer, Palette, Rgba};
+use crate::{Framebuffer, Image, Palette, Rgba};
 
-const WIDTH: usize = 160;
-const HEIGHT: usize = 112;
-const PADDING: usize = 8;
+const WIDTH: usize = 100;
+const HEIGHT: usize = 108;
+const BACKGROUND_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/days.png");
+const PADDING: usize = 0;
 const DATE_REFRESH: Duration = Duration::from_secs(60);
-const LABEL_GAP: usize = 2;
-const NUMBER_GAP: usize = 0;
-const MONTH_GAP: usize = 3;
+const LABEL_GAP: usize = 24;
+const NUMBER_GAP: usize = 5;
+const MONTH_GAP: usize = 5;
 
 const WEEKDAYS: [&str; 7] = [
     "SUNDAY",
@@ -48,6 +49,7 @@ struct DateParts {
 }
 
 pub(crate) struct Day {
+    background: Image,
     label_font: BitmapFont,
     number_font: BitmapFont,
     date: DateParts,
@@ -55,8 +57,9 @@ pub(crate) struct Day {
 }
 
 impl Day {
-    pub(crate) fn load() -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
+            background: Image::load(BACKGROUND_PATH, palette)?,
             label_font: BitmapFont::load(&pixolde_bold_font::PIXOLDE_BOLD_SPEC)?,
             number_font: BitmapFont::load(&rozha_one_48_font::ROZHA_ONE_48_SPEC)?,
             date: current_date_parts(),
@@ -73,13 +76,14 @@ impl Day {
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(palette_color::CREAM)
+        palette.color(palette_color::BLACK)
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.clear(self.fill_color(palette));
+        fb.draw_image(&self.background, 0, 0, 1);
 
         let black = palette.color(palette_color::BLACK);
+        let cream = palette.color(palette_color::CREAM);
         let crimson = palette.color(palette_color::CRIMSON);
         let year_h = self.tight_height(&self.label_font, &self.date.year);
         let weekday_h = self.tight_height(&self.label_font, &self.date.weekday);
@@ -88,7 +92,7 @@ impl Day {
         let content_h = year_h + LABEL_GAP + weekday_h + NUMBER_GAP + day_h + MONTH_GAP + month_h;
         let mut y = PADDING.max(HEIGHT.saturating_sub(content_h) / 2);
 
-        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y, black);
+        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y, cream);
         y += year_h + LABEL_GAP;
         self.draw_centered_tight(fb, &self.label_font, &self.date.weekday, y, black);
         y += weekday_h + NUMBER_GAP;

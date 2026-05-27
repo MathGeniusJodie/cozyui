@@ -111,7 +111,7 @@ impl App {
         let fwends = fwends::Fwends::load(palette)?;
         let twirl = twirl::Twirl::load(palette)?;
         let alarm = alarm::Alarm::load(palette)?;
-        let day = day::Day::load()?;
+        let day = day::Day::load(palette)?;
         let puter_rect = Rect {
             x: 0,
             y: 0,
