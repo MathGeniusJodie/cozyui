@@ -6,6 +6,6 @@
 # files, playlists, and stream URLs work here.
 
 local | --shuffle --no-audio-display ~/Desktop/allfiles/jangles/* ~/Desktop/allfiles/musiclib/* ~/Desktop/allfiles/work_music/* ~/Downloads/gbb26/*
-pool | --shuffle https://soundcloud.com/poolsuite/sets/poolsuite-fm-official-playlist https://soundcloud.com/poolsuite/sets/indie-summer https://soundcloud.com/poolsuite/sets/tokyo-disco
+pool | --shuffle --no-audio-display --playlist=~/quickscripts/poolsuite.txt
 synth | --no-video https://www.youtube.com/watch?v=4xDzrJKXOOY
 lofi | --no-video https://www.youtube.com/watch?v=jfKfPfyJRdk
