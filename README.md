@@ -31,9 +31,8 @@ https://lospec.com/palette-list/na16
 * file browser app
 * icon theme
 * statusbar
+    * battery
+    * cpu n memory
 * rss reader
-* toodle: multiple pages per priority level
-* fwends: diegetic user text input
-* fwends: make pretty
 * fwends: thinking mode
 * puter: bold, strikethrough, colors and other ANSI goodness
