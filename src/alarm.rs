@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::f32::consts::{FRAC_PI_2, PI};
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -56,6 +56,9 @@ const MAX_VOLUME: u8 = 100;
 
 const CLOCK_REFRESH: Duration = Duration::from_millis(250);
 const VOLUME_REFRESH: Duration = Duration::from_secs(3);
+const TITLE_REFRESH: Duration = Duration::from_secs(1);
+const TITLE_GAP: usize = 3;
+const TITLE_READ_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[derive(Clone)]
 struct Station {
@@ -82,6 +85,8 @@ pub(crate) struct Alarm {
     last_clock_text: String,
     last_clock_check: Instant,
     last_volume_check: Instant,
+    last_title_check: Instant,
+    current_title: String,
     player: Option<Child>,
     player_ipc_path: Option<PathBuf>,
 }
@@ -100,6 +105,8 @@ impl Alarm {
             last_clock_text: clock_text(false),
             last_clock_check: Instant::now(),
             last_volume_check: Instant::now(),
+            last_title_check: Instant::now(),
+            current_title: String::new(),
             player: None,
             player_ipc_path: None,
         })
@@ -110,7 +117,7 @@ impl Alarm {
     }
 
     pub(crate) fn height(&self) -> usize {
-        self.image.height
+        self.image.height + TITLE_GAP + self.font.cell_h()
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -122,6 +129,7 @@ impl Alarm {
         self.draw_clock(fb, palette);
         self.draw_tuner(fb, palette);
         self.draw_knob(fb, palette);
+        self.draw_title(fb, palette);
     }
 
     pub(crate) fn update(&mut self) -> bool {
@@ -143,6 +151,19 @@ impl Alarm {
                 && volume != self.volume
             {
                 self.volume = volume;
+                dirty = true;
+            }
+        }
+
+        if now.duration_since(self.last_title_check) >= TITLE_REFRESH {
+            self.last_title_check = now;
+            let title = if self.player.is_some() {
+                self.current_mpv_title().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            if title != self.current_title {
+                self.current_title = title;
                 dirty = true;
             }
         }
@@ -282,6 +303,7 @@ impl Alarm {
 
         let ipc_path = mpv_ipc_path();
         let _ = fs::remove_file(&ipc_path);
+        self.current_title.clear();
         let command_line = format!(
             "exec mpv --input-terminal=no --input-ipc-server=\"$COZYUI_MPV_IPC\" {}",
             station.mpv_args
@@ -295,6 +317,69 @@ impl Alarm {
             self.player = Some(child);
             self.player_ipc_path = Some(ipc_path);
         }
+    }
+
+    fn current_mpv_title(&self) -> Option<String> {
+        let chapter_title = self
+            .mpv_property("chapter-metadata")
+            .as_ref()
+            .and_then(title_from_metadata);
+        let media_title = self
+            .mpv_property("media-title")
+            .as_ref()
+            .and_then(json_string);
+
+        if let Some(chapter_title) = chapter_title {
+            if let Some(media_title) = media_title.as_deref()
+                && !media_title.eq_ignore_ascii_case(&chapter_title)
+            {
+                return clean_title(format!("{media_title} - {chapter_title}"));
+            }
+            return clean_title(chapter_title);
+        }
+
+        self.mpv_property("metadata")
+            .as_ref()
+            .and_then(track_line_from_metadata)
+            .or(media_title)
+            .and_then(clean_title)
+    }
+
+    fn mpv_property(&self, property: &str) -> Option<serde_json::Value> {
+        let path = self.player_ipc_path.as_ref()?;
+        let mut stream = UnixStream::connect(path).ok()?;
+        let _ = stream.set_read_timeout(Some(TITLE_READ_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(TITLE_READ_TIMEOUT));
+
+        let message = serde_json::json!({
+            "command": ["get_property", property],
+            "request_id": 1
+        })
+        .to_string();
+        stream.write_all(message.as_bytes()).ok()?;
+        stream.write_all(b"\n").ok()?;
+
+        let mut reader = BufReader::new(stream);
+        for _ in 0..8 {
+            let mut line = String::new();
+            if reader.read_line(&mut line).ok()? == 0 {
+                return None;
+            }
+            let response = serde_json::from_str::<serde_json::Value>(&line).ok()?;
+            if response
+                .get("request_id")
+                .and_then(serde_json::Value::as_i64)
+                != Some(1)
+            {
+                continue;
+            }
+            if response.get("error").and_then(serde_json::Value::as_str) != Some("success") {
+                return None;
+            }
+            return response.get("data").cloned();
+        }
+
+        None
     }
 
     fn press_media_button(&mut self, button: MediaButton) {
@@ -338,6 +423,7 @@ impl Alarm {
         if let Some(path) = self.player_ipc_path.take() {
             let _ = fs::remove_file(path);
         }
+        self.current_title.clear();
     }
 
     fn draw_clock(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -392,10 +478,107 @@ impl Alarm {
         clear_knob_marker(&self.image, fb, palette);
         copy_moved_knob_marker(&self.image, fb, volume_angle(self.volume), palette);
     }
+
+    fn draw_title(&self, fb: &mut Framebuffer, palette: &Palette) {
+        if self.current_title.is_empty() {
+            return;
+        }
+
+        let text = fit_text(&self.font, &self.current_title, self.image.width);
+        let text_w = self.font.text_width(&text);
+        let x = self.image.width.saturating_sub(text_w) / 2;
+        self.font.draw_text(
+            fb,
+            &text,
+            x,
+            self.image.height + TITLE_GAP,
+            1,
+            palette.color(palette_color::CREAM),
+        );
+    }
 }
 
 fn station_center(index: usize, count: usize) -> usize {
     TUNER_X + ((index * 2 + 1) * TUNER_W / (count * 2))
+}
+
+fn title_from_metadata(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    ["title", "icy-title", "icy_title"]
+        .iter()
+        .find_map(|key| metadata_value(object, key))
+}
+
+fn track_line_from_metadata(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    let artist = ["artist", "album_artist", "albumartist"]
+        .iter()
+        .find_map(|key| metadata_value(object, key));
+    let title = title_from_metadata(value);
+
+    match (artist, title) {
+        (Some(artist), Some(title)) => {
+            if title.to_lowercase().contains(&artist.to_lowercase()) {
+                Some(title)
+            } else {
+                Some(format!("{artist} - {title}"))
+            }
+        }
+        (Some(artist), None) => Some(artist),
+        (None, Some(title)) => Some(title),
+        (None, None) => None,
+    }
+}
+
+fn metadata_value(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    object.iter().find_map(|(candidate, value)| {
+        if candidate.eq_ignore_ascii_case(key) {
+            json_string(value)
+        } else {
+            None
+        }
+    })
+}
+
+fn json_string(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_string)
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn clean_title(title: String) -> Option<String> {
+    let title = deunicode::deunicode(&title);
+    let title = title.split_whitespace().collect::<Vec<&str>>().join(" ");
+    (!title.is_empty()).then_some(title)
+}
+
+fn fit_text(font: &BitmapFont, text: &str, max_width: usize) -> String {
+    if font.text_width(text) <= max_width {
+        return text.to_string();
+    }
+
+    let ellipsis = "...";
+    let ellipsis_w = font.text_width(ellipsis);
+    if ellipsis_w >= max_width {
+        return String::new();
+    }
+
+    let mut fitted = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let next_w = font.advance(ch);
+        if width + next_w + ellipsis_w > max_width {
+            break;
+        }
+        fitted.push(ch);
+        width += next_w;
+    }
+    fitted.push_str(ellipsis);
+    fitted
 }
 
 fn media_button_at(x: usize, y: usize) -> Option<MediaButton> {
