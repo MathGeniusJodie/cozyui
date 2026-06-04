@@ -46,10 +46,10 @@ const MEDIA_BUTTON_GAP: usize = 1;
 const MEDIA_BUTTON_COUNT: usize = 4;
 
 const KNOB_X: usize = 216;
-const KNOB_Y: usize = 36;
+const KNOB_Y: usize = 34;
 const KNOB_RADIUS: usize = 18;
 const KNOB_MARKER_SRC_X: usize = 214;
-const KNOB_MARKER_SRC_Y: usize = 43;
+const KNOB_MARKER_SRC_Y: usize = 41;
 const KNOB_MARKER_SRC_W: usize = 4;
 const KNOB_MARKER_SRC_H: usize = 4;
 const MIN_VOLUME: u8 = 0;
