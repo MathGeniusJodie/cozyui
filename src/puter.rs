@@ -59,12 +59,14 @@ const BUTTON_SPRITE_OFFSET_X: usize = 3;
 const BUTTON_SPRITE_STRIDE: usize = 19;
 const ICON_BUTTON_W: usize = 19;
 const ICON_BUTTON_H: usize = 18;
-const BRIGHTNESS_BUTTON_X: usize = 120;
-const COLOR_BUTTON_X: usize = 139;
-const CONTRAST_BUTTON_X: usize = 158;
+
+const BRIGHTNESS_BUTTON_X: usize = 90;
+const COLOR_BUTTON_X: usize = BRIGHTNESS_BUTTON_X + BUTTON_W;
+const CONTRAST_BUTTON_X: usize = COLOR_BUTTON_X + BUTTON_W;
+
 const LOCK_BUTTON_X: usize = 214;
 const POWER_BUTTON_X: usize = 234;
-const MODE_BUTTON_Y: usize = 220;
+const MODE_BUTTON_Y: usize = 222;
 const ICON_BUTTON_Y: usize = 221;
 const CONTROL_CLEAR_X: usize = 119;
 const CONTROL_CLEAR_Y: usize = 218;
@@ -74,20 +76,21 @@ const BUTTON_HIT_OFFSET_X: isize = -2;
 const SCROLL_LINES: i32 = 3;
 const LIGHT_W: usize = 4;
 const LIGHT_H: usize = 5;
+const LIGHTS_X: usize = 88;
 const LIGHTS: [Light; 3] = [
     Light {
-        x: 117,
-        y: 222,
+        x: LIGHTS_X,
+        y: 223,
         kind: LightKind::Brightness,
     },
     Light {
-        x: 126,
-        y: 222,
+        x: LIGHTS_X + 9,
+        y: 223,
         kind: LightKind::Color,
     },
     Light {
-        x: 135,
-        y: 222,
+        x: LIGHTS_X + 9 + 9,
+        y: 223,
         kind: LightKind::Contrast,
     },
 ];
