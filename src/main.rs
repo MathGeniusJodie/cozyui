@@ -112,39 +112,40 @@ impl App {
         let twirl = twirl::Twirl::load(palette)?;
         let alarm = alarm::Alarm::load(palette)?;
         let day = day::Day::load(palette)?;
+        let layout = WidgetLayout::new(&puter, &toodle, &twirl, &alarm, &day);
         let puter_rect = Rect {
-            x: 0,
-            y: 0,
+            x: layout.puter_x,
+            y: layout.puter_y,
             w: puter.width(),
             h: puter.height(),
         };
         let toodle_rect = Rect {
-            x: puter.width() + WIDGET_GAP,
-            y: 0,
+            x: layout.toodle_x,
+            y: layout.toodle_y,
             w: toodle.width(),
             h: toodle.height(),
         };
         let fwends_rect = Rect {
-            x: puter.width() + WIDGET_GAP,
-            y: toodle.height() + WIDGET_GAP,
+            x: layout.fwends_x,
+            y: layout.fwends_y,
             w: fwends.width(),
             h: fwends.height(),
         };
         let twirl_rect = Rect {
-            x: toodle_rect.x + toodle.width() + WIDGET_GAP,
-            y: 0,
+            x: layout.twirl_x,
+            y: layout.twirl_y,
             w: twirl.width(),
             h: twirl.height(),
         };
         let alarm_rect = Rect {
-            x: twirl_rect.x,
-            y: twirl.height() + WIDGET_GAP,
+            x: layout.alarm_x,
+            y: layout.alarm_y,
             w: alarm.width(),
             h: alarm.height(),
         };
         let day_rect = Rect {
-            x: twirl_rect.x,
-            y: alarm_rect.y + alarm.height() + WIDGET_GAP,
+            x: layout.day_x,
+            y: layout.day_y,
             w: day.width(),
             h: day.height(),
         };
@@ -275,33 +276,19 @@ impl App {
             changed = true;
         }
 
-        let fwends_y = self.toodle_rect.y + self.toodle_rect.h + WIDGET_GAP;
-        if self.fwends_rect.y != fwends_y {
-            self.fwends_rect.y = fwends_y;
-            changed = true;
-        }
-
-        let twirl_x = self.toodle_rect.x + self.toodle_rect.w + WIDGET_GAP;
-        if self.twirl_rect.x != twirl_x {
-            self.twirl_rect.x = twirl_x;
-            changed = true;
-        }
-
-        let alarm_x = self.twirl_rect.x;
-        let alarm_y = self.twirl_rect.y + self.twirl_rect.h + WIDGET_GAP;
-        if self.alarm_rect.x != alarm_x || self.alarm_rect.y != alarm_y {
-            self.alarm_rect.x = alarm_x;
-            self.alarm_rect.y = alarm_y;
-            changed = true;
-        }
-
-        let day_x = self.twirl_rect.x;
-        let day_y = self.alarm_rect.y + self.alarm_rect.h + WIDGET_GAP;
-        if self.day_rect.x != day_x || self.day_rect.y != day_y {
-            self.day_rect.x = day_x;
-            self.day_rect.y = day_y;
-            changed = true;
-        }
+        let layout = WidgetLayout::new(
+            &self.puter,
+            &self.toodle,
+            &self.twirl,
+            &self.alarm,
+            &self.day,
+        );
+        changed |= move_rect(&mut self.puter_rect, layout.puter_x, layout.puter_y);
+        changed |= move_rect(&mut self.toodle_rect, layout.toodle_x, layout.toodle_y);
+        changed |= move_rect(&mut self.fwends_rect, layout.fwends_x, layout.fwends_y);
+        changed |= move_rect(&mut self.twirl_rect, layout.twirl_x, layout.twirl_y);
+        changed |= move_rect(&mut self.alarm_rect, layout.alarm_x, layout.alarm_y);
+        changed |= move_rect(&mut self.day_rect, layout.day_x, layout.day_y);
 
         changed
     }
@@ -467,6 +454,80 @@ impl App {
         self.alarm.shutdown();
         self.puter.shutdown_terminal();
     }
+}
+
+const TOODLE_LEFT_OVERLAP: usize = 24;
+
+struct WidgetLayout {
+    puter_x: usize,
+    toodle_x: usize,
+    fwends_x: usize,
+    fwends_y: usize,
+    twirl_x: usize,
+    alarm_x: usize,
+    day_x: usize,
+    twirl_y: usize,
+    toodle_y: usize,
+    puter_y: usize,
+    day_y: usize,
+    alarm_y: usize,
+}
+
+impl WidgetLayout {
+    fn new(
+        puter: &puter::Puter,
+        toodle: &toodle::Toodle,
+        twirl: &twirl::Twirl,
+        alarm: &alarm::Alarm,
+        day: &day::Day,
+    ) -> Self {
+        let left_w = day.width().max(alarm.width());
+        let middle_x = left_w + WIDGET_GAP;
+        let middle_w = puter.width().max(toodle.width()).max(twirl.width());
+        let left_h = day.height() + WIDGET_GAP + alarm.height();
+        let middle_h = twirl.height() + WIDGET_GAP + toodle.height() + WIDGET_GAP + puter.height();
+        let layout_h = left_h.max(middle_h);
+        let alarm_y = layout_h - alarm.height();
+        let day_y = alarm_y - WIDGET_GAP - day.height() - 30;
+        let puter_y = layout_h - puter.height();
+        let toodle_y = puter_y - WIDGET_GAP - toodle.height();
+        let twirl_y = toodle_y - WIDGET_GAP - twirl.height();
+
+        // Tweak widget positions here. These final coordinates are used both at startup and
+        // after dynamic redraws, so edits in this block won't get snapped back later.
+        let puter_x = middle_x;
+        let toodle_x = middle_x.saturating_sub(day.width() + TOODLE_LEFT_OVERLAP);
+        let twirl_x = middle_x.saturating_sub(day.width());
+        let alarm_x = 0;
+        let day_x = alarm.width().saturating_sub(day.width());
+        let fwends_x = middle_x + middle_w + WIDGET_GAP;
+        let fwends_y = 0;
+
+        Self {
+            puter_x,
+            toodle_x,
+            fwends_x,
+            fwends_y,
+            twirl_x,
+            alarm_x,
+            day_x,
+            twirl_y,
+            toodle_y,
+            puter_y,
+            day_y,
+            alarm_y,
+        }
+    }
+}
+
+fn move_rect(rect: &mut Rect, x: usize, y: usize) -> bool {
+    if rect.x == x && rect.y == y {
+        return false;
+    }
+
+    rect.x = x;
+    rect.y = y;
+    true
 }
 
 #[derive(Clone, Copy)]

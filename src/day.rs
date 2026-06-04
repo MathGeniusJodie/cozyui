@@ -95,8 +95,8 @@ impl Day {
         let content_h = year_h + LABEL_GAP + weekday_h + NUMBER_GAP + day_h + MONTH_GAP + month_h;
         let mut y = TOP_GAP;
 
-        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y-1, purple);
-        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y+1, rose);
+        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y - 1, purple);
+        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y + 1, rose);
         self.draw_centered_tight(fb, &self.label_font, &self.date.year, y, cream);
         y += year_h + LABEL_GAP;
         self.draw_centered_tight(fb, &self.label_font, &self.date.weekday, y, black);
