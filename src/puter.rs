@@ -48,53 +48,98 @@ const COLOR_ORANGE_GLOW: usize = palette_color::BROWN;
 const COLOR_GREEN_TEXT: usize = palette_color::LIME;
 const COLOR_GREEN_GLOW: usize = palette_color::GREEN;
 
-const BUTTON_SPRITES_PATH: &str =
+const BUTTON_SPRITES_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/buttons.png");
+const BUTTON_PRESSED_SPRITES_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/assets/buttons-pressed.png");
-const BUTTON_W: usize = 20;
+const POWER_BUTTON_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/puter_power.png");
+const LOCK_BUTTON_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/puter_lock.png");
+const BUTTON_W: usize = 19;
 const BUTTON_H: usize = 16;
+const BUTTON_SPRITE_OFFSET_X: usize = 3;
+const BUTTON_SPRITE_STRIDE: usize = 19;
+const ICON_BUTTON_W: usize = 19;
+const ICON_BUTTON_H: usize = 18;
+const BRIGHTNESS_BUTTON_X: usize = 120;
+const COLOR_BUTTON_X: usize = 139;
+const CONTRAST_BUTTON_X: usize = 158;
+const LOCK_BUTTON_X: usize = 214;
+const POWER_BUTTON_X: usize = 234;
+const MODE_BUTTON_Y: usize = 220;
+const ICON_BUTTON_Y: usize = 221;
+const CONTROL_CLEAR_X: usize = 119;
+const CONTROL_CLEAR_Y: usize = 218;
+const CONTROL_CLEAR_W: usize = 119;
+const CONTROL_CLEAR_H: usize = 21;
 const BUTTON_HIT_OFFSET_X: isize = -2;
-const BUTTON_PRESSED_OFFSET_X: isize = -3;
 const SCROLL_LINES: i32 = 3;
 const LIGHT_W: usize = 4;
 const LIGHT_H: usize = 5;
 const LIGHTS: [Light; 3] = [
     Light {
-        x: 155,
+        x: 117,
         y: 222,
         kind: LightKind::Brightness,
     },
     Light {
-        x: 164,
+        x: 126,
         y: 222,
         kind: LightKind::Color,
     },
     Light {
-        x: 173,
+        x: 135,
         y: 222,
         kind: LightKind::Contrast,
     },
 ];
-const BUTTON_TARGETS: [Button; 3] = [
+const BUTTON_TARGETS: [Button; 5] = [
     Button {
-        x: 160,
-        y: 220,
+        x: BRIGHTNESS_BUTTON_X,
+        y: MODE_BUTTON_Y,
+        w: BUTTON_W,
+        h: BUTTON_H,
+        pressed_sprite: Some(0),
         action: ButtonAction::Brightness,
     },
     Button {
-        x: 179,
-        y: 220,
+        x: COLOR_BUTTON_X,
+        y: MODE_BUTTON_Y,
+        w: BUTTON_W,
+        h: BUTTON_H,
+        pressed_sprite: Some(1),
         action: ButtonAction::Color,
     },
     Button {
-        x: 198,
-        y: 220,
+        x: CONTRAST_BUTTON_X,
+        y: MODE_BUTTON_Y,
+        w: BUTTON_W,
+        h: BUTTON_H,
+        pressed_sprite: Some(2),
         action: ButtonAction::Contrast,
+    },
+    Button {
+        x: POWER_BUTTON_X,
+        y: ICON_BUTTON_Y,
+        w: ICON_BUTTON_W,
+        h: ICON_BUTTON_H,
+        pressed_sprite: None,
+        action: ButtonAction::Power,
+    },
+    Button {
+        x: LOCK_BUTTON_X,
+        y: ICON_BUTTON_Y,
+        w: ICON_BUTTON_W,
+        h: ICON_BUTTON_H,
+        pressed_sprite: None,
+        action: ButtonAction::Lock,
     },
 ];
 
 pub(crate) struct Puter {
     mode_images: ModeImages,
     button_sprites: Image,
+    button_pressed_sprites: Image,
+    power_button: Image,
+    lock_button: Image,
     atlas: GlyphAtlas,
     terminal: Option<Terminal>,
     settings: DisplaySettings,
@@ -106,6 +151,9 @@ impl Puter {
         Ok(Self {
             mode_images: ModeImages::load(palette)?,
             button_sprites: Image::load(BUTTON_SPRITES_PATH, palette)?,
+            button_pressed_sprites: Image::load(BUTTON_PRESSED_SPRITES_PATH, palette)?,
+            power_button: Image::load(POWER_BUTTON_PATH, palette)?,
+            lock_button: Image::load(LOCK_BUTTON_PATH, palette)?,
             atlas: GlyphAtlas::load()?,
             terminal: None,
             settings: DisplaySettings::new(),
@@ -171,7 +219,27 @@ impl Puter {
         let term = self.terminal().term();
 
         fb.clear_scaled(self.mode_images.for_settings(self.settings), BG_SCALE);
+        fb.fill_rect(
+            art_x(CONTROL_CLEAR_X),
+            art_y(CONTROL_CLEAR_Y),
+            CONTROL_CLEAR_W * BG_SCALE,
+            CONTROL_CLEAR_H * BG_SCALE,
+            palette.color(palette_color::CREAM),
+        );
+        draw_mode_buttons(fb, &self.button_sprites);
         draw_lights(fb, self.settings, palette);
+        fb.draw_image(
+            &self.power_button,
+            art_x(POWER_BUTTON_X) as isize,
+            art_y(ICON_BUTTON_Y) as isize,
+            BG_SCALE,
+        );
+        fb.draw_image(
+            &self.lock_button,
+            art_x(LOCK_BUTTON_X) as isize,
+            art_y(ICON_BUTTON_Y) as isize,
+            BG_SCALE,
+        );
 
         let cell_w = GLYPH_W * GLYPH_SCALE;
         let cell_h = GLYPH_H * GLYPH_SCALE;
@@ -220,17 +288,18 @@ impl Puter {
 
         if let Some(index) = self.active_button {
             let button = BUTTON_TARGETS[index];
-            fb.draw_scaled_region(
-                &self.button_sprites,
-                index * BUTTON_W,
-                0,
-                ((button.x as isize - ART_CROP_X as isize + BUTTON_PRESSED_OFFSET_X) as usize)
-                    * BG_SCALE,
-                art_y(button.y),
-                BUTTON_W,
-                BUTTON_H,
-                BG_SCALE,
-            );
+            if let Some(sprite_index) = button.pressed_sprite {
+                fb.draw_scaled_region(
+                    &self.button_pressed_sprites,
+                    BUTTON_SPRITE_OFFSET_X + sprite_index * BUTTON_SPRITE_STRIDE,
+                    0,
+                    art_x(button.x),
+                    art_y(button.y),
+                    BUTTON_W,
+                    BUTTON_H,
+                    BG_SCALE,
+                );
+            }
         }
     }
 
@@ -407,6 +476,9 @@ pub(crate) struct TerminalEvents {
 struct Button {
     x: usize,
     y: usize,
+    w: usize,
+    h: usize,
+    pressed_sprite: Option<usize>,
     action: ButtonAction,
 }
 
@@ -433,9 +505,11 @@ enum LightState {
 
 #[derive(Clone, Copy)]
 enum ButtonAction {
+    Power,
     Brightness,
     Color,
     Contrast,
+    Lock,
 }
 
 #[derive(Clone, Copy)]
@@ -462,6 +536,7 @@ impl DisplaySettings {
 
     fn toggle(&mut self, action: ButtonAction) {
         match action {
+            ButtonAction::Power | ButtonAction::Lock => {}
             ButtonAction::Brightness => self.high_brightness = !self.high_brightness,
             ButtonAction::Color => {
                 self.text_mode = match self.text_mode {
@@ -542,6 +617,25 @@ impl ModeImages {
     }
 }
 
+fn draw_mode_buttons(fb: &mut Framebuffer, button_sprites: &Image) {
+    for button in BUTTON_TARGETS {
+        let Some(sprite_index) = button.pressed_sprite else {
+            continue;
+        };
+
+        fb.draw_scaled_region(
+            button_sprites,
+            BUTTON_SPRITE_OFFSET_X + sprite_index * BUTTON_SPRITE_STRIDE,
+            0,
+            art_x(button.x),
+            art_y(button.y),
+            BUTTON_W,
+            BUTTON_H,
+            BG_SCALE,
+        );
+    }
+}
+
 fn draw_lights(fb: &mut Framebuffer, settings: DisplaySettings, palette: &Palette) {
     for light in LIGHTS {
         draw_light(fb, light, settings.light_state(light.kind), palette);
@@ -614,7 +708,7 @@ fn button_at(x: i16, y: i16) -> Option<usize> {
     BUTTON_TARGETS.iter().position(|button| {
         let button_x = (button.x as isize - ART_CROP_X as isize + BUTTON_HIT_OFFSET_X) as usize;
         let button_y = button.y - ART_CROP_Y;
-        x >= button_x && x < button_x + BUTTON_W && y >= button_y && y < button_y + BUTTON_H
+        x >= button_x && x < button_x + button.w && y >= button_y && y < button_y + button.h
     })
 }
 
