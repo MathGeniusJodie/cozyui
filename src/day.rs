@@ -7,14 +7,15 @@ use crate::pixolde_bold_font;
 use crate::rozha_one_48_font;
 use crate::{Framebuffer, Image, Palette, Rgba};
 
-const WIDTH: usize = 100;
-const HEIGHT: usize = 108;
+const WIDTH: usize = 116;
+const HEIGHT: usize = 116;
 const BACKGROUND_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/days.png");
 const PADDING: usize = 0;
 const DATE_REFRESH: Duration = Duration::from_secs(60);
-const LABEL_GAP: usize = 24;
-const NUMBER_GAP: usize = 5;
-const MONTH_GAP: usize = 5;
+const TOP_GAP: usize = 10;
+const LABEL_GAP: usize = 26;
+const NUMBER_GAP: usize = 6;
+const MONTH_GAP: usize = 6;
 
 const WEEKDAYS: [&str; 7] = [
     "SUNDAY",
@@ -85,13 +86,17 @@ impl Day {
         let black = palette.color(palette_color::BLACK);
         let cream = palette.color(palette_color::CREAM);
         let crimson = palette.color(palette_color::CRIMSON);
+        let purple = palette.color(palette_color::PURPLE);
+        let rose = palette.color(palette_color::ROSE);
         let year_h = self.tight_height(&self.label_font, &self.date.year);
         let weekday_h = self.tight_height(&self.label_font, &self.date.weekday);
         let day_h = self.tight_height(&self.number_font, &self.date.day);
         let month_h = self.tight_height(&self.label_font, &self.date.month);
         let content_h = year_h + LABEL_GAP + weekday_h + NUMBER_GAP + day_h + MONTH_GAP + month_h;
-        let mut y = PADDING.max(HEIGHT.saturating_sub(content_h) / 2);
+        let mut y = TOP_GAP;
 
+        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y-1, purple);
+        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y+1, rose);
         self.draw_centered_tight(fb, &self.label_font, &self.date.year, y, cream);
         y += year_h + LABEL_GAP;
         self.draw_centered_tight(fb, &self.label_font, &self.date.weekday, y, black);

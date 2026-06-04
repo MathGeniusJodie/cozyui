@@ -9,3 +9,5 @@ local | --shuffle --no-audio-display ~/Desktop/allfiles/jangles/* ~/Desktop/allf
 pool | --shuffle --no-audio-display --playlist=~/quickscripts/poolsuite.txt
 synth | --no-video https://www.youtube.com/watch?v=4xDzrJKXOOY
 lofi | --no-video https://www.youtube.com/watch?v=jfKfPfyJRdk
+dd | --shuffle --no-video https://www.youtube.com/@TheDailyDoseMusic/videos
+ng | --shuffle --no-video  https://www.youtube.com/@NiceGuys/videos
