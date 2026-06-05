@@ -169,7 +169,7 @@ impl App {
         let alarm_fb = Framebuffer::new(alarm_rect.w, alarm_rect.h, alarm.fill_color(palette));
         let day_fb = Framebuffer::new(day_rect.w, day_rect.h, day.fill_color(palette));
 
-        Ok(Self {
+        let mut app = Self {
             puter,
             toodle,
             fwends,
@@ -191,7 +191,9 @@ impl App {
             day_rect,
             focus: WidgetId::Toodle,
             puter_pressed: false,
-        })
+        };
+        app.sync_fwends_height(palette);
+        Ok(app)
     }
 
     fn width(&self) -> usize {
@@ -206,10 +208,15 @@ impl App {
     }
 
     fn height(&self) -> usize {
+        self.target_app_height()
+            .max(self.fwends_rect.y + self.fwends_rect.h)
+    }
+
+    fn target_app_height(&self) -> usize {
         self.puter_rect
             .h
             .max(self.desk.height)
-            .max(self.fwends_rect.y + self.fwends_rect.h)
+            .max(self.fwends_rect.y + self.fwends.min_height())
             .max(self.twirl_rect.y + self.twirl_rect.h)
             .max(self.alarm_rect.y + self.alarm_rect.h)
             .max(self.day_rect.y + self.day_rect.h)
@@ -344,8 +351,24 @@ impl App {
         changed |= move_rect(&mut self.twirl_rect, layout.twirl_x, layout.twirl_y);
         changed |= move_rect(&mut self.alarm_rect, layout.alarm_x, layout.alarm_y);
         changed |= move_rect(&mut self.day_rect, layout.day_x, layout.day_y);
+        changed |= self.sync_fwends_height(palette);
 
         changed
+    }
+
+    fn sync_fwends_height(&mut self, palette: &Palette) -> bool {
+        let height = self.target_app_height();
+        if !self.fwends.set_height(height) && self.fwends_rect.h == self.fwends.height() {
+            return false;
+        }
+
+        self.fwends_rect.h = self.fwends.height();
+        self.fwends_fb = Framebuffer::new(
+            self.fwends_rect.w,
+            self.fwends_rect.h,
+            self.fwends.fill_color(palette),
+        );
+        true
     }
 
     fn focused_rect(&self) -> Rect {

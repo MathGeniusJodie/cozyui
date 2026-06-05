@@ -22,9 +22,9 @@ const W: usize = 268;
 const H: usize = 318;
 const PAD: usize = 8;
 const CHAT_Y: usize = 8;
-const CHAT_H: usize = 182;
+const CHAT_INPUT_GAP: usize = 6;
 const INPUT_X: usize = 24;
-const INPUT_Y: usize = 196;
+const INPUT_BOTTOM_PAD: usize = 122;
 const INPUT_TEXT_Y: usize = 24;
 const TEXT_PAD: usize = 7;
 const INPUT_BOX_Y_OFFSET: isize = -13;
@@ -35,11 +35,13 @@ const BUBBLE_PAD_TOP: usize = 8;
 const BUBBLE_PAD_BOTTOM: usize = 11;
 const STICKY_PAD_LEFT: usize = 10;
 const STICKY_PAD_RIGHT: usize = 20;
-const STICKY_PAD_TOP: usize = 20;
+const STICKY_PAD_TOP: usize = 24;
 const STICKY_PAD_BOTTOM: usize = 20;
 const BUBBLE_GAP: usize = 5;
 const BUBBLE_MIN_W: usize = 38;
 const BUBBLE_MAX_W: usize = 142;
+const STICKY_MIN_W: usize = 141;
+const STICKY_MIN_H: usize = 114;
 const BUBBLE_LEFT_CAP: usize = 21;
 const BUBBLE_RIGHT_CAP: usize = 21;
 const BUBBLE_TOP_CAP: usize = 17;
@@ -63,18 +65,22 @@ const PENCIL_TIP_Y: usize = 24;
 const MODELS: [Model; 4] = [
     Model {
         id: "anthropic/claude-haiku-4.5",
+        name: "Claude",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/claw.png"),
     },
     Model {
         id: "deepseek/deepseek-v4-flash",
+        name: "Deepseek",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/deep.png"),
     },
     Model {
         id: "qwen/qwen3.6-35b-a3b",
+        name: "Qwen",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/qwen.png"),
     },
     Model {
         id: "moonshotai/kimi-k2.6",
+        name: "Kimi",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/kimi.png"),
     },
 ];
@@ -90,6 +96,7 @@ pub(crate) struct Fwends {
     input: String,
     selected_model: usize,
     focused: bool,
+    height: usize,
     scroll_y: usize,
     model_slot_w: usize,
     model_slot_h: usize,
@@ -127,6 +134,7 @@ impl Fwends {
             input: String::new(),
             selected_model,
             focused: false,
+            height: H * SCALE,
             scroll_y: 0,
             model_slot_w,
             model_slot_h,
@@ -142,7 +150,22 @@ impl Fwends {
     }
 
     pub(crate) fn height(&self) -> usize {
+        self.height
+    }
+
+    pub(crate) fn min_height(&self) -> usize {
         H * SCALE
+    }
+
+    pub(crate) fn set_height(&mut self, height: usize) -> bool {
+        let height = height.max(self.min_height());
+        if self.height == height {
+            return false;
+        }
+
+        self.height = height;
+        self.scroll_to_bottom();
+        true
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -174,8 +197,8 @@ impl Fwends {
         let input_x = self.input_sticky_x();
         if x >= input_x
             && x < input_x + self.input_sticky.width
-            && y >= INPUT_Y
-            && y < INPUT_Y + self.input_sticky.height
+            && y >= self.input_y()
+            && y < self.input_y() + self.input_sticky.height
         {
             self.focused = true;
         }
@@ -234,14 +257,14 @@ impl Fwends {
     }
 
     pub(crate) fn scroll_up(&mut self, x: i16, y: i16) {
-        if !chat_contains(x, y) {
+        if !self.chat_contains(x, y) {
             return;
         }
         self.scroll_y = self.scroll_y.saturating_sub(SCROLL_STEP);
     }
 
     pub(crate) fn scroll_down(&mut self, x: i16, y: i16) {
-        if !chat_contains(x, y) {
+        if !self.chat_contains(x, y) {
             return;
         }
         self.scroll_y = (self.scroll_y + SCROLL_STEP).min(self.max_scroll());
@@ -263,14 +286,15 @@ impl Fwends {
         self.messages.push(Message::pending());
         self.scroll_to_bottom();
 
-        let model = MODELS[selected_model].id.to_string();
-        let system_prompt = self.system_prompt.clone();
+        let model = MODELS[selected_model];
+        let model_id = model.id.to_string();
+        let system_prompt = fwend_system_prompt(&self.system_prompt, model.name);
         let history = request_history(&self.messages);
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
 
         thread::spawn(move || {
-            let result = send_openrouter_request(&model, &system_prompt, &history, &text);
+            let result = send_openrouter_request(&model_id, &system_prompt, &history, &text);
             let _ = tx.send(result);
         });
     }
@@ -278,10 +302,12 @@ impl Fwends {
     fn draw_messages(&self, fb: &mut Framebuffer, palette: &Palette) {
         let layouts = self.message_layouts();
         let viewport_top = CHAT_Y;
-        let viewport_bottom = CHAT_Y + CHAT_H;
+        let viewport_bottom = CHAT_Y + self.chat_h();
+        let bottom_offset = self.chat_h().saturating_sub(self.content_height());
 
         for layout in layouts {
-            let y = CHAT_Y as isize + layout.y as isize - self.scroll_y as isize;
+            let y = CHAT_Y as isize + bottom_offset as isize + layout.y as isize
+                - self.scroll_y as isize;
             if y >= viewport_bottom as isize || y + layout.h as isize <= viewport_top as isize {
                 continue;
             }
@@ -317,7 +343,7 @@ impl Fwends {
         style: MessageStyle,
     ) {
         let clip_top = CHAT_Y;
-        let clip_bottom = CHAT_Y + CHAT_H;
+        let clip_bottom = CHAT_Y + self.chat_h();
         let image = match style.skin {
             MessageSkin::Bubble => &self.bubble,
             MessageSkin::Sticky => &self.user_sticky,
@@ -353,9 +379,10 @@ impl Fwends {
                 .map(|line| self.font.text_width(line))
                 .max()
                 .unwrap_or(0);
-            let w = (text_w + style.pad_left + style.pad_right).clamp(BUBBLE_MIN_W, BUBBLE_MAX_W);
+            let w = (text_w + style.pad_left + style.pad_right).clamp(style.min_w, BUBBLE_MAX_W);
             let h = (lines.len() * LINE_H + style.pad_top + style.pad_bottom)
-                .max(style.top_cap + style.bottom_cap + 1);
+                .max(style.top_cap + style.bottom_cap + 1)
+                .max(style.min_h);
             let x = if style.align_right {
                 W - PAD - w
             } else {
@@ -386,7 +413,7 @@ impl Fwends {
     }
 
     fn max_scroll(&self) -> usize {
-        self.content_height().saturating_sub(CHAT_H)
+        self.content_height().saturating_sub(self.chat_h())
     }
 
     fn scroll_to_bottom(&mut self) {
@@ -397,7 +424,7 @@ impl Fwends {
         fb.draw_image(
             &self.input_sticky,
             (self.input_sticky_x() * SCALE) as isize,
-            (INPUT_Y * SCALE) as isize,
+            (self.input_y() * SCALE) as isize,
             SCALE,
         );
 
@@ -406,7 +433,7 @@ impl Fwends {
         } else {
             &self.input
         };
-        let text_y = (INPUT_Y + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
+        let text_y = (self.input_y() + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
         let text_x = self.input_text_x();
         let max_width = self.input_text_width();
         let lines = self.font.wrap_lines(label, max_width);
@@ -439,7 +466,7 @@ impl Fwends {
     fn selected_fwend_rect(&self) -> FwendRect {
         FwendRect {
             x: INPUT_X,
-            y: INPUT_Y,
+            y: self.input_y(),
             w: self.model_slot_w,
             h: self.model_slot_h,
         }
@@ -466,7 +493,7 @@ impl Fwends {
         let max_width = self.input_text_width();
         let lines = self.font.wrap_lines(&self.input, max_width);
         let line_index = lines.len().saturating_sub(1).min(4);
-        let text_y = (INPUT_Y + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
+        let text_y = (self.input_y() + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
         (
             text_x + self.font.text_width(&lines[line_index]).min(max_width),
             text_y + line_index * LINE_H,
@@ -485,6 +512,23 @@ impl Fwends {
 
     fn input_sticky_x(&self) -> usize {
         INPUT_X + self.model_slot_w + SELECTED_FWEND_GAP
+    }
+
+    fn input_y(&self) -> usize {
+        (self.height / SCALE).saturating_sub(INPUT_BOTTOM_PAD)
+    }
+
+    fn chat_h(&self) -> usize {
+        self.input_y().saturating_sub(CHAT_Y + CHAT_INPUT_GAP)
+    }
+
+    fn chat_contains(&self, x: i16, y: i16) -> bool {
+        if x < 0 || y < 0 {
+            return false;
+        }
+        let x = x as usize / SCALE;
+        let y = y as usize / SCALE;
+        (PAD..W - PAD).contains(&x) && (CHAT_Y..CHAT_Y + self.chat_h()).contains(&y)
     }
 }
 
@@ -505,6 +549,7 @@ impl FwendRect {
 #[derive(Clone, Copy)]
 struct Model {
     id: &'static str,
+    name: &'static str,
     asset_path: &'static str,
 }
 
@@ -587,6 +632,8 @@ struct MessageStyle {
     right_cap: usize,
     top_cap: usize,
     bottom_cap: usize,
+    min_w: usize,
+    min_h: usize,
     align_right: bool,
 }
 
@@ -606,6 +653,8 @@ const ASSISTANT_MESSAGE_STYLE: MessageStyle = MessageStyle {
     right_cap: BUBBLE_RIGHT_CAP,
     top_cap: BUBBLE_TOP_CAP,
     bottom_cap: BUBBLE_BOTTOM_CAP,
+    min_w: BUBBLE_MIN_W,
+    min_h: 0,
     align_right: false,
 };
 
@@ -619,6 +668,8 @@ const USER_MESSAGE_STYLE: MessageStyle = MessageStyle {
     right_cap: STICKY_RIGHT_CAP,
     top_cap: STICKY_TOP_CAP,
     bottom_cap: STICKY_BOTTOM_CAP,
+    min_w: STICKY_MIN_W,
+    min_h: STICKY_MIN_H,
     align_right: true,
 };
 
@@ -633,6 +684,10 @@ fn request_history(messages: &[Message]) -> Vec<Message> {
         .into_iter()
         .rev()
         .collect()
+}
+
+fn fwend_system_prompt(template: &str, name: &str) -> String {
+    template.replace("[[FREND_NAME]]", name)
 }
 
 fn send_openrouter_request(
@@ -824,15 +879,6 @@ fn compact_error(response: &str) -> String {
     }
 }
 
-fn chat_contains(x: i16, y: i16) -> bool {
-    if x < 0 || y < 0 {
-        return false;
-    }
-    let x = x as usize / SCALE;
-    let y = y as usize / SCALE;
-    (PAD..W - PAD).contains(&x) && (CHAT_Y..CHAT_Y + CHAT_H).contains(&y)
-}
-
 fn stretch_source_coord(
     dest: usize,
     dest_len: usize,
@@ -881,5 +927,13 @@ mod tests {
         let parsed: Value = serde_json::from_str(&body).unwrap();
 
         assert_eq!(parsed["messages"][1]["content"], "hi \"there\" 🩷");
+    }
+
+    #[test]
+    fn fwend_system_prompt_replaces_name_placeholder() {
+        assert_eq!(
+            fwend_system_prompt("you are [[FREND_NAME]]!", "Qwen"),
+            "you are Qwen!"
+        );
     }
 }
