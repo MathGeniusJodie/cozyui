@@ -3,6 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
+use crate::app_color;
 use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::peanut_money_font;
@@ -51,6 +52,8 @@ const ARCHIVE_TRANSACTION_PATH: &str = concat!(
 );
 const PAGE_OFFSET_X: usize = 14;
 const PAGE_STACK_OFFSET: usize = 4;
+const SHADOW_X_OFFSET: isize = 1;
+const SHADOW_Y_OFFSET: isize = 4;
 const ERASER_X: usize = 0;
 const ERASER_Y: usize = 21;
 const PRIORITY_ICON_GAP: usize = 2;
@@ -148,10 +151,11 @@ impl Toodle {
 
     pub(crate) fn width(&self) -> usize {
         (PAGE_OFFSET_X + self.pages[0].width + self.stack_offset()) * SCALE
+            + SHADOW_X_OFFSET as usize
     }
 
     pub(crate) fn height(&self) -> usize {
-        (self.pages[0].height + self.stack_offset()) * SCALE
+        (self.pages[0].height + self.stack_offset()) * SCALE + SHADOW_Y_OFFSET as usize
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -162,6 +166,9 @@ impl Toodle {
         fb.clear(self.fill_color(palette));
 
         let page_count = self.logical_page_count();
+        for visual_page in (0..page_count).rev() {
+            self.draw_page_shadow(fb, palette, visual_page);
+        }
         for visual_page in (0..page_count).rev() {
             let logical_page = (self.page + visual_page) % page_count;
             self.render_page(fb, palette, logical_page, visual_page);
@@ -176,6 +183,20 @@ impl Toodle {
         self.draw_priority_icon(fb);
         self.draw_goldstar(fb, palette);
         self.draw_focused_pencil(fb);
+    }
+
+    fn draw_page_shadow(&self, fb: &mut Framebuffer, palette: &Palette, visual_page: usize) {
+        let page_image = &self.pages[visual_page.min(self.pages.len() - 1)];
+        let page_offset = visual_page * PAGE_STACK_OFFSET;
+        let page_x = PAGE_OFFSET_X + page_offset;
+        let page_y = page_offset;
+        fb.draw_image_shadow(
+            page_image,
+            (page_x * SCALE) as isize + SHADOW_X_OFFSET,
+            (page_y * SCALE) as isize + SHADOW_Y_OFFSET,
+            SCALE,
+            palette.color(app_color::BACKGROUND_SHADOW),
+        );
     }
 
     fn render_page(

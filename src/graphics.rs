@@ -267,6 +267,25 @@ impl Framebuffer {
         );
     }
 
+    pub(crate) fn draw_image_shadow(
+        &mut self,
+        image: &Image,
+        dest_x: isize,
+        dest_y: isize,
+        scale: usize,
+        color: Rgba,
+    ) {
+        self.draw_image_region_mapped(
+            image,
+            Rect::new(0, 0, image.width, image.height),
+            dest_x,
+            dest_y,
+            scale,
+            None,
+            |source| (source.a != 0).then_some(color),
+        );
+    }
+
     pub(crate) fn draw_image_region(
         &mut self,
         image: &Image,

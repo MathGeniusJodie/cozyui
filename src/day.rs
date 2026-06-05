@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::app_color;
 use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::pixolde_bold_font;
@@ -10,6 +11,8 @@ use crate::{Framebuffer, Image, Palette, Rgba};
 const WIDTH: usize = 116;
 const HEIGHT: usize = 116;
 const BACKGROUND_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/days.png");
+const SHADOW_X_OFFSET: isize = 1;
+const SHADOW_Y_OFFSET: isize = 4;
 const PADDING: usize = 0;
 const DATE_REFRESH: Duration = Duration::from_secs(60);
 const TOP_GAP: usize = 10;
@@ -69,11 +72,11 @@ impl Day {
     }
 
     pub(crate) fn width(&self) -> usize {
-        WIDTH
+        WIDTH + SHADOW_X_OFFSET as usize
     }
 
     pub(crate) fn height(&self) -> usize {
-        HEIGHT
+        HEIGHT + SHADOW_Y_OFFSET as usize
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -81,6 +84,13 @@ impl Day {
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
+        fb.draw_image_shadow(
+            &self.background,
+            SHADOW_X_OFFSET,
+            SHADOW_Y_OFFSET,
+            1,
+            palette.color(app_color::BACKGROUND_SHADOW),
+        );
         fb.draw_image(&self.background, 0, 0, 1);
 
         let black = palette.color(palette_color::BLACK);

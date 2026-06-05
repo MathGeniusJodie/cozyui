@@ -4,6 +4,7 @@ use std::fs;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::app_color;
 use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
@@ -11,6 +12,8 @@ use crate::{Framebuffer, Image, Palette, Rgba};
 
 const WHEEL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/wheel.png");
 const TOTAL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/twirl_total.txt");
+const SHADOW_X_OFFSET: isize = 1;
+const SHADOW_Y_OFFSET: isize = 4;
 
 const SEGMENT_COUNT: usize = 12;
 const SEGMENT_NUMBERS: [&str; SEGMENT_COUNT] = [
@@ -81,11 +84,11 @@ impl Twirl {
     }
 
     pub(crate) fn width(&self) -> usize {
-        self.wheel.width
+        self.wheel.width + SHADOW_X_OFFSET as usize
     }
 
     pub(crate) fn height(&self) -> usize {
-        self.wheel.height + TOTAL_GAP + self.font.cell_h()
+        self.wheel.height + TOTAL_GAP + self.font.cell_h() + SHADOW_Y_OFFSET as usize
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -93,6 +96,14 @@ impl Twirl {
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
+        fb.draw_image_shadow(
+            &self.wheel,
+            SHADOW_X_OFFSET,
+            SHADOW_Y_OFFSET,
+            1,
+            palette.color(app_color::BACKGROUND_SHADOW),
+        );
+
         let lime = palette.color(palette_color::LIME);
         let green = palette.color(palette_color::GREEN);
         for y in 0..self.wheel.height {
