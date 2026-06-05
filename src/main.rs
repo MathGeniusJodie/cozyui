@@ -404,7 +404,7 @@ impl App {
             WidgetId::Alarm => {
                 self.alarm.click(x, y);
             }
-            WidgetId::Day => {}
+            WidgetId::Day => self.day.toggle_mode(),
         }
         Ok(())
     }
@@ -551,9 +551,8 @@ impl WidgetLayout {
         // Tweak widget positions here. These final coordinates are used both at startup and
         // after dynamic redraws, so edits in this block won't get snapped back later.
         let puter_x = middle_x + APP_LEFT_PADDING;
-        let toodle_x = middle_x
-            .saturating_sub(day.width() + TOODLE_LEFT_OVERLAP)
-            + APP_LEFT_PADDING;
+        let toodle_x =
+            middle_x.saturating_sub(day.width() + TOODLE_LEFT_OVERLAP) + APP_LEFT_PADDING;
         let twirl_x = middle_x.saturating_sub(day.width()) + APP_LEFT_PADDING;
         let alarm_x = APP_LEFT_PADDING + 32;
         let alarm_y = alarm_y + 14;
