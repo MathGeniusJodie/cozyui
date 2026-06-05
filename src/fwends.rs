@@ -30,6 +30,8 @@ const INPUT_X: usize = 24;
 const INPUT_Y: usize = 196;
 const INPUT_TEXT_Y: usize = 24;
 const TEXT_PAD: usize = 7;
+const INPUT_BOX_Y_OFFSET: isize = -13;
+const INPUT_BOX_RIGHT_PAD: usize = 11;
 const BUBBLE_PAD_X: usize = 14;
 const BUBBLE_PAD_TOP: usize = 8;
 const BUBBLE_PAD_BOTTOM: usize = 11;
@@ -485,14 +487,15 @@ impl Fwends {
         } else {
             &self.input
         };
-        let max_width = self.input_sticky.width - TEXT_PAD * 2;
+        let text_y = (INPUT_Y + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
+        let max_width = self.input_sticky.width - TEXT_PAD * 2 - INPUT_BOX_RIGHT_PAD;
         let lines = self.font.wrap_lines(label, max_width);
         for (index, line) in lines.into_iter().take(5).enumerate() {
             self.font.draw_text(
                 fb,
                 &line,
                 (INPUT_X + TEXT_PAD) * SCALE,
-                (INPUT_Y + INPUT_TEXT_Y + index * LINE_H) * SCALE,
+                (text_y + index * LINE_H) * SCALE,
                 GLYPH_SCALE,
                 palette.color(palette_color::BLACK),
             );
@@ -517,12 +520,13 @@ impl Fwends {
     }
 
     fn input_cursor_position(&self) -> (usize, usize) {
-        let max_width = self.input_sticky.width - TEXT_PAD * 2;
+        let max_width = self.input_sticky.width - TEXT_PAD * 2 - INPUT_BOX_RIGHT_PAD;
         let lines = self.font.wrap_lines(&self.input, max_width);
         let line_index = lines.len().saturating_sub(1).min(4);
+        let text_y = (INPUT_Y + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
         (
             INPUT_X + TEXT_PAD + self.font.text_width(&lines[line_index]).min(max_width),
-            INPUT_Y + INPUT_TEXT_Y + line_index * LINE_H,
+            text_y + line_index * LINE_H,
         )
     }
 }
