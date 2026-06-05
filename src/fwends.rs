@@ -13,7 +13,7 @@ use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Image, Palette, Rect, Rgba};
+use crate::{Framebuffer, Image, Palette, Rgba};
 use serde_json::{Value, json};
 
 const SCALE: usize = 1;
@@ -21,17 +21,15 @@ const GLYPH_SCALE: usize = 1;
 const W: usize = 268;
 const H: usize = 318;
 const PAD: usize = 8;
-const MODEL_Y: usize = 8;
-const MODEL_GAP: usize = 8;
-const SPEAKER_GAP: usize = 6;
-const CHAT_Y: usize = 48;
-const CHAT_H: usize = 142;
+const CHAT_Y: usize = 8;
+const CHAT_H: usize = 182;
 const INPUT_X: usize = 24;
 const INPUT_Y: usize = 196;
 const INPUT_TEXT_Y: usize = 24;
 const TEXT_PAD: usize = 7;
 const INPUT_BOX_Y_OFFSET: isize = -13;
 const INPUT_BOX_RIGHT_PAD: usize = 11;
+const SELECTED_FWEND_GAP: usize = 4;
 const BUBBLE_PAD_X: usize = 14;
 const BUBBLE_PAD_TOP: usize = 8;
 const BUBBLE_PAD_BOTTOM: usize = 11;
@@ -125,10 +123,7 @@ impl Fwends {
             input_sticky: Image::load(INPUT_STICKY_PATH, palette)?,
             pencil: Image::load(FOCUS_PENCIL_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
-            messages: vec![Message::intro(
-                "pick a fwend and say hi".to_string(),
-                selected_model,
-            )],
+            messages: vec![Message::intro("pick a fwend and say hi".to_string())],
             input: String::new(),
             selected_model,
             focused: false,
@@ -157,12 +152,9 @@ impl Fwends {
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
 
-        for (index, avatar) in self.avatars.iter().enumerate() {
-            self.draw_model_button(fb, palette, index, avatar);
-        }
-
         self.draw_messages(fb, palette);
         self.draw_input(fb, palette);
+        self.draw_selected_fwend(fb);
     }
 
     pub(crate) fn click(&mut self, x: i16, y: i16) {
@@ -173,20 +165,15 @@ impl Fwends {
 
         let x = x as usize / SCALE;
         let y = y as usize / SCALE;
-        for index in 0..MODELS.len() {
-            let slot_x = self.model_slot_x(index);
-            if x >= slot_x
-                && x < slot_x + self.model_slot_w
-                && y >= MODEL_Y
-                && y < MODEL_Y + self.model_slot_h
-            {
-                self.selected_model = index;
-                return;
-            }
+        let fwend_rect = self.selected_fwend_rect();
+        if fwend_rect.contains_point(x, y) {
+            self.selected_model = (self.selected_model + 1) % MODELS.len();
+            return;
         }
 
-        if x >= INPUT_X
-            && x < INPUT_X + self.input_sticky.width
+        let input_x = self.input_sticky_x();
+        if x >= input_x
+            && x < input_x + self.input_sticky.width
             && y >= INPUT_Y
             && y < INPUT_Y + self.input_sticky.height
         {
@@ -241,8 +228,7 @@ impl Fwends {
             self.scroll_to_bottom();
             return true;
         }
-        self.messages
-            .push(Message::assistant(text, self.selected_model));
+        self.messages.push(Message::assistant(text));
         self.scroll_to_bottom();
         true
     }
@@ -274,7 +260,7 @@ impl Fwends {
         self.input.clear();
         self.messages.push(Message::user(text.clone()));
         let selected_model = self.selected_model;
-        self.messages.push(Message::pending(selected_model));
+        self.messages.push(Message::pending());
         self.scroll_to_bottom();
 
         let model = MODELS[selected_model].id.to_string();
@@ -289,40 +275,6 @@ impl Fwends {
         });
     }
 
-    fn draw_model_button(
-        &self,
-        fb: &mut Framebuffer,
-        palette: &Palette,
-        index: usize,
-        avatar: &Image,
-    ) {
-        let x = self.model_slot_x(index);
-        let selected = index == self.selected_model;
-        if selected {
-            fill_scaled_rect(
-                fb,
-                x.saturating_sub(1),
-                MODEL_Y.saturating_sub(1),
-                self.model_slot_w + 2,
-                self.model_slot_h + 2,
-                palette.color(palette_color::CYAN),
-            );
-        }
-
-        let avatar_x = x + self.model_slot_w.saturating_sub(avatar.width) / 2;
-        let avatar_y = MODEL_Y + self.model_slot_h.saturating_sub(avatar.height);
-        fb.draw_image(
-            avatar,
-            (avatar_x * SCALE) as isize,
-            (avatar_y * SCALE) as isize,
-            SCALE,
-        );
-    }
-
-    fn model_slot_x(&self, index: usize) -> usize {
-        PAD + index * (self.model_slot_w + MODEL_GAP)
-    }
-
     fn draw_messages(&self, fb: &mut Framebuffer, palette: &Palette) {
         let layouts = self.message_layouts();
         let viewport_top = CHAT_Y;
@@ -334,9 +286,6 @@ impl Fwends {
                 continue;
             }
 
-            if layout.style.show_avatar {
-                self.draw_speaker_avatar(fb, y, layout.h, layout.model_index);
-            }
             self.draw_bubble(fb, layout.x, y, layout.w, layout.h, layout.style);
             let text_x = layout.x + layout.style.pad_left;
             let mut text_y = y + layout.style.pad_top as isize;
@@ -414,7 +363,6 @@ impl Fwends {
             };
             layouts.push(MessageLayout {
                 style,
-                model_index: message.model_index,
                 lines,
                 x,
                 y,
@@ -427,36 +375,7 @@ impl Fwends {
     }
 
     fn assistant_bubble_x(&self) -> usize {
-        PAD + self.model_slot_w + SPEAKER_GAP
-    }
-
-    fn draw_speaker_avatar(
-        &self,
-        fb: &mut Framebuffer,
-        bubble_y: isize,
-        bubble_h: usize,
-        model_index: usize,
-    ) {
-        let avatar = &self.avatars[model_index.min(self.avatars.len() - 1)];
-        let avatar_x = PAD + self.model_slot_w.saturating_sub(avatar.width) / 2;
-        let avatar_y = bubble_y + bubble_h as isize - avatar.height as isize;
-        let clip_top = CHAT_Y as isize;
-        let clip_bottom = (CHAT_Y + CHAT_H) as isize;
-
-        fb.draw_image_region_mapped(
-            avatar,
-            Rect::new(0, 0, avatar.width, avatar.height),
-            (avatar_x * SCALE) as isize,
-            avatar_y * SCALE as isize,
-            SCALE,
-            Some(Rect::new(
-                0,
-                clip_top as usize,
-                W * SCALE,
-                (clip_bottom - clip_top) as usize,
-            )),
-            Some,
-        );
+        self.input_sticky_x()
     }
 
     fn content_height(&self) -> usize {
@@ -477,7 +396,7 @@ impl Fwends {
     fn draw_input(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.draw_image(
             &self.input_sticky,
-            (INPUT_X * SCALE) as isize,
+            (self.input_sticky_x() * SCALE) as isize,
             (INPUT_Y * SCALE) as isize,
             SCALE,
         );
@@ -488,19 +407,42 @@ impl Fwends {
             &self.input
         };
         let text_y = (INPUT_Y + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
-        let max_width = self.input_sticky.width - TEXT_PAD * 2 - INPUT_BOX_RIGHT_PAD;
+        let text_x = self.input_text_x();
+        let max_width = self.input_text_width();
         let lines = self.font.wrap_lines(label, max_width);
         for (index, line) in lines.into_iter().take(5).enumerate() {
             self.font.draw_text(
                 fb,
                 &line,
-                (INPUT_X + TEXT_PAD) * SCALE,
+                text_x * SCALE,
                 (text_y + index * LINE_H) * SCALE,
                 GLYPH_SCALE,
                 palette.color(palette_color::BLACK),
             );
         }
         self.draw_focused_pencil(fb);
+    }
+
+    fn draw_selected_fwend(&self, fb: &mut Framebuffer) {
+        let avatar = &self.avatars[self.selected_model.min(self.avatars.len() - 1)];
+        let rect = self.selected_fwend_rect();
+        let avatar_x = rect.x + rect.w.saturating_sub(avatar.width) / 2;
+        let avatar_y = rect.y + rect.h.saturating_sub(avatar.height) / 2;
+        fb.draw_image(
+            avatar,
+            (avatar_x * SCALE) as isize,
+            (avatar_y * SCALE) as isize,
+            SCALE,
+        );
+    }
+
+    fn selected_fwend_rect(&self) -> FwendRect {
+        FwendRect {
+            x: INPUT_X,
+            y: INPUT_Y,
+            w: self.model_slot_w,
+            h: self.model_slot_h,
+        }
     }
 
     fn draw_focused_pencil(&self, fb: &mut Framebuffer) {
@@ -520,14 +462,43 @@ impl Fwends {
     }
 
     fn input_cursor_position(&self) -> (usize, usize) {
-        let max_width = self.input_sticky.width - TEXT_PAD * 2 - INPUT_BOX_RIGHT_PAD;
+        let text_x = self.input_text_x();
+        let max_width = self.input_text_width();
         let lines = self.font.wrap_lines(&self.input, max_width);
         let line_index = lines.len().saturating_sub(1).min(4);
         let text_y = (INPUT_Y + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
         (
-            INPUT_X + TEXT_PAD + self.font.text_width(&lines[line_index]).min(max_width),
+            text_x + self.font.text_width(&lines[line_index]).min(max_width),
             text_y + line_index * LINE_H,
         )
+    }
+
+    fn input_text_x(&self) -> usize {
+        self.input_sticky_x() + TEXT_PAD
+    }
+
+    fn input_text_width(&self) -> usize {
+        let right_edge =
+            self.input_sticky_x() + self.input_sticky.width - TEXT_PAD - INPUT_BOX_RIGHT_PAD;
+        right_edge.saturating_sub(self.input_text_x())
+    }
+
+    fn input_sticky_x(&self) -> usize {
+        INPUT_X + self.model_slot_w + SELECTED_FWEND_GAP
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FwendRect {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+}
+
+impl FwendRect {
+    fn contains_point(self, x: usize, y: usize) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 }
 
@@ -541,13 +512,11 @@ struct Model {
 struct Message {
     role: Role,
     text: String,
-    model_index: usize,
     kind: MessageKind,
 }
 
 struct MessageLayout {
     style: MessageStyle,
-    model_index: usize,
     lines: Vec<String>,
     x: usize,
     y: usize,
@@ -560,31 +529,29 @@ impl Message {
         Self {
             role: Role::User,
             text,
-            model_index: 0,
             kind: MessageKind::Normal,
         }
     }
 
-    fn assistant(text: String, model_index: usize) -> Self {
+    fn assistant(text: String) -> Self {
         Self {
             role: Role::Assistant,
             text,
-            model_index,
             kind: MessageKind::Normal,
         }
     }
 
-    fn intro(text: String, model_index: usize) -> Self {
+    fn intro(text: String) -> Self {
         Self {
             kind: MessageKind::Intro,
-            ..Self::assistant(text, model_index)
+            ..Self::assistant(text)
         }
     }
 
-    fn pending(model_index: usize) -> Self {
+    fn pending() -> Self {
         Self {
             kind: MessageKind::Pending,
-            ..Self::assistant("...".to_string(), model_index)
+            ..Self::assistant("...".to_string())
         }
     }
 
@@ -621,7 +588,6 @@ struct MessageStyle {
     top_cap: usize,
     bottom_cap: usize,
     align_right: bool,
-    show_avatar: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -641,7 +607,6 @@ const ASSISTANT_MESSAGE_STYLE: MessageStyle = MessageStyle {
     top_cap: BUBBLE_TOP_CAP,
     bottom_cap: BUBBLE_BOTTOM_CAP,
     align_right: false,
-    show_avatar: true,
 };
 
 const USER_MESSAGE_STYLE: MessageStyle = MessageStyle {
@@ -655,7 +620,6 @@ const USER_MESSAGE_STYLE: MessageStyle = MessageStyle {
     top_cap: STICKY_TOP_CAP,
     bottom_cap: STICKY_BOTTOM_CAP,
     align_right: true,
-    show_avatar: false,
 };
 
 fn request_history(messages: &[Message]) -> Vec<Message> {
@@ -858,10 +822,6 @@ fn compact_error(response: &str) -> String {
     } else {
         text
     }
-}
-
-fn fill_scaled_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize, color: Rgba) {
-    fb.fill_rect(x * SCALE, y * SCALE, w * SCALE, h * SCALE, color);
 }
 
 fn chat_contains(x: i16, y: i16) -> bool {
