@@ -89,7 +89,7 @@ impl Twirl {
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(palette_color::BLACK)
+        palette.color(palette_color::BLACK).transparent()
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {

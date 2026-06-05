@@ -34,31 +34,42 @@ pub(crate) use graphics::{Framebuffer, Image, Palette, Rect, Rgba, decode_png_wi
 use x_window::XWindow;
 
 const PALETTE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/na16-1x.png");
+const DESK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/desk.png");
 
 #[allow(dead_code)]
 pub(crate) mod palette_color {
-    pub(super) const LAVENDER: usize = 0;
-    pub(super) const GUNMETAL: usize = 1;
-    pub(super) const PLUM: usize = 2;
-    pub(super) const BROWN: usize = 3;
-    pub(super) const PEACH: usize = 4;
-    pub(super) const CREAM: usize = 5;
-    pub(super) const LIME: usize = 6;
-    pub(super) const GREEN: usize = 7;
-    pub(super) const ORANGE: usize = 8;
-    pub(super) const CRIMSON: usize = 9;
-    pub(super) const ROSE: usize = 10;
-    pub(super) const PURPLE: usize = 11;
-    pub(super) const CYAN: usize = 12;
-    pub(super) const BLUE: usize = 13;
-    pub(super) const PINE: usize = 14;
-    pub(super) const BLACK: usize = 15;
+    pub(crate) const LAVENDER: usize = 0;
+    pub(crate) const GUNMETAL: usize = 1;
+    pub(crate) const PLUM: usize = 2;
+    pub(crate) const BROWN: usize = 3;
+    pub(crate) const PEACH: usize = 4;
+    pub(crate) const CREAM: usize = 5;
+    pub(crate) const LIME: usize = 6;
+    pub(crate) const GREEN: usize = 7;
+    pub(crate) const ORANGE: usize = 8;
+    pub(crate) const CRIMSON: usize = 9;
+    pub(crate) const ROSE: usize = 10;
+    pub(crate) const PURPLE: usize = 11;
+    pub(crate) const CYAN: usize = 12;
+    pub(crate) const BLUE: usize = 13;
+    pub(crate) const PINE: usize = 14;
+    pub(crate) const BLACK: usize = 15;
+}
+
+#[allow(dead_code)]
+pub(crate) mod app_color {
+    use crate::palette_color;
+
+    pub(crate) const BACKGROUND: usize = palette_color::ROSE;
+    pub(crate) const BACKGROUND_SHADOW: usize = palette_color::CRIMSON;
 }
 
 const WHEEL_UP: u8 = 4;
 const WHEEL_DOWN: u8 = 5;
 
 const WIDGET_GAP: usize = 16;
+const APP_LEFT_PADDING: usize = 54;
+const APP_BOTTOM_PADDING: usize = 54;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WidgetId {
@@ -72,11 +83,11 @@ enum WidgetId {
 
 impl WidgetId {
     const ALL: [Self; 6] = [
+        Self::Alarm,
         Self::Puter,
         Self::Toodle,
         Self::Fwends,
         Self::Twirl,
-        Self::Alarm,
         Self::Day,
     ];
 }
@@ -88,6 +99,7 @@ struct App {
     twirl: twirl::Twirl,
     alarm: alarm::Alarm,
     day: day::Day,
+    desk: Image,
     puter_fb: Framebuffer,
     toodle_fb: Framebuffer,
     fwends_fb: Framebuffer,
@@ -112,6 +124,7 @@ impl App {
         let twirl = twirl::Twirl::load(palette)?;
         let alarm = alarm::Alarm::load(palette)?;
         let day = day::Day::load(palette)?;
+        let desk = Image::load(DESK_PATH, palette)?;
         let layout = WidgetLayout::new(&puter, &toodle, &twirl, &alarm, &day);
         let puter_rect = Rect {
             x: layout.puter_x,
@@ -163,6 +176,7 @@ impl App {
             twirl,
             alarm,
             day,
+            desk,
             puter_fb,
             toodle_fb,
             fwends_fb,
@@ -184,6 +198,7 @@ impl App {
         self.toodle_rect
             .x
             .saturating_add(self.toodle_rect.w)
+            .max(self.desk.width)
             .max(self.fwends_rect.x + self.fwends_rect.w)
             .max(self.twirl_rect.x + self.twirl_rect.w)
             .max(self.alarm_rect.x + self.alarm_rect.w)
@@ -193,14 +208,44 @@ impl App {
     fn height(&self) -> usize {
         self.puter_rect
             .h
+            .max(self.desk.height)
             .max(self.fwends_rect.y + self.fwends_rect.h)
             .max(self.twirl_rect.y + self.twirl_rect.h)
             .max(self.alarm_rect.y + self.alarm_rect.h)
             .max(self.day_rect.y + self.day_rect.h)
+            + APP_BOTTOM_PADDING
     }
 
     fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(palette_color::BLACK)
+        palette.color(app_color::BACKGROUND)
+    }
+
+    fn render_background(&self, fb: &mut Framebuffer, palette: &Palette) {
+        fb.clear(self.fill_color(palette));
+        let y = fb.height.saturating_sub(self.desk.height) as isize;
+        fb.draw_image(&self.desk, 0, y, 1);
+    }
+
+    fn render_background_rect(&self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
+        fb.fill_rect(rect.x, rect.y, rect.w, rect.h, self.fill_color(palette));
+
+        let desk_y = fb.height.saturating_sub(self.desk.height);
+        let x0 = rect.x.min(self.desk.width);
+        let x1 = rect.x.saturating_add(rect.w).min(self.desk.width);
+        let y0 = rect.y.max(desk_y);
+        let y1 = rect
+            .y
+            .saturating_add(rect.h)
+            .min(desk_y.saturating_add(self.desk.height));
+        if x0 < x1 && y0 < y1 {
+            fb.draw_image_region(
+                &self.desk,
+                Rect::new(x0, y0 - desk_y, x1 - x0, y1 - y0),
+                x0 as isize,
+                y0 as isize,
+                1,
+            );
+        }
     }
 
     fn start(&mut self, window_id: u64) -> Result<(), Box<dyn Error>> {
@@ -208,7 +253,7 @@ impl App {
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.clear(self.fill_color(palette));
+        self.render_background(fb, palette);
         for widget in WidgetId::ALL {
             self.render_widget(fb, palette, widget);
         }
@@ -250,7 +295,7 @@ impl App {
     }
 
     fn render_focused_widget(&mut self, fb: &mut Framebuffer, palette: &Palette) {
-        self.render_widget(fb, palette, self.focus);
+        self.render_rect(fb, palette, self.focused_rect());
     }
 
     fn render_and_draw_widget(
@@ -260,8 +305,18 @@ impl App {
         palette: &Palette,
         widget: WidgetId,
     ) -> Result<(), Box<dyn Error>> {
-        self.render_widget(fb, palette, widget);
-        xwin.draw_rect(fb, self.rect_for(widget))
+        let rect = self.rect_for(widget);
+        self.render_rect(fb, palette, rect);
+        xwin.draw_rect(fb, rect)
+    }
+
+    fn render_rect(&mut self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
+        self.render_background_rect(fb, palette, rect);
+        for widget in WidgetId::ALL {
+            if rects_intersect(self.rect_for(widget), rect) {
+                self.render_widget(fb, palette, widget);
+            }
+        }
     }
 
     fn sync_dynamic_layout(&mut self, palette: &Palette) -> bool {
@@ -495,12 +550,15 @@ impl WidgetLayout {
 
         // Tweak widget positions here. These final coordinates are used both at startup and
         // after dynamic redraws, so edits in this block won't get snapped back later.
-        let puter_x = middle_x;
-        let toodle_x = middle_x.saturating_sub(day.width() + TOODLE_LEFT_OVERLAP);
-        let twirl_x = middle_x.saturating_sub(day.width());
-        let alarm_x = 0;
-        let day_x = alarm.width().saturating_sub(day.width());
-        let fwends_x = middle_x + middle_w + WIDGET_GAP;
+        let puter_x = middle_x + APP_LEFT_PADDING;
+        let toodle_x = middle_x
+            .saturating_sub(day.width() + TOODLE_LEFT_OVERLAP)
+            + APP_LEFT_PADDING;
+        let twirl_x = middle_x.saturating_sub(day.width()) + APP_LEFT_PADDING;
+        let alarm_x = APP_LEFT_PADDING + 32;
+        let alarm_y = alarm_y + 14;
+        let day_x = alarm.width().saturating_sub(day.width()) + APP_LEFT_PADDING;
+        let fwends_x = middle_x + middle_w + WIDGET_GAP + APP_LEFT_PADDING;
         let fwends_y = 0;
 
         Self {
@@ -528,6 +586,13 @@ fn move_rect(rect: &mut Rect, x: usize, y: usize) -> bool {
     rect.x = x;
     rect.y = y;
     true
+}
+
+fn rects_intersect(a: Rect, b: Rect) -> bool {
+    a.x < b.x.saturating_add(b.w)
+        && b.x < a.x.saturating_add(a.w)
+        && a.y < b.y.saturating_add(b.h)
+        && b.y < a.y.saturating_add(a.h)
 }
 
 #[derive(Clone, Copy)]

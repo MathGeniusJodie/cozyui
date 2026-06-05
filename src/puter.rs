@@ -173,7 +173,7 @@ impl Puter {
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(COLOR_CURSOR)
+        palette.color(COLOR_CURSOR).transparent()
     }
 
     pub(crate) fn press_button(&mut self, x: i16, y: i16) {

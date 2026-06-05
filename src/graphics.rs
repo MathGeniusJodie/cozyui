@@ -10,6 +10,13 @@ pub(crate) struct Rgba {
     pub(crate) a: u8,
 }
 
+impl Rgba {
+    pub(crate) fn transparent(mut self) -> Self {
+        self.a = 0;
+        self
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Rect {
     pub(crate) x: usize,
@@ -114,6 +121,8 @@ impl Image {
                     let mut transparent = palette.darkest();
                     transparent.a = 0;
                     transparent
+                } else if let Some(index) = source_palette_index(color) {
+                    palette.color(index)
                 } else {
                     palette.nearest(color)
                 }
@@ -139,13 +148,14 @@ pub(crate) struct Framebuffer {
 
 impl Framebuffer {
     pub(crate) const BYTES_PER_PIXEL: usize = 4;
+    const ALPHA_OFFSET: usize = 3;
 
     pub(crate) fn new(width: usize, height: usize, fill: Rgba) -> Self {
         Self::new_filled(width, height, fill)
     }
 
     fn color_bytes(color: Rgba) -> [u8; Self::BYTES_PER_PIXEL] {
-        [color.b, color.g, color.r, 0]
+        [color.b, color.g, color.r, color.a]
     }
 
     fn pixel_offset(&self, x: usize, y: usize) -> usize {
@@ -316,8 +326,16 @@ impl Framebuffer {
         let copy_width = src.width.min(self.width - dest_x);
         let copy_height = src.height.min(self.height - dest_y);
         for y in 0..copy_height {
-            self.row_bytes_mut(dest_y + y, dest_x, copy_width)
-                .copy_from_slice(src.row_bytes(y, 0, copy_width));
+            let src_row = src.row_bytes(y, 0, copy_width);
+            let dst_row = self.row_bytes_mut(dest_y + y, dest_x, copy_width);
+            for (src_pixel, dst_pixel) in src_row
+                .chunks_exact(Self::BYTES_PER_PIXEL)
+                .zip(dst_row.chunks_exact_mut(Self::BYTES_PER_PIXEL))
+            {
+                if src_pixel[Self::ALPHA_OFFSET] != 0 {
+                    dst_pixel.copy_from_slice(src_pixel);
+                }
+            }
         }
     }
 }
@@ -393,4 +411,29 @@ fn color_distance(a: Rgba, b: Rgba) -> u32 {
     let dg = a.g as i32 - b.g as i32;
     let db = a.b as i32 - b.b as i32;
     (dr * dr + dg * dg + db * db) as u32
+}
+
+const SOURCE_PALETTE: [(u8, u8, u8); 16] = [
+    (140, 143, 174),
+    (88, 69, 99),
+    (62, 33, 55),
+    (154, 99, 72),
+    (215, 155, 125),
+    (245, 237, 186),
+    (192, 199, 65),
+    (100, 125, 52),
+    (228, 148, 58),
+    (157, 48, 59),
+    (210, 100, 113),
+    (112, 55, 127),
+    (126, 196, 193),
+    (52, 133, 157),
+    (23, 67, 75),
+    (31, 14, 28),
+];
+
+fn source_palette_index(color: Rgba) -> Option<usize> {
+    SOURCE_PALETTE
+        .iter()
+        .position(|&(r, g, b)| (color.r, color.g, color.b) == (r, g, b))
 }
