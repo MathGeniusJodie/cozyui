@@ -7,9 +7,11 @@ use std::thread::JoinHandle;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, point_to_viewport};
+use alacritty_terminal::term::{Config, Term, TermMode, point_to_viewport};
 use alacritty_terminal::tty;
 use xkbcommon::xkb::keysyms;
 
@@ -21,6 +23,7 @@ const BG_SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
 const GLYPH_W: usize = 6;
 const GLYPH_H: usize = 12;
+const SHIFT_MASK: u16 = 1;
 
 const SCREEN_SOURCE_X: usize = 49;
 const SCREEN_SOURCE_Y: usize = 49;
@@ -47,6 +50,7 @@ const COLOR_ORANGE_TEXT: usize = palette_color::ORANGE;
 const COLOR_ORANGE_GLOW: usize = palette_color::BROWN;
 const COLOR_GREEN_TEXT: usize = palette_color::LIME;
 const COLOR_GREEN_GLOW: usize = palette_color::GREEN;
+const COLOR_SELECTION: usize = palette_color::GUNMETAL;
 
 const BUTTON_SPRITES_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/buttons.png");
 const BUTTON_PRESSED_SPRITES_PATH: &str =
@@ -147,6 +151,8 @@ pub(crate) struct Puter {
     terminal: Option<Terminal>,
     settings: DisplaySettings,
     active_button: Option<usize>,
+    selecting_terminal: bool,
+    selection_point: Option<Point>,
 }
 
 impl Puter {
@@ -161,6 +167,8 @@ impl Puter {
             terminal: None,
             settings: DisplaySettings::new(),
             active_button: None,
+            selecting_terminal: false,
+            selection_point: None,
         })
     }
 
@@ -176,8 +184,16 @@ impl Puter {
         palette.color(COLOR_CURSOR).transparent()
     }
 
-    pub(crate) fn press_button(&mut self, x: i16, y: i16) {
+    pub(crate) fn press_button(&mut self, x: i16, y: i16, state: u16) {
         self.active_button = button_at(x, y);
+        self.selecting_terminal = false;
+        self.selection_point = None;
+        if self.active_button.is_some() {
+            return;
+        }
+
+        self.selection_point = self.terminal().mouse_press(x, y, state);
+        self.selecting_terminal = self.selection_point.is_some();
     }
 
     pub(crate) fn release_button(&mut self, x: i16, y: i16) {
@@ -188,6 +204,29 @@ impl Puter {
             self.settings.toggle(BUTTON_TARGETS[pressed].action);
         }
         self.active_button = None;
+        if self.selecting_terminal {
+            self.terminal().selection_to_clipboard();
+        } else {
+            self.terminal().mouse_release(x, y);
+        }
+        self.selecting_terminal = false;
+        self.selection_point = None;
+    }
+
+    pub(crate) fn motion(&mut self, x: i16, y: i16) -> bool {
+        if !self.selecting_terminal {
+            return false;
+        }
+
+        let Some(point) = self.terminal().screen_point(x, y) else {
+            return false;
+        };
+        if self.selection_point == Some(point) {
+            return false;
+        }
+
+        self.selection_point = Some(point);
+        self.terminal().mouse_motion(point)
     }
 
     pub(crate) fn start_terminal(&mut self, window_id: u64) -> Result<(), Box<dyn Error>> {
@@ -200,8 +239,12 @@ impl Puter {
         self.terminal().drain_events()
     }
 
-    pub(crate) fn handle_key_press(&self, input: &KeyInput) {
-        self.terminal().handle_key_press(input);
+    pub(crate) fn handle_key_press(
+        &self,
+        input: &KeyInput,
+        clipboard_text: Option<&str>,
+    ) -> Option<String> {
+        self.terminal().handle_key_press(input, clipboard_text)
     }
 
     pub(crate) fn scroll_up(&self) {
@@ -254,17 +297,30 @@ impl Puter {
                 continue;
             };
             let cell = indexed.cell;
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER | Flags::HIDDEN) || cell.c == ' ' {
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER | Flags::HIDDEN) {
                 continue;
             }
             let x = art_x(SCREEN_SOURCE_X) + point.column.0 * cell_w;
             let y = art_y(SCREEN_SOURCE_Y) + point.line * cell_h;
+            let selected = content
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.contains(indexed.point));
+            if selected {
+                fb.fill_rect(x, y, cell_w, cell_h, palette.color(COLOR_SELECTION));
+            }
+            if cell.c == ' ' {
+                continue;
+            }
             let mut color = self.settings.text_color(palette);
             if cell.flags.contains(Flags::DIM) {
                 color = self.settings.glow_color(palette);
             }
             if cell.flags.contains(Flags::BOLD) {
                 color = self.settings.text_color(palette);
+            }
+            if selected {
+                color = palette.color(palette_color::CREAM);
             }
             if self.settings.high_brightness {
                 let glow = self.settings.glow_color(palette);
@@ -389,6 +445,7 @@ struct Terminal {
     term: Arc<FairMutex<Term<UiEventProxy>>>,
     window_size: WindowSize,
     event_thread: Option<TerminalThread>,
+    clipboard: FairMutex<String>,
 }
 
 impl Terminal {
@@ -422,6 +479,7 @@ impl Terminal {
             term,
             window_size,
             event_thread,
+            clipboard: FairMutex::new(String::new()),
         })
     }
 
@@ -449,13 +507,91 @@ impl Terminal {
         TerminalEvents { running, dirty }
     }
 
-    fn handle_key_press(&self, input: &KeyInput) {
+    fn handle_key_press(&self, input: &KeyInput, clipboard_text: Option<&str>) -> Option<String> {
         if let Some(scroll) = key_scroll(input) {
             self.scroll(scroll);
+            None
+        } else if is_copy_shortcut(input) {
+            self.selection_to_clipboard()
+        } else if is_paste_shortcut(input) {
+            let fallback = self.clipboard.lock();
+            let text =
+                clipboard_text.or_else(|| (!fallback.is_empty()).then_some(fallback.as_str()))?;
+            self.scroll(Scroll::Bottom);
+            let _ = self
+                .tx
+                .send(Msg::Input(Cow::Owned(text.as_bytes().to_vec())));
+            None
         } else if let Some(bytes) = key_bytes(input) {
             self.scroll(Scroll::Bottom);
             let _ = self.tx.send(Msg::Input(Cow::Owned(bytes.into_bytes())));
+            None
+        } else {
+            None
         }
+    }
+
+    fn mouse_press(&self, x: i16, y: i16, state: u16) -> Option<Point> {
+        let Some(point) = screen_point(x, y, &self.window_size) else {
+            return None;
+        };
+
+        let mouse_mode = self.term.lock().mode().intersects(TermMode::MOUSE_MODE);
+        if mouse_mode && state & SHIFT_MASK == 0 {
+            self.send_mouse(point, 0, true);
+            return None;
+        }
+
+        self.scroll(Scroll::Bottom);
+        let mut term = self.term.lock();
+        term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
+        Some(point)
+    }
+
+    fn mouse_motion(&self, point: Point) -> bool {
+        let mut term = self.term.lock();
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(point, Side::Right);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn screen_point(&self, x: i16, y: i16) -> Option<Point> {
+        screen_point(x, y, &self.window_size)
+    }
+
+    fn mouse_release(&self, x: i16, y: i16) {
+        let Some(point) = screen_point(x, y, &self.window_size) else {
+            return;
+        };
+
+        if self.term.lock().mode().intersects(TermMode::MOUSE_MODE) {
+            self.send_mouse(point, 0, false);
+        }
+    }
+
+    fn send_mouse(&self, point: Point, button: usize, pressed: bool) {
+        let suffix = if pressed { 'M' } else { 'm' };
+        let text = format!(
+            "\x1b[<{};{};{}{}",
+            button,
+            point.column.0 + 1,
+            point.line.0 + 1,
+            suffix
+        );
+        let _ = self.tx.send(Msg::Input(Cow::Owned(text.into_bytes())));
+    }
+
+    fn copy_selection(&self) -> Option<String> {
+        self.term.lock().selection_to_string()
+    }
+
+    fn selection_to_clipboard(&self) -> Option<String> {
+        let text = self.copy_selection()?;
+        *self.clipboard.lock() = text.clone();
+        Some(text)
     }
 
     fn scroll(&self, scroll: Scroll) {
@@ -721,6 +857,32 @@ fn art_x(x: usize) -> usize {
 
 fn art_y(y: usize) -> usize {
     (y - ART_CROP_Y) * BG_SCALE
+}
+
+fn screen_point(x: i16, y: i16, size: &WindowSize) -> Option<Point> {
+    if x < 0 || y < 0 {
+        return None;
+    }
+
+    let x = x as usize;
+    let y = y as usize;
+    let screen_x = art_x(SCREEN_SOURCE_X);
+    let screen_y = art_y(SCREEN_SOURCE_Y);
+    if x < screen_x || y < screen_y || x >= screen_x + SCREEN_W || y >= screen_y + SCREEN_H {
+        return None;
+    }
+
+    let column = ((x - screen_x) / size.cell_width as usize).min(size.num_cols as usize - 1);
+    let line = ((y - screen_y) / size.cell_height as usize).min(size.num_lines as usize - 1);
+    Some(Point::new(Line(line as i32), Column(column)))
+}
+
+fn is_copy_shortcut(input: &KeyInput) -> bool {
+    input.ctrl() && input.shift() && matches!(input.sym_raw(), keysyms::KEY_c | keysyms::KEY_C)
+}
+
+fn is_paste_shortcut(input: &KeyInput) -> bool {
+    input.ctrl() && input.shift() && matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
 }
 
 fn key_bytes(input: &KeyInput) -> Option<String> {

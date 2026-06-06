@@ -4,6 +4,7 @@ use std::time::Duration;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event as XEvent;
 use x11rb::protocol::xproto::ButtonIndex;
+use xkbcommon::xkb::keysyms;
 
 mod bitmap_font;
 mod comicoro_font;
@@ -394,19 +395,26 @@ impl App {
         self.fwends.drain_reply()
     }
 
-    fn handle_key_press(&mut self, input: &text_input::KeyInput) -> Result<(), Box<dyn Error>> {
+    fn handle_key_press(
+        &mut self,
+        input: &text_input::KeyInput,
+        clipboard_text: Option<&str>,
+    ) -> Result<Option<String>, Box<dyn Error>> {
         match self.focus {
-            WidgetId::Puter => {
-                self.puter.handle_key_press(input);
-                Ok(())
+            WidgetId::Puter => Ok(self.puter.handle_key_press(input, clipboard_text)),
+            WidgetId::Toodle => {
+                self.toodle.handle_key_press(input)?;
+                Ok(None)
             }
-            WidgetId::Toodle => self.toodle.handle_key_press(input),
-            WidgetId::Fwends => self.fwends.handle_key_press(input),
-            WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => Ok(()),
+            WidgetId::Fwends => {
+                self.fwends.handle_key_press(input)?;
+                Ok(None)
+            }
+            WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => Ok(None),
         }
     }
 
-    fn click(&mut self, x: i16, y: i16) -> Result<(), Box<dyn Error>> {
+    fn click(&mut self, x: i16, y: i16, state: u16) -> Result<(), Box<dyn Error>> {
         self.puter_pressed = false;
         let Some((widget, x, y)) = self.widget_at(x, y) else {
             return Ok(());
@@ -415,7 +423,7 @@ impl App {
         match widget {
             WidgetId::Puter => {
                 self.puter_pressed = true;
-                self.puter.press_button(x, y);
+                self.puter.press_button(x, y, state);
             }
             WidgetId::Toodle => {
                 if self.toodle.click(x, y)? {
@@ -448,6 +456,13 @@ impl App {
     }
 
     fn motion(&mut self, x: i16, y: i16) -> Option<WidgetId> {
+        if self.focus == WidgetId::Puter {
+            let (local_x, local_y) = self.puter_rect.local(x, y);
+            if self.puter.motion(local_x, local_y) {
+                return Some(WidgetId::Puter);
+            }
+        }
+
         if self.focus == WidgetId::Wavey {
             let (local_x, local_y) = self.wavey_rect.local(x, y);
             if self.wavey.motion(local_x, local_y) {
@@ -704,16 +719,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
+        let mut pending_motion_widget = None;
         while let Some(event) = xwin.conn.poll_for_event()? {
             match event {
                 XEvent::Expose(_) => {
                     app.render(&mut fb, &palette);
                     xwin.draw(&fb)?;
                     drew_frame = true;
+                    pending_motion_widget = None;
                 }
                 XEvent::KeyPress(event) => {
                     let input = xwin.keyboard.press(event.detail, event.state.into());
-                    app.handle_key_press(&input)?;
+                    let paste_text = if app.focus == WidgetId::Puter && is_paste_shortcut(&input) {
+                        xwin.clipboard_text()?
+                    } else {
+                        None
+                    };
+                    if let Some(copy_text) = app.handle_key_press(&input, paste_text.as_deref())? {
+                        xwin.set_clipboard_text(copy_text)?;
+                    }
                     if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
                         app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
@@ -740,7 +764,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     detail if detail == u8::from(ButtonIndex::M1) => {
-                        app.click(event.event_x, event.event_y)?;
+                        app.click(event.event_x, event.event_y, event.state.into())?;
                         if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
                             app.render(&mut fb, &palette);
                             xwin.draw(&fb)?;
@@ -756,19 +780,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if event.detail == u8::from(ButtonIndex::M1)
                         && let Some(widget) = app.release(event.event_x, event.event_y)
                     {
+                        pending_motion_widget =
+                            pending_motion_widget.filter(|pending| *pending != widget);
                         app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
                         drew_frame = true;
                     }
                 }
                 XEvent::MotionNotify(event) => {
                     if let Some(widget) = app.motion(event.event_x, event.event_y) {
-                        app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
-                        drew_frame = true;
+                        pending_motion_widget = Some(widget);
                     }
                 }
+                XEvent::SelectionRequest(event) => xwin.handle_selection_request(event)?,
+                XEvent::SelectionClear(event) => xwin.handle_selection_clear(event),
                 XEvent::DestroyNotify(_) => running = false,
                 _ => {}
             }
+        }
+        if let Some(widget) = pending_motion_widget {
+            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
+            drew_frame = true;
         }
 
         std::thread::sleep(Duration::from_millis(if drew_frame { 1 } else { 16 }));
@@ -791,4 +822,8 @@ fn sync_window_layout(
     *fb = Framebuffer::new(app.width(), app.height(), app.fill_color(palette));
     xwin.resize(fb.width, fb.height)?;
     Ok(true)
+}
+
+fn is_paste_shortcut(input: &text_input::KeyInput) -> bool {
+    input.ctrl() && input.shift() && matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
 }

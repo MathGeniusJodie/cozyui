@@ -2,14 +2,17 @@ use std::error::Error;
 use std::fs::File;
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
+use std::time::{Duration, Instant};
 
 use memmap2::MmapMut;
 use x11rb::connection::Connection;
+use x11rb::protocol::Event as XEvent;
 use x11rb::protocol::shm::{ConnectionExt as ShmConnectionExt, Seg};
 use x11rb::protocol::xproto::ConnectionExt as XprotoConnectionExt;
 use x11rb::protocol::xproto::{
-    AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, CreateGCAux, CreateWindowAux,
-    EventMask, Gcontext, ImageFormat, PropMode, Window, WindowClass,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, CreateGCAux, CreateWindowAux,
+    EventMask, Gcontext, ImageFormat, PropMode, SELECTION_NOTIFY_EVENT, SelectionClearEvent,
+    SelectionNotifyEvent, SelectionRequestEvent, Time, Window, WindowClass,
 };
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
@@ -25,11 +28,21 @@ pub(crate) struct XWindow {
     pub(crate) keyboard: text_input::Keyboard,
     upload_buffer: Vec<u8>,
     shm_image: Option<ShmImage>,
+    clipboard_atoms: ClipboardAtoms,
+    clipboard_text: Option<String>,
 }
 
 struct ShmImage {
     seg: Seg,
     mmap: MmapMut,
+}
+
+struct ClipboardAtoms {
+    clipboard: Atom,
+    targets: Atom,
+    utf8_string: Atom,
+    text: Atom,
+    cozy_clipboard: Atom,
 }
 
 impl XWindow {
@@ -77,6 +90,7 @@ impl XWindow {
         conn.map_window(window)?;
         conn.flush()?;
         let keyboard = text_input::Keyboard::new(&conn)?;
+        let clipboard_atoms = ClipboardAtoms::load(&conn)?;
         let shm_image = Self::open_shm_image(&conn, width, height).ok();
 
         Ok(Self {
@@ -87,6 +101,8 @@ impl XWindow {
             keyboard,
             upload_buffer: Vec::new(),
             shm_image,
+            clipboard_atoms,
+            clipboard_text: None,
         })
     }
 
@@ -238,6 +254,142 @@ impl XWindow {
         self.conn.flush()?;
         Ok(())
     }
+
+    pub(crate) fn set_clipboard_text(&mut self, text: String) -> Result<(), Box<dyn Error>> {
+        self.clipboard_text = Some(text);
+        self.conn.set_selection_owner(
+            self.window,
+            self.clipboard_atoms.clipboard,
+            Time::CURRENT_TIME,
+        )?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn clipboard_text(&mut self) -> Result<Option<String>, Box<dyn Error>> {
+        if self
+            .conn
+            .get_selection_owner(self.clipboard_atoms.clipboard)?
+            .reply()?
+            .owner
+            == self.window
+        {
+            return Ok(self.clipboard_text.clone());
+        }
+
+        self.conn.convert_selection(
+            self.window,
+            self.clipboard_atoms.clipboard,
+            self.clipboard_atoms.utf8_string,
+            self.clipboard_atoms.cozy_clipboard,
+            Time::CURRENT_TIME,
+        )?;
+        self.conn.flush()?;
+
+        let timeout = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < timeout {
+            if let Some(event) = self.conn.poll_for_event()? {
+                match event {
+                    XEvent::SelectionNotify(event) => {
+                        return self.read_selection_notify(event);
+                    }
+                    XEvent::SelectionRequest(event) => self.handle_selection_request(event)?,
+                    XEvent::SelectionClear(event) => self.handle_selection_clear(event),
+                    _ => {}
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub(crate) fn handle_selection_request(
+        &mut self,
+        event: SelectionRequestEvent,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut property = AtomEnum::NONE.into();
+        if event.selection == self.clipboard_atoms.clipboard {
+            if event.target == self.clipboard_atoms.targets {
+                property = selection_property(event);
+                self.conn.change_property32(
+                    PropMode::REPLACE,
+                    event.requestor,
+                    property,
+                    AtomEnum::ATOM,
+                    &[
+                        self.clipboard_atoms.targets,
+                        self.clipboard_atoms.utf8_string,
+                        self.clipboard_atoms.text,
+                        AtomEnum::STRING.into(),
+                    ],
+                )?;
+            } else if let Some(text) = &self.clipboard_text
+                && self.supported_text_target(event.target)
+            {
+                property = selection_property(event);
+                self.conn.change_property8(
+                    PropMode::REPLACE,
+                    event.requestor,
+                    property,
+                    event.target,
+                    text.as_bytes(),
+                )?;
+            }
+        }
+
+        let notify = SelectionNotifyEvent {
+            response_type: SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            time: event.time,
+            requestor: event.requestor,
+            selection: event.selection,
+            target: event.target,
+            property,
+        };
+        self.conn
+            .send_event(false, event.requestor, EventMask::NO_EVENT, notify)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn handle_selection_clear(&mut self, event: SelectionClearEvent) {
+        if event.selection == self.clipboard_atoms.clipboard {
+            self.clipboard_text = None;
+        }
+    }
+
+    fn read_selection_notify(
+        &self,
+        event: SelectionNotifyEvent,
+    ) -> Result<Option<String>, Box<dyn Error>> {
+        if event.property == u32::from(AtomEnum::NONE) {
+            return Ok(None);
+        }
+
+        let reply = self
+            .conn
+            .get_property(
+                true,
+                self.window,
+                event.property,
+                AtomEnum::ANY,
+                0,
+                u32::MAX / 4,
+            )?
+            .reply()?;
+        let Some(bytes) = reply.value8() else {
+            return Ok(None);
+        };
+        Ok(String::from_utf8(bytes.collect()).ok())
+    }
+
+    fn supported_text_target(&self, target: Atom) -> bool {
+        target == self.clipboard_atoms.utf8_string
+            || target == self.clipboard_atoms.text
+            || target == u32::from(AtomEnum::STRING)
+    }
 }
 
 impl Drop for XWindow {
@@ -246,5 +398,29 @@ impl Drop for XWindow {
             let _ = self.conn.shm_detach(shm_image.seg);
             let _ = self.conn.flush();
         }
+    }
+}
+
+impl ClipboardAtoms {
+    fn load(conn: &XCBConnection) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            clipboard: intern_atom(conn, b"CLIPBOARD")?,
+            targets: intern_atom(conn, b"TARGETS")?,
+            utf8_string: intern_atom(conn, b"UTF8_STRING")?,
+            text: intern_atom(conn, b"TEXT")?,
+            cozy_clipboard: intern_atom(conn, b"COZYUI_CLIPBOARD")?,
+        })
+    }
+}
+
+fn intern_atom(conn: &XCBConnection, name: &[u8]) -> Result<Atom, Box<dyn Error>> {
+    Ok(conn.intern_atom(false, name)?.reply()?.atom)
+}
+
+fn selection_property(event: SelectionRequestEvent) -> Atom {
+    if event.property == u32::from(AtomEnum::NONE) {
+        event.target
+    } else {
+        event.property
     }
 }
