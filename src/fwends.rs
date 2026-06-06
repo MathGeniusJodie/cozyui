@@ -14,7 +14,7 @@ use crate::comicoro_font;
 use crate::palette_color;
 use crate::text_edit::{TextEdit, TextEditOutcome, char_len};
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Image, Palette, Rect, Rgba, draw_filled_ellipse};
+use crate::{Framebuffer, Image, Palette, Rect, Rgba};
 use serde_json::{Value, json};
 
 const SCALE: usize = 1;
@@ -71,8 +71,6 @@ const USER_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/stic
 const INPUT_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky_stack.png");
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
-const FWEND_SHADOW_Y_OFFSET: isize = -2;
-const FWEND_SHADOW_RADIUS_Y: isize = 5;
 const LAMP_RIGHT_PAD: usize = 140;
 const LAMP_Y_OFFSET: usize = 70;
 
@@ -582,20 +580,12 @@ impl Fwends {
             fb,
             (avatar_x + avatar.width / 2) as isize,
             (avatar_y + avatar.height / 2) as isize,
-            avatar.width.max(1),
-            avatar.height.max(1),
-            palette.color(palette_color::PLUM),
+            avatar.width + 10,
+            avatar.height.max(1) + 8,
+            palette,
             self.lamp_image(),
             lamp_x,
             lamp_y,
-        );
-        draw_filled_ellipse(
-            fb,
-            (avatar_x + avatar.width / 2) as isize,
-            (avatar_y + avatar.height) as isize + FWEND_SHADOW_Y_OFFSET,
-            (avatar.width / 3).max(1) as isize,
-            FWEND_SHADOW_RADIUS_Y,
-            palette.color(palette_color::CRIMSON),
         );
         fb.draw_image(
             avatar,
@@ -766,7 +756,7 @@ fn draw_lamp_masked_ellipse(
     center_y: isize,
     diameter_w: usize,
     diameter_h: usize,
-    color: Rgba,
+    palette: &Palette,
     lamp: &Image,
     lamp_x: usize,
     lamp_y: usize,
@@ -792,6 +782,9 @@ fn draw_lamp_masked_ellipse(
             if !lamp_masks_pixel(lamp, lamp_x, lamp_y, x, y) {
                 continue;
             }
+            let Some(color) = lamp_shadow_color(lamp, lamp_x, lamp_y, x, y, palette) else {
+                continue;
+            };
             fb.fill_rect(x, y, 1, 1, color);
         }
     }
@@ -805,6 +798,32 @@ fn lamp_masks_pixel(lamp: &Image, lamp_x: usize, lamp_y: usize, x: usize, y: usi
         return false;
     };
     local_x < lamp.width && local_y < lamp.height && lamp.at(local_x, local_y).a != 0
+}
+
+fn lamp_shadow_color(
+    lamp: &Image,
+    lamp_x: usize,
+    lamp_y: usize,
+    x: usize,
+    y: usize,
+    palette: &Palette,
+) -> Option<Rgba> {
+    let local_x = x.checked_sub(lamp_x)?;
+    let local_y = y.checked_sub(lamp_y)?;
+    if local_x >= lamp.width || local_y >= lamp.height {
+        return None;
+    }
+
+    let color = lamp.at(local_x, local_y);
+    let source = palette_index(color, palette)?;
+    let mapped = match source {
+        palette_color::ROSE => palette_color::CRIMSON,
+        palette_color::PEACH => palette_color::CRIMSON,
+        palette_color::PLUM => palette_color::BLACK,
+        palette_color::CRIMSON => palette_color::PLUM,
+        _ => source,
+    };
+    Some(palette.color(mapped))
 }
 
 #[allow(clippy::too_many_arguments)]
