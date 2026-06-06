@@ -5,7 +5,6 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event as XEvent;
 use x11rb::protocol::xproto::ButtonIndex;
 
-mod alarm;
 mod bitmap_font;
 mod comicoro_font;
 mod day;
@@ -28,6 +27,7 @@ mod text_input;
 mod text_wrap;
 mod toodle;
 mod twirl;
+mod wavey;
 mod x_window;
 
 pub(crate) use graphics::{Framebuffer, Image, Palette, Rect, Rgba, decode_png_with_size};
@@ -77,13 +77,13 @@ enum WidgetId {
     Toodle,
     Fwends,
     Twirl,
-    Alarm,
+    Wavey,
     Day,
 }
 
 impl WidgetId {
     const ALL: [Self; 6] = [
-        Self::Alarm,
+        Self::Wavey,
         Self::Puter,
         Self::Toodle,
         Self::Fwends,
@@ -97,20 +97,20 @@ struct App {
     toodle: toodle::Toodle,
     fwends: fwends::Fwends,
     twirl: twirl::Twirl,
-    alarm: alarm::Alarm,
+    wavey: wavey::Wavey,
     day: day::Day,
     desk: Image,
     puter_fb: Framebuffer,
     toodle_fb: Framebuffer,
     fwends_fb: Framebuffer,
     twirl_fb: Framebuffer,
-    alarm_fb: Framebuffer,
+    wavey_fb: Framebuffer,
     day_fb: Framebuffer,
     puter_rect: Rect,
     toodle_rect: Rect,
     fwends_rect: Rect,
     twirl_rect: Rect,
-    alarm_rect: Rect,
+    wavey_rect: Rect,
     day_rect: Rect,
     focus: WidgetId,
     puter_pressed: bool,
@@ -122,10 +122,10 @@ impl App {
         let toodle = toodle::Toodle::load(palette)?;
         let fwends = fwends::Fwends::load(palette)?;
         let twirl = twirl::Twirl::load(palette)?;
-        let alarm = alarm::Alarm::load(palette)?;
+        let wavey = wavey::Wavey::load(palette)?;
         let day = day::Day::load(palette)?;
         let desk = Image::load(DESK_PATH, palette)?;
-        let layout = WidgetLayout::new(&puter, &toodle, &twirl, &alarm, &day);
+        let layout = WidgetLayout::new(&puter, &toodle, &twirl, &wavey, &day);
         let puter_rect = Rect {
             x: layout.puter_x,
             y: layout.puter_y,
@@ -150,11 +150,11 @@ impl App {
             w: twirl.width(),
             h: twirl.height(),
         };
-        let alarm_rect = Rect {
-            x: layout.alarm_x,
-            y: layout.alarm_y,
-            w: alarm.width(),
-            h: alarm.height(),
+        let wavey_rect = Rect {
+            x: layout.wavey_x,
+            y: layout.wavey_y,
+            w: wavey.width(),
+            h: wavey.height(),
         };
         let day_rect = Rect {
             x: layout.day_x,
@@ -166,7 +166,7 @@ impl App {
         let toodle_fb = Framebuffer::new(toodle_rect.w, toodle_rect.h, toodle.fill_color(palette));
         let fwends_fb = Framebuffer::new(fwends_rect.w, fwends_rect.h, fwends.fill_color(palette));
         let twirl_fb = Framebuffer::new(twirl_rect.w, twirl_rect.h, twirl.fill_color(palette));
-        let alarm_fb = Framebuffer::new(alarm_rect.w, alarm_rect.h, alarm.fill_color(palette));
+        let wavey_fb = Framebuffer::new(wavey_rect.w, wavey_rect.h, wavey.fill_color(palette));
         let day_fb = Framebuffer::new(day_rect.w, day_rect.h, day.fill_color(palette));
 
         let mut app = Self {
@@ -174,20 +174,20 @@ impl App {
             toodle,
             fwends,
             twirl,
-            alarm,
+            wavey,
             day,
             desk,
             puter_fb,
             toodle_fb,
             fwends_fb,
             twirl_fb,
-            alarm_fb,
+            wavey_fb,
             day_fb,
             puter_rect,
             toodle_rect,
             fwends_rect,
             twirl_rect,
-            alarm_rect,
+            wavey_rect,
             day_rect,
             focus: WidgetId::Toodle,
             puter_pressed: false,
@@ -203,7 +203,7 @@ impl App {
             .max(self.desk.width)
             .max(self.fwends_rect.x + self.fwends_rect.w)
             .max(self.twirl_rect.x + self.twirl_rect.w)
-            .max(self.alarm_rect.x + self.alarm_rect.w)
+            .max(self.wavey_rect.x + self.wavey_rect.w)
             .max(self.day_rect.x + self.day_rect.w)
     }
 
@@ -218,7 +218,7 @@ impl App {
             .max(self.desk.height)
             .max(self.fwends_rect.y + self.fwends.min_height())
             .max(self.twirl_rect.y + self.twirl_rect.h)
-            .max(self.alarm_rect.y + self.alarm_rect.h)
+            .max(self.wavey_rect.y + self.wavey_rect.h)
             .max(self.day_rect.y + self.day_rect.h)
             + APP_BOTTOM_PADDING
     }
@@ -288,10 +288,10 @@ impl App {
                 self.twirl.render(&mut self.twirl_fb, palette);
                 fb.blit_from(&self.twirl_fb, self.twirl_rect.x, self.twirl_rect.y);
             }
-            WidgetId::Alarm => {
-                self.alarm_fb.clear(self.alarm.fill_color(palette));
-                self.alarm.render(&mut self.alarm_fb, palette);
-                fb.blit_from(&self.alarm_fb, self.alarm_rect.x, self.alarm_rect.y);
+            WidgetId::Wavey => {
+                self.wavey_fb.clear(self.wavey.fill_color(palette));
+                self.wavey.render(&mut self.wavey_fb, palette);
+                fb.blit_from(&self.wavey_fb, self.wavey_rect.x, self.wavey_rect.y);
             }
             WidgetId::Day => {
                 self.day_fb.clear(self.day.fill_color(palette));
@@ -342,14 +342,14 @@ impl App {
             &self.puter,
             &self.toodle,
             &self.twirl,
-            &self.alarm,
+            &self.wavey,
             &self.day,
         );
         changed |= move_rect(&mut self.puter_rect, layout.puter_x, layout.puter_y);
         changed |= move_rect(&mut self.toodle_rect, layout.toodle_x, layout.toodle_y);
         changed |= move_rect(&mut self.fwends_rect, layout.fwends_x, layout.fwends_y);
         changed |= move_rect(&mut self.twirl_rect, layout.twirl_x, layout.twirl_y);
-        changed |= move_rect(&mut self.alarm_rect, layout.alarm_x, layout.alarm_y);
+        changed |= move_rect(&mut self.wavey_rect, layout.wavey_x, layout.wavey_y);
         changed |= move_rect(&mut self.day_rect, layout.day_x, layout.day_y);
         changed |= self.sync_fwends_height(palette);
 
@@ -381,7 +381,7 @@ impl App {
             WidgetId::Toodle => self.toodle_rect,
             WidgetId::Fwends => self.fwends_rect,
             WidgetId::Twirl => self.twirl_rect,
-            WidgetId::Alarm => self.alarm_rect,
+            WidgetId::Wavey => self.wavey_rect,
             WidgetId::Day => self.day_rect,
         }
     }
@@ -402,7 +402,7 @@ impl App {
             }
             WidgetId::Toodle => self.toodle.handle_key_press(input),
             WidgetId::Fwends => self.fwends.handle_key_press(input),
-            WidgetId::Twirl | WidgetId::Alarm | WidgetId::Day => Ok(()),
+            WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => Ok(()),
         }
     }
 
@@ -424,8 +424,8 @@ impl App {
             }
             WidgetId::Fwends => self.fwends.click(x, y),
             WidgetId::Twirl => self.twirl.click(x, y),
-            WidgetId::Alarm => {
-                self.alarm.click(x, y);
+            WidgetId::Wavey => {
+                self.wavey.click(x, y);
             }
             WidgetId::Day => self.day.toggle_mode(),
         }
@@ -433,8 +433,8 @@ impl App {
     }
 
     fn release(&mut self, x: i16, y: i16) -> Option<WidgetId> {
-        if self.focus == WidgetId::Alarm && self.alarm.release() {
-            return Some(WidgetId::Alarm);
+        if self.focus == WidgetId::Wavey && self.wavey.release() {
+            return Some(WidgetId::Wavey);
         }
 
         if self.puter_pressed {
@@ -448,10 +448,10 @@ impl App {
     }
 
     fn motion(&mut self, x: i16, y: i16) -> Option<WidgetId> {
-        if self.focus == WidgetId::Alarm {
-            let (local_x, local_y) = self.alarm_rect.local(x, y);
-            if self.alarm.motion(local_x, local_y) {
-                return Some(WidgetId::Alarm);
+        if self.focus == WidgetId::Wavey {
+            let (local_x, local_y) = self.wavey_rect.local(x, y);
+            if self.wavey.motion(local_x, local_y) {
+                return Some(WidgetId::Wavey);
             }
         }
 
@@ -490,8 +490,8 @@ impl App {
                 self.puter.scroll_down();
                 true
             }
-            (WidgetId::Alarm, ScrollDirection::Up) => self.alarm.scroll_up(x, y),
-            (WidgetId::Alarm, ScrollDirection::Down) => self.alarm.scroll_down(x, y),
+            (WidgetId::Wavey, ScrollDirection::Up) => self.wavey.scroll_up(x, y),
+            (WidgetId::Wavey, ScrollDirection::Down) => self.wavey.scroll_down(x, y),
             (WidgetId::Toodle | WidgetId::Twirl | WidgetId::Day, _) => return None,
         };
         handled.then_some(widget)
@@ -499,7 +499,7 @@ impl App {
 
     fn widget_at(&self, x: i16, y: i16) -> Option<(WidgetId, i16, i16)> {
         [
-            WidgetId::Alarm,
+            WidgetId::Wavey,
             WidgetId::Day,
             WidgetId::Twirl,
             WidgetId::Fwends,
@@ -520,8 +520,8 @@ impl App {
         self.twirl.update()
     }
 
-    fn update_alarm(&mut self) -> bool {
-        self.alarm.update()
+    fn update_wavey(&mut self) -> bool {
+        self.wavey.update()
     }
 
     fn update_day(&mut self) -> bool {
@@ -529,7 +529,7 @@ impl App {
     }
 
     fn shutdown(&mut self) {
-        self.alarm.shutdown();
+        self.wavey.shutdown();
         self.puter.shutdown_terminal();
     }
 }
@@ -542,13 +542,13 @@ struct WidgetLayout {
     fwends_x: usize,
     fwends_y: usize,
     twirl_x: usize,
-    alarm_x: usize,
+    wavey_x: usize,
     day_x: usize,
     twirl_y: usize,
     toodle_y: usize,
     puter_y: usize,
     day_y: usize,
-    alarm_y: usize,
+    wavey_y: usize,
 }
 
 impl WidgetLayout {
@@ -556,17 +556,17 @@ impl WidgetLayout {
         puter: &puter::Puter,
         toodle: &toodle::Toodle,
         twirl: &twirl::Twirl,
-        alarm: &alarm::Alarm,
+        wavey: &wavey::Wavey,
         day: &day::Day,
     ) -> Self {
-        let left_w = day.width().max(alarm.width());
+        let left_w = day.width().max(wavey.width());
         let middle_x = left_w + WIDGET_GAP;
         let middle_w = puter.width().max(toodle.width()).max(twirl.width());
-        let left_h = day.height() + WIDGET_GAP + alarm.height();
+        let left_h = day.height() + WIDGET_GAP + wavey.height();
         let middle_h = twirl.height() + WIDGET_GAP + toodle.height() + WIDGET_GAP + puter.height();
         let layout_h = left_h.max(middle_h);
-        let alarm_y = layout_h - alarm.height();
-        let day_y = alarm_y - WIDGET_GAP - day.height() - 30;
+        let wavey_y = layout_h - wavey.height();
+        let day_y = wavey_y - WIDGET_GAP - day.height() - 30;
         let puter_y = layout_h - puter.height();
         let toodle_y = puter_y - WIDGET_GAP - toodle.height();
         let twirl_y = toodle_y - WIDGET_GAP - twirl.height();
@@ -577,9 +577,9 @@ impl WidgetLayout {
         let toodle_x =
             middle_x.saturating_sub(day.width() + TOODLE_LEFT_OVERLAP) + APP_LEFT_PADDING;
         let twirl_x = middle_x.saturating_sub(day.width()) + APP_LEFT_PADDING;
-        let alarm_x = APP_LEFT_PADDING + 32;
-        let alarm_y = alarm_y + 14;
-        let day_x = alarm.width().saturating_sub(day.width()) + APP_LEFT_PADDING;
+        let wavey_x = APP_LEFT_PADDING + 32;
+        let wavey_y = wavey_y + 14;
+        let day_x = wavey.width().saturating_sub(day.width()) + APP_LEFT_PADDING;
         let fwends_x = middle_x + middle_w + WIDGET_GAP + APP_LEFT_PADDING;
         let fwends_y = 0;
 
@@ -589,13 +589,13 @@ impl WidgetLayout {
             fwends_x,
             fwends_y,
             twirl_x,
-            alarm_x,
+            wavey_x,
             day_x,
             twirl_y,
             toodle_y,
             puter_y,
             day_y,
-            alarm_y,
+            wavey_y,
         }
     }
 }
@@ -694,8 +694,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
-        if app.update_alarm() {
-            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Alarm)?;
+        if app.update_wavey() {
+            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Wavey)?;
             drew_frame = true;
         }
 

@@ -12,7 +12,7 @@ use crate::palette_color;
 use crate::poco_font;
 use crate::{Framebuffer, Image, Palette, Rgba};
 
-const ALARM_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/alarm.png");
+const WAVEY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wavey.png");
 const STATIONS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/radio_stations.txt");
 
 const DISPLAY_X: usize = 6;
@@ -75,7 +75,7 @@ enum MediaButton {
     Forward,
 }
 
-pub(crate) struct Alarm {
+pub(crate) struct Wavey {
     image: Image,
     font: BitmapFont,
     stations: Vec<Station>,
@@ -92,11 +92,11 @@ pub(crate) struct Alarm {
     player_ipc_path: Option<PathBuf>,
 }
 
-impl Alarm {
+impl Wavey {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         let volume = read_system_volume().unwrap_or(50);
         Ok(Self {
-            image: Image::load(ALARM_PATH, palette)?,
+            image: Image::load(WAVEY_PATH, palette)?,
             font: BitmapFont::load(&poco_font::POCO_SPEC)?,
             stations: load_stations(STATIONS_PATH),
             station: 0,
