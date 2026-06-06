@@ -825,5 +825,8 @@ fn sync_window_layout(
 }
 
 fn is_paste_shortcut(input: &text_input::KeyInput) -> bool {
-    input.ctrl() && input.shift() && matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
+    input.ctrl()
+        && input.shift()
+        && (matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
+            || input.text().eq_ignore_ascii_case("v"))
 }

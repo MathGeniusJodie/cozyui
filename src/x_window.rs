@@ -40,8 +40,14 @@ struct ShmImage {
 struct ClipboardAtoms {
     clipboard: Atom,
     targets: Atom,
+    timestamp: Atom,
+    save_targets: Atom,
+    multiple: Atom,
     utf8_string: Atom,
     text: Atom,
+    text_plain: Atom,
+    text_plain_utf8: Atom,
+    compound_text: Atom,
     cozy_clipboard: Atom,
 }
 
@@ -263,6 +269,15 @@ impl XWindow {
             Time::CURRENT_TIME,
         )?;
         self.conn.flush()?;
+        let owner = self
+            .conn
+            .get_selection_owner(self.clipboard_atoms.clipboard)?
+            .reply()?
+            .owner;
+        if owner != self.window {
+            self.clipboard_text = None;
+            return Err("failed to take ownership of the X clipboard".into());
+        }
         Ok(())
     }
 
@@ -311,31 +326,15 @@ impl XWindow {
     ) -> Result<(), Box<dyn Error>> {
         let mut property = AtomEnum::NONE.into();
         if event.selection == self.clipboard_atoms.clipboard {
-            if event.target == self.clipboard_atoms.targets {
-                property = selection_property(event);
-                self.conn.change_property32(
-                    PropMode::REPLACE,
-                    event.requestor,
-                    property,
-                    AtomEnum::ATOM,
-                    &[
-                        self.clipboard_atoms.targets,
-                        self.clipboard_atoms.utf8_string,
-                        self.clipboard_atoms.text,
-                        AtomEnum::STRING.into(),
-                    ],
-                )?;
-            } else if let Some(text) = &self.clipboard_text
-                && self.supported_text_target(event.target)
-            {
-                property = selection_property(event);
-                self.conn.change_property8(
-                    PropMode::REPLACE,
-                    event.requestor,
-                    property,
-                    event.target,
-                    text.as_bytes(),
-                )?;
+            property = selection_property(event);
+            if event.target == self.clipboard_atoms.multiple {
+                if self.handle_multiple_selection_request(event, property)? {
+                    property = event.property;
+                } else {
+                    property = AtomEnum::NONE.into();
+                }
+            } else if !self.write_selection_target(event.requestor, event.target, property)? {
+                property = AtomEnum::NONE.into();
             }
         }
 
@@ -388,7 +387,140 @@ impl XWindow {
     fn supported_text_target(&self, target: Atom) -> bool {
         target == self.clipboard_atoms.utf8_string
             || target == self.clipboard_atoms.text
+            || target == self.clipboard_atoms.text_plain
+            || target == self.clipboard_atoms.text_plain_utf8
+            || target == self.clipboard_atoms.compound_text
             || target == u32::from(AtomEnum::STRING)
+    }
+
+    fn supported_targets(&self) -> [Atom; 10] {
+        [
+            self.clipboard_atoms.targets,
+            self.clipboard_atoms.multiple,
+            self.clipboard_atoms.timestamp,
+            self.clipboard_atoms.save_targets,
+            self.clipboard_atoms.utf8_string,
+            self.clipboard_atoms.text_plain_utf8,
+            self.clipboard_atoms.text_plain,
+            self.clipboard_atoms.text,
+            self.clipboard_atoms.compound_text,
+            AtomEnum::STRING.into(),
+        ]
+    }
+
+    fn write_selection_target(
+        &self,
+        requestor: Window,
+        target: Atom,
+        property: Atom,
+    ) -> Result<bool, Box<dyn Error>> {
+        if property == u32::from(AtomEnum::NONE) {
+            return Ok(false);
+        }
+
+        if target == self.clipboard_atoms.targets {
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                requestor,
+                property,
+                AtomEnum::ATOM,
+                &self.supported_targets(),
+            )?;
+            return Ok(true);
+        }
+
+        if target == self.clipboard_atoms.timestamp {
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                requestor,
+                property,
+                AtomEnum::INTEGER,
+                &[0],
+            )?;
+            return Ok(true);
+        }
+
+        if target == self.clipboard_atoms.save_targets {
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                requestor,
+                property,
+                AtomEnum::ATOM,
+                &[],
+            )?;
+            return Ok(true);
+        }
+
+        let Some(text) = &self.clipboard_text else {
+            return Ok(false);
+        };
+        if !self.supported_text_target(target) {
+            return Ok(false);
+        }
+
+        self.conn.change_property8(
+            PropMode::REPLACE,
+            requestor,
+            property,
+            self.text_property_type(target),
+            text.as_bytes(),
+        )?;
+        Ok(true)
+    }
+
+    fn handle_multiple_selection_request(
+        &self,
+        event: SelectionRequestEvent,
+        property: Atom,
+    ) -> Result<bool, Box<dyn Error>> {
+        if event.property == u32::from(AtomEnum::NONE) {
+            return Ok(false);
+        }
+
+        let reply = self
+            .conn
+            .get_property(
+                false,
+                event.requestor,
+                property,
+                AtomEnum::ATOM,
+                0,
+                u32::MAX / 4,
+            )?
+            .reply()?;
+        let Some(values) = reply.value32() else {
+            return Ok(false);
+        };
+
+        let mut pairs = values.collect::<Vec<_>>();
+        if pairs.len() % 2 != 0 {
+            return Ok(false);
+        }
+
+        for index in (0..pairs.len()).step_by(2) {
+            let target = pairs[index];
+            let property = pairs[index + 1];
+            if !self.write_selection_target(event.requestor, target, property)? {
+                pairs[index + 1] = u32::from(AtomEnum::NONE);
+            }
+        }
+
+        self.conn.change_property32(
+            PropMode::REPLACE,
+            event.requestor,
+            event.property,
+            AtomEnum::ATOM,
+            &pairs,
+        )?;
+        Ok(true)
+    }
+
+    fn text_property_type(&self, target: Atom) -> Atom {
+        if target == self.clipboard_atoms.text || target == u32::from(AtomEnum::STRING) {
+            AtomEnum::STRING.into()
+        } else {
+            target
+        }
     }
 }
 
@@ -406,8 +538,14 @@ impl ClipboardAtoms {
         Ok(Self {
             clipboard: intern_atom(conn, b"CLIPBOARD")?,
             targets: intern_atom(conn, b"TARGETS")?,
+            timestamp: intern_atom(conn, b"TIMESTAMP")?,
+            save_targets: intern_atom(conn, b"SAVE_TARGETS")?,
+            multiple: intern_atom(conn, b"MULTIPLE")?,
             utf8_string: intern_atom(conn, b"UTF8_STRING")?,
             text: intern_atom(conn, b"TEXT")?,
+            text_plain: intern_atom(conn, b"text/plain")?,
+            text_plain_utf8: intern_atom(conn, b"text/plain;charset=utf-8")?,
+            compound_text: intern_atom(conn, b"COMPOUND_TEXT")?,
             cozy_clipboard: intern_atom(conn, b"COZYUI_CLIPBOARD")?,
         })
     }

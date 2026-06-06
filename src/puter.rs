@@ -589,7 +589,11 @@ impl Terminal {
     }
 
     fn selection_to_clipboard(&self) -> Option<String> {
-        let text = self.copy_selection()?;
+        let fallback = self.clipboard.lock();
+        let text = self
+            .copy_selection()
+            .or_else(|| (!fallback.is_empty()).then_some(fallback.clone()))?;
+        drop(fallback);
         *self.clipboard.lock() = text.clone();
         Some(text)
     }
@@ -878,11 +882,17 @@ fn screen_point(x: i16, y: i16, size: &WindowSize) -> Option<Point> {
 }
 
 fn is_copy_shortcut(input: &KeyInput) -> bool {
-    input.ctrl() && input.shift() && matches!(input.sym_raw(), keysyms::KEY_c | keysyms::KEY_C)
+    input.ctrl()
+        && input.shift()
+        && (matches!(input.sym_raw(), keysyms::KEY_c | keysyms::KEY_C)
+            || input.text().eq_ignore_ascii_case("c"))
 }
 
 fn is_paste_shortcut(input: &KeyInput) -> bool {
-    input.ctrl() && input.shift() && matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
+    input.ctrl()
+        && input.shift()
+        && (matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
+            || input.text().eq_ignore_ascii_case("v"))
 }
 
 fn key_bytes(input: &KeyInput) -> Option<String> {
