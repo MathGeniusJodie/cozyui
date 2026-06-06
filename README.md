@@ -7,6 +7,9 @@ tiny pixel-art terminal emulator that uses `alacritty_terminal`
 
 ![pencil](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/focus_pencil.png?raw=true)
 ![eraser](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/eraser.png?raw=true)
+![urgent](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/priority_urgent.png?raw=true)
+![frog](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/priority_frog.png?raw=true)
+![snail](https://github.com/MathGeniusJodie/cozyui/blob/main/assets/priority_snail.png?raw=true)
 ### toodle
 todo app with 3 priority levels
 
@@ -17,7 +20,7 @@ todo app with 3 priority levels
 ### fwends
 cute ai chat
 
-![claw](https://github.com/MathGeniusJodie/cozyui/blob/main/wavey.png?raw=true)
+![wavey](https://github.com/MathGeniusJodie/cozyui/blob/main/wavey.png?raw=true)
 ### wavey
 radio alarm clock 
 
