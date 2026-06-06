@@ -31,6 +31,8 @@ const INPUT_TEXT_Y: usize = 24;
 const TEXT_PAD: usize = 7;
 const INPUT_BOX_Y_OFFSET: isize = -13;
 const INPUT_BOX_RIGHT_PAD: usize = 11;
+const INPUT_EXTRA_W: usize = 40;
+const INPUT_EXTRA_H: usize = 4;
 const SELECTED_FWEND_GAP: usize = 4;
 const BUBBLE_PAD_X: usize = 14;
 const BUBBLE_PAD_TOP: usize = 8;
@@ -229,9 +231,9 @@ impl Fwends {
 
         let input_x = self.input_sticky_x();
         if x >= input_x
-            && x < input_x + self.input_sticky.width
+            && x < input_x + self.input_sticky_w()
             && y >= self.input_y()
-            && y < self.input_y() + self.input_sticky.height
+            && y < self.input_y() + self.input_sticky_h()
         {
             self.focused = true;
             let cursor = self.input_index_at(x, y);
@@ -521,11 +523,17 @@ impl Fwends {
     }
 
     fn draw_input(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.draw_image(
+        draw_resized_image(
+            fb,
             &self.input_sticky,
-            (self.input_sticky_x() * SCALE) as isize,
-            (self.input_y() * SCALE) as isize,
-            SCALE,
+            self.input_sticky_x(),
+            self.input_y(),
+            self.input_sticky_w(),
+            self.input_sticky_h(),
+            STICKY_LEFT_CAP,
+            STICKY_RIGHT_CAP,
+            STICKY_TOP_CAP,
+            STICKY_BOTTOM_CAP,
         );
 
         let label = if self.pending.is_some() {
@@ -569,6 +577,18 @@ impl Fwends {
         let rect = self.selected_fwend_rect();
         let avatar_x = rect.x + rect.w.saturating_sub(avatar.width) / 2;
         let avatar_y = rect.y + rect.h.saturating_sub(avatar.height);
+        let (lamp_x, lamp_y) = self.lamp_position();
+        draw_lamp_masked_ellipse(
+            fb,
+            (avatar_x + avatar.width / 2) as isize,
+            (avatar_y + avatar.height / 2) as isize,
+            avatar.width.max(1),
+            avatar.height.max(1),
+            palette.color(palette_color::PLUM),
+            self.lamp_image(),
+            lamp_x,
+            lamp_y,
+        );
         draw_filled_ellipse(
             fb,
             (avatar_x + avatar.width / 2) as isize,
@@ -649,7 +669,7 @@ impl Fwends {
 
     fn input_text_width(&self) -> usize {
         let right_edge =
-            self.input_sticky_x() + self.input_sticky.width - TEXT_PAD - INPUT_BOX_RIGHT_PAD;
+            self.input_sticky_x() + self.input_sticky_w() - TEXT_PAD - INPUT_BOX_RIGHT_PAD;
         right_edge.saturating_sub(self.input_text_x())
     }
 
@@ -657,8 +677,16 @@ impl Fwends {
         CONTENT_X_OFFSET + INPUT_X + self.model_slot_w + SELECTED_FWEND_GAP
     }
 
+    fn input_sticky_w(&self) -> usize {
+        self.input_sticky.width + INPUT_EXTRA_W
+    }
+
+    fn input_sticky_h(&self) -> usize {
+        self.input_sticky.height + INPUT_EXTRA_H
+    }
+
     fn input_y(&self) -> usize {
-        (self.height / SCALE).saturating_sub(INPUT_BOTTOM_PAD)
+        (self.height / SCALE).saturating_sub(INPUT_BOTTOM_PAD + INPUT_EXTRA_H)
     }
 
     fn chat_h(&self) -> usize {
@@ -728,6 +756,80 @@ fn draw_selection(
             );
         }
         line_start = line_end;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_lamp_masked_ellipse(
+    fb: &mut Framebuffer,
+    center_x: isize,
+    center_y: isize,
+    diameter_w: usize,
+    diameter_h: usize,
+    color: Rgba,
+    lamp: &Image,
+    lamp_x: usize,
+    lamp_y: usize,
+) {
+    let radius_x = diameter_w.div_ceil(2).max(1) as isize;
+    let radius_y = diameter_h.div_ceil(2).max(1) as isize;
+
+    let rx2 = radius_x * radius_x;
+    let ry2 = radius_y * radius_y;
+    let threshold = rx2 * ry2;
+    for y in center_y - radius_y..=center_y + radius_y {
+        for x in center_x - radius_x..=center_x + radius_x {
+            let dx = x - center_x;
+            let dy = y - center_y;
+            if dx * dx * ry2 + dy * dy * rx2 > threshold {
+                continue;
+            }
+            if x < 0 || y < 0 {
+                continue;
+            }
+            let x = x as usize;
+            let y = y as usize;
+            if !lamp_masks_pixel(lamp, lamp_x, lamp_y, x, y) {
+                continue;
+            }
+            fb.fill_rect(x, y, 1, 1, color);
+        }
+    }
+}
+
+fn lamp_masks_pixel(lamp: &Image, lamp_x: usize, lamp_y: usize, x: usize, y: usize) -> bool {
+    let Some(local_x) = x.checked_sub(lamp_x) else {
+        return false;
+    };
+    let Some(local_y) = y.checked_sub(lamp_y) else {
+        return false;
+    };
+    local_x < lamp.width && local_y < lamp.height && lamp.at(local_x, local_y).a != 0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_resized_image(
+    fb: &mut Framebuffer,
+    image: &Image,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    left_cap: usize,
+    right_cap: usize,
+    top_cap: usize,
+    bottom_cap: usize,
+) {
+    for dy in 0..h {
+        let sy = stretch_source_coord(dy, h, image.height, top_cap, bottom_cap);
+        for dx in 0..w {
+            let sx = stretch_source_coord(dx, w, image.width, left_cap, right_cap);
+            let color = image.at(sx, sy);
+            if color.a == 0 {
+                continue;
+            }
+            fb.fill_rect((x + dx) * SCALE, (y + dy) * SCALE, SCALE, SCALE, color);
+        }
     }
 }
 
