@@ -87,14 +87,6 @@ impl BitmapFont {
         text_wrap::wrap_lines(text, max_width, |ch| self.advance(ch))
     }
 
-    pub(crate) fn fits_with_insert(&self, text: &str, ch: char, row_width: usize) -> bool {
-        let mut candidate = String::with_capacity(text.len() + ch.len_utf8());
-        candidate.push_str(text);
-        candidate.push(ch);
-
-        text_wrap::fits_in_lines(&candidate, row_width, 2, |ch| self.advance(ch))
-    }
-
     pub(crate) fn draw_text(
         &self,
         fb: &mut Framebuffer,

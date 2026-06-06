@@ -24,6 +24,7 @@ mod poco_font;
 mod puter;
 #[allow(dead_code)]
 mod rozha_one_48_font;
+mod text_edit;
 mod text_input;
 mod text_wrap;
 mod toodle;
@@ -115,6 +116,7 @@ struct App {
     day_rect: Rect,
     focus: WidgetId,
     puter_pressed: bool,
+    text_drag: Option<WidgetId>,
 }
 
 impl App {
@@ -192,6 +194,7 @@ impl App {
             day_rect,
             focus: WidgetId::Toodle,
             puter_pressed: false,
+            text_drag: None,
         };
         app.sync_fwends_height(palette);
         Ok(app)
@@ -402,20 +405,15 @@ impl App {
     ) -> Result<Option<String>, Box<dyn Error>> {
         match self.focus {
             WidgetId::Puter => Ok(self.puter.handle_key_press(input, clipboard_text)),
-            WidgetId::Toodle => {
-                self.toodle.handle_key_press(input)?;
-                Ok(None)
-            }
-            WidgetId::Fwends => {
-                self.fwends.handle_key_press(input)?;
-                Ok(None)
-            }
+            WidgetId::Toodle => self.toodle.handle_key_press(input, clipboard_text),
+            WidgetId::Fwends => self.fwends.handle_key_press(input, clipboard_text),
             WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => Ok(None),
         }
     }
 
     fn click(&mut self, x: i16, y: i16, state: u16) -> Result<(), Box<dyn Error>> {
         self.puter_pressed = false;
+        self.text_drag = None;
         let Some((widget, x, y)) = self.widget_at(x, y) else {
             return Ok(());
         };
@@ -429,8 +427,16 @@ impl App {
                 if self.toodle.click(x, y)? {
                     self.twirl.spin();
                 }
+                if self.toodle.text_dragging() {
+                    self.text_drag = Some(WidgetId::Toodle);
+                }
             }
-            WidgetId::Fwends => self.fwends.click(x, y),
+            WidgetId::Fwends => {
+                self.fwends.click(x, y);
+                if self.fwends.text_dragging() {
+                    self.text_drag = Some(WidgetId::Fwends);
+                }
+            }
             WidgetId::Twirl => self.twirl.click(x, y),
             WidgetId::Wavey => {
                 self.wavey.click(x, y);
@@ -441,6 +447,15 @@ impl App {
     }
 
     fn release(&mut self, x: i16, y: i16) -> Option<WidgetId> {
+        if let Some(widget) = self.text_drag.take() {
+            match widget {
+                WidgetId::Toodle => self.toodle.end_text_drag(),
+                WidgetId::Fwends => self.fwends.end_text_drag(),
+                WidgetId::Puter | WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => {}
+            }
+            return Some(widget);
+        }
+
         if self.focus == WidgetId::Wavey && self.wavey.release() {
             return Some(WidgetId::Wavey);
         }
@@ -456,6 +471,21 @@ impl App {
     }
 
     fn motion(&mut self, x: i16, y: i16) -> Option<WidgetId> {
+        if let Some(widget) = self.text_drag {
+            let changed = match widget {
+                WidgetId::Toodle => {
+                    let (local_x, local_y) = self.toodle_rect.local(x, y);
+                    self.toodle.drag_text(local_x, local_y)
+                }
+                WidgetId::Fwends => {
+                    let (local_x, local_y) = self.fwends_rect.local(x, y);
+                    self.fwends.drag_text(local_x, local_y)
+                }
+                WidgetId::Puter | WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => false,
+            };
+            return changed.then_some(widget);
+        }
+
         if self.focus == WidgetId::Puter {
             let (local_x, local_y) = self.puter_rect.local(x, y);
             if self.puter.motion(local_x, local_y) {
@@ -730,7 +760,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 XEvent::KeyPress(event) => {
                     let input = xwin.keyboard.press(event.detail, event.state.into());
-                    let paste_text = if app.focus == WidgetId::Puter && is_paste_shortcut(&input) {
+                    let paste_text = if should_load_clipboard_for_paste(app.focus, &input) {
                         xwin.clipboard_text()?
                     } else {
                         None
@@ -829,4 +859,18 @@ fn is_paste_shortcut(input: &text_input::KeyInput) -> bool {
         && input.shift()
         && (matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
             || input.text().eq_ignore_ascii_case("v"))
+}
+
+fn is_plain_paste_shortcut(input: &text_input::KeyInput) -> bool {
+    input.ctrl()
+        && (matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
+            || input.text().eq_ignore_ascii_case("v"))
+}
+
+fn should_load_clipboard_for_paste(focus: WidgetId, input: &text_input::KeyInput) -> bool {
+    match focus {
+        WidgetId::Puter => is_paste_shortcut(input),
+        WidgetId::Toodle | WidgetId::Fwends => is_plain_paste_shortcut(input),
+        WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => false,
+    }
 }

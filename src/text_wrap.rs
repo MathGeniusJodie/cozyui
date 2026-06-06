@@ -13,18 +13,6 @@ where
     lines
 }
 
-pub(crate) fn fits_in_lines<F>(
-    text: &str,
-    max_width: usize,
-    max_lines: usize,
-    char_width: F,
-) -> bool
-where
-    F: Fn(char) -> usize,
-{
-    wrap_lines(text, max_width, char_width).len() <= max_lines
-}
-
 fn wrap_paragraph<F>(text: &str, max_width: usize, char_width: &F, lines: &mut Vec<String>)
 where
     F: Fn(char) -> usize,
@@ -108,10 +96,5 @@ mod tests {
             wrap_lines("abcdefgh", 3, |_| 1),
             vec!["abc".to_string(), "def".to_string(), "gh".to_string()]
         );
-    }
-
-    #[test]
-    fn fits_in_lines_counts_space_width() {
-        assert!(!fits_in_lines("abc ", 3, 1, |_| 1));
     }
 }

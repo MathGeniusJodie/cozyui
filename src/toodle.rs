@@ -7,6 +7,7 @@ use crate::app_color;
 use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::peanut_money_font;
+use crate::text_edit::{TextEdit, TextEditOutcome};
 use crate::text_input::{EditKey, KeyInput, edit_key};
 use crate::{Framebuffer, Image, Palette, Rect, Rgba};
 
@@ -107,6 +108,7 @@ pub(crate) struct Toodle {
     done_counts: [usize; SECTION_COUNT],
     page: usize,
     focused_line: Option<usize>,
+    text_edit: TextEdit,
     eraser_hovered: bool,
 }
 
@@ -145,6 +147,7 @@ impl Toodle {
             ],
             page: 0,
             focused_line: None,
+            text_edit: TextEdit::default(),
             eraser_hovered: false,
         })
     }
@@ -241,6 +244,16 @@ impl Toodle {
                 self.draw_check(fb, palette, section, line, page_offset);
             }
 
+            if visual_page == 0 && self.focused_line == Some(line) {
+                self.draw_todo_selection(
+                    fb,
+                    &todo.text,
+                    line,
+                    page_x + TEXT_X,
+                    page_y + LINE_Y[line] - TEXT_Y_OFFSET,
+                    palette.color(palette_color::LAVENDER),
+                );
+            }
             draw_todo_text(
                 fb,
                 &self.font,
@@ -259,6 +272,7 @@ impl Toodle {
     }
 
     pub(crate) fn click(&mut self, x: i16, y: i16) -> Result<bool, Box<dyn Error>> {
+        self.text_edit.end_drag();
         if self.eraser_at(x, y) {
             self.archive_completed_todos()?;
             self.focused_line = None;
@@ -290,7 +304,41 @@ impl Toodle {
         }
 
         self.focused_line = line_at(y);
+        if let Some(line) = self.focused_line {
+            let PageRef { section, page } = self.current_page_ref();
+            let text = &self.todos[section].item(page, line).text;
+            let cursor = todo_text_index_at(&self.font, line, text, x.saturating_sub(TEXT_X), y);
+            self.text_edit.begin_drag(cursor, text);
+        }
         Ok(false)
+    }
+
+    pub(crate) fn drag_text(&mut self, x: i16, y: i16) -> bool {
+        if !self.text_edit.is_dragging() {
+            return false;
+        }
+
+        let Some(line) = self.focused_line else {
+            return false;
+        };
+        let x = x.max(0) as usize / SCALE;
+        let y = y.max(0) as usize / SCALE;
+        let Some(x) = x.checked_sub(PAGE_OFFSET_X) else {
+            return false;
+        };
+
+        let PageRef { section, page } = self.current_page_ref();
+        let text = &self.todos[section].item(page, line).text;
+        let cursor = todo_text_index_at(&self.font, line, text, x.saturating_sub(TEXT_X), y);
+        self.text_edit.drag_to(cursor, text)
+    }
+
+    pub(crate) fn end_text_drag(&mut self) {
+        self.text_edit.end_drag();
+    }
+
+    pub(crate) fn text_dragging(&self) -> bool {
+        self.text_edit.is_dragging()
     }
 
     pub(crate) fn hover(&mut self, x: i16, y: i16) -> bool {
@@ -303,33 +351,51 @@ impl Toodle {
         was_hovered != self.eraser_hovered
     }
 
-    pub(crate) fn handle_key_press(&mut self, input: &KeyInput) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn handle_key_press(
+        &mut self,
+        input: &KeyInput,
+        clipboard_text: Option<&str>,
+    ) -> Result<Option<String>, Box<dyn Error>> {
         let Some(line) = self.focused_line else {
-            return Ok(());
+            return Ok(None);
         };
 
+        let PageRef { section, page } = self.current_page_ref();
+        let mut text = self.todos[section].item(page, line).text.clone();
+        let outcome = self
+            .text_edit
+            .handle_key(input, &mut text, clipboard_text, |candidate| {
+                todo_text_fits(&self.font, line, candidate)
+            });
+        if let TextEditOutcome::Handled { changed, copy } = outcome {
+            if changed {
+                self.todos[section].item_mut(page, line).text = text;
+                self.save_current_section()?;
+            }
+            return Ok(copy);
+        }
+
         match edit_key(input) {
-            EditKey::Insert(ch) => {
-                let PageRef { section, page } = self.current_page_ref();
-                let text = &mut self.todos[section].item_mut(page, line).text;
-                if self.font.fits_with_insert(text, ch, max_text_width(line)) {
-                    text.push(ch);
-                }
-            }
-            EditKey::Backspace => {
-                let PageRef { section, page } = self.current_page_ref();
-                self.todos[section].item_mut(page, line).text.pop();
-            }
             EditKey::Enter => {
                 self.focused_line = Some((line + 1).min(LINE_COUNT - 1));
+                let PageRef { section, page } = self.current_page_ref();
+                let text = &self.todos[section]
+                    .item(page, self.focused_line.unwrap_or(line))
+                    .text;
+                self.text_edit.set_cursor(text.chars().count(), text);
             }
             EditKey::Escape => {
                 self.focused_line = None;
             }
-            EditKey::Tab | EditKey::Left | EditKey::Right | EditKey::None => return Ok(()),
+            EditKey::Tab
+            | EditKey::Left
+            | EditKey::Right
+            | EditKey::Insert(_)
+            | EditKey::Backspace
+            | EditKey::None => return Ok(None),
         }
 
-        self.save_current_section()
+        Ok(None)
     }
 
     fn draw_check(
@@ -607,7 +673,8 @@ impl Toodle {
         let line = self.focused_line?;
         let PageRef { section, page } = self.current_page_ref();
         let todo = self.todos[section].item(page, line);
-        let (cursor_x, cursor_y) = pencil_cursor_position(&self.font, line, &todo.text);
+        let (cursor_x, cursor_y) =
+            pencil_cursor_position(&self.font, line, &todo.text, self.text_edit.cursor());
         Some((
             line,
             cursor_x,
@@ -631,6 +698,28 @@ impl Toodle {
         let y = y.max(0) as usize / SCALE;
         (ERASER_X..ERASER_X + self.eraser.width).contains(&x)
             && (ERASER_Y..ERASER_Y + self.eraser.height).contains(&y)
+    }
+
+    fn draw_todo_selection(
+        &self,
+        fb: &mut Framebuffer,
+        text: &str,
+        line: usize,
+        x: usize,
+        y: usize,
+        color: Rgba,
+    ) {
+        draw_wrapped_selection(
+            fb,
+            &self.font,
+            text,
+            self.text_edit.selection_range(),
+            x * SCALE,
+            y * SCALE,
+            max_text_width(line),
+            SCALE,
+            color,
+        );
     }
 }
 
@@ -1103,18 +1192,137 @@ fn max_text_width(line: usize) -> usize {
     }
 }
 
-fn pencil_cursor_position(font: &BitmapFont, line: usize, text: &str) -> (usize, usize) {
+fn pencil_cursor_position(
+    font: &BitmapFont,
+    line: usize,
+    text: &str,
+    cursor: usize,
+) -> (usize, usize) {
     let base_y = LINE_Y[line] - TEXT_Y_OFFSET;
     let lines = font.wrap_lines(text, max_text_width(line));
+    let (line_index, line_start, line_text) = line_for_char_index(&lines, cursor);
+    let x = TEXT_X + font.text_width(prefix_chars(line_text, cursor - line_start));
 
-    if lines.len() <= 1 {
-        (TEXT_X + font.text_width(&lines[0]), base_y)
+    if line_index == 0 {
+        let y = if lines.len() <= 1 {
+            base_y
+        } else {
+            base_y - WRAPPED_FIRST_LINE_OFFSET_Y
+        };
+        (x, y)
     } else {
         (
-            TEXT_X + font.text_width(&lines[1]).min(max_text_width(line)),
+            x.min(TEXT_X + max_text_width(line)),
             base_y + WRAPPED_SECOND_LINE_OFFSET_Y,
         )
     }
+}
+
+fn todo_text_fits(font: &BitmapFont, line: usize, text: &str) -> bool {
+    font.wrap_lines(text, max_text_width(line)).len() <= 2
+}
+
+fn todo_text_index_at(font: &BitmapFont, line: usize, text: &str, x: usize, y: usize) -> usize {
+    let lines = font.wrap_lines(text, max_text_width(line));
+    let base_y = LINE_Y[line] - TEXT_Y_OFFSET;
+    let line_index = if y >= base_y + WRAPPED_SECOND_LINE_OFFSET_Y.saturating_sub(3) {
+        1
+    } else {
+        0
+    };
+    let max_width = max_text_width(line);
+    text_index_at(font, &lines, line_index, x.min(max_width))
+}
+
+fn draw_wrapped_selection(
+    fb: &mut Framebuffer,
+    font: &BitmapFont,
+    text: &str,
+    selection: Option<(usize, usize)>,
+    x: usize,
+    y: usize,
+    max_width: usize,
+    scale: usize,
+    color: Rgba,
+) {
+    let Some((selection_start, selection_end)) = selection else {
+        return;
+    };
+    let lines = font.wrap_lines(text, max_width);
+    let mut line_start = 0;
+    for (line_index, line) in lines.iter().enumerate().take(2) {
+        let line_len = line.chars().count();
+        let line_end = line_start + line_len;
+        let start = selection_start.max(line_start);
+        let end = selection_end.min(line_end);
+        if start < end {
+            let prefix = prefix_chars(line, start - line_start);
+            let selected_prefix = prefix_chars(line, end - line_start);
+            let sel_x = x + font.text_width(prefix) * scale;
+            let sel_w = font
+                .text_width(selected_prefix)
+                .saturating_sub(font.text_width(prefix))
+                * scale;
+            let line_y = if line_index == 0 && lines.len() > 1 {
+                y - WRAPPED_FIRST_LINE_OFFSET_Y * scale
+            } else if line_index == 1 {
+                y + WRAPPED_SECOND_LINE_OFFSET_Y * scale
+            } else {
+                y
+            };
+            fb.fill_rect(sel_x, line_y, sel_w.max(1), font.cell_h() * scale, color);
+        }
+        line_start = line_end;
+    }
+}
+
+fn line_for_char_index(lines: &[String], index: usize) -> (usize, usize, &str) {
+    let mut line_start = 0;
+    for (line_index, line) in lines.iter().enumerate() {
+        let line_len = line.chars().count();
+        let line_end = line_start + line_len;
+        if index <= line_end {
+            return (line_index, line_start, line);
+        }
+        line_start = line_end;
+    }
+    lines
+        .last()
+        .map(|line| (lines.len().saturating_sub(1), line_start, line.as_str()))
+        .unwrap_or((0, 0, ""))
+}
+
+fn text_index_at(font: &BitmapFont, lines: &[String], line_index: usize, x: usize) -> usize {
+    let mut line_start = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let line_len = line.chars().count();
+        if index == line_index.min(lines.len().saturating_sub(1)) {
+            return line_start + char_index_at_x(font, line, x);
+        }
+        line_start += line_len;
+    }
+    line_start
+}
+
+fn char_index_at_x(font: &BitmapFont, text: &str, x: usize) -> usize {
+    let mut cursor_x = 0;
+    for (index, ch) in text.chars().enumerate() {
+        let width = font.advance(ch);
+        if x < cursor_x + width / 2 {
+            return index;
+        }
+        cursor_x += width;
+    }
+    text.chars().count()
+}
+
+fn prefix_chars(text: &str, len: usize) -> &str {
+    let byte = text
+        .char_indices()
+        .nth(len)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    &text[..byte]
 }
 
 #[cfg(test)]
