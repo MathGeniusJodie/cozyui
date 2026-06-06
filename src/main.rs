@@ -617,6 +617,46 @@ fn rects_intersect(a: Rect, b: Rect) -> bool {
         && b.y < a.y.saturating_add(a.h)
 }
 
+pub(crate) fn draw_filled_circle(
+    fb: &mut Framebuffer,
+    center_x: isize,
+    center_y: isize,
+    radius: isize,
+    color: Rgba,
+) {
+    draw_filled_ellipse(fb, center_x, center_y, radius, radius, color);
+}
+
+pub(crate) fn draw_filled_ellipse(
+    fb: &mut Framebuffer,
+    center_x: isize,
+    center_y: isize,
+    radius_x: isize,
+    radius_y: isize,
+    color: Rgba,
+) {
+    if radius_x <= 0 || radius_y <= 0 {
+        return;
+    }
+
+    let radius_x_sq = radius_x * radius_x;
+    let radius_y_sq = radius_y * radius_y;
+    let ellipse_sq = radius_x_sq * radius_y_sq;
+    for dy in -radius_y..=radius_y {
+        let y_term = dy * dy * radius_x_sq;
+        let mut dx = 0;
+        while (dx + 1) * (dx + 1) * radius_y_sq + y_term <= ellipse_sq {
+            dx += 1;
+        }
+        for x in center_x - dx..=center_x + dx {
+            let y = center_y + dy;
+            if x >= 0 && y >= 0 {
+                fb.fill_rect(x as usize, y as usize, 1, 1, color);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ScrollDirection {
     Up,

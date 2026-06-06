@@ -13,7 +13,7 @@ use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Image, Palette, Rgba};
+use crate::{Framebuffer, Image, Palette, Rgba, draw_filled_ellipse};
 use serde_json::{Value, json};
 
 const SCALE: usize = 1;
@@ -61,6 +61,8 @@ const USER_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/stic
 const INPUT_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky_stack.png");
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
+const FWEND_SHADOW_Y_OFFSET: isize = -2;
+const FWEND_SHADOW_RADIUS_Y: isize = 5;
 
 const MODELS: [Model; 4] = [
     Model {
@@ -177,7 +179,7 @@ impl Fwends {
 
         self.draw_messages(fb, palette);
         self.draw_input(fb, palette);
-        self.draw_selected_fwend(fb);
+        self.draw_selected_fwend(fb, palette);
     }
 
     pub(crate) fn click(&mut self, x: i16, y: i16) {
@@ -450,11 +452,19 @@ impl Fwends {
         self.draw_focused_pencil(fb);
     }
 
-    fn draw_selected_fwend(&self, fb: &mut Framebuffer) {
+    fn draw_selected_fwend(&self, fb: &mut Framebuffer, palette: &Palette) {
         let avatar = &self.avatars[self.selected_model.min(self.avatars.len() - 1)];
         let rect = self.selected_fwend_rect();
         let avatar_x = rect.x + rect.w.saturating_sub(avatar.width) / 2;
         let avatar_y = rect.y + rect.h.saturating_sub(avatar.height) / 2;
+        draw_filled_ellipse(
+            fb,
+            (avatar_x + avatar.width / 2) as isize,
+            (avatar_y + avatar.height) as isize + FWEND_SHADOW_Y_OFFSET,
+            (avatar.width / 3).max(1) as isize,
+            FWEND_SHADOW_RADIUS_Y,
+            palette.color(palette_color::BROWN),
+        );
         fb.draw_image(
             avatar,
             (avatar_x * SCALE) as isize,

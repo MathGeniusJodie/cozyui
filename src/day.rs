@@ -7,7 +7,7 @@ use crate::palette_color;
 use crate::pixolde_bold_font;
 use crate::poco_font;
 use crate::rozha_one_48_font;
-use crate::{Framebuffer, Image, Palette, Rgba};
+use crate::{Framebuffer, Image, Palette, Rgba, draw_filled_circle};
 
 const WIDTH: usize = 116;
 const HEIGHT: usize = 116;
@@ -255,29 +255,6 @@ impl Day {
 
 fn centered_x(text_width: usize) -> usize {
     WIDTH.saturating_sub(text_width) / 2
-}
-
-fn draw_filled_circle(
-    fb: &mut Framebuffer,
-    center_x: isize,
-    center_y: isize,
-    radius: isize,
-    color: Rgba,
-) {
-    let radius_sq = radius * radius;
-    for dy in -radius..=radius {
-        let span_sq = radius_sq - dy * dy;
-        let mut dx = 0;
-        while (dx + 1) * (dx + 1) <= span_sq {
-            dx += 1;
-        }
-        for x in center_x - dx..=center_x + dx {
-            let y = center_y + dy;
-            if x >= 0 && y >= 0 {
-                fb.fill_rect(x as usize, y as usize, 1, 1, color);
-            }
-        }
-    }
 }
 
 fn current_date_parts() -> DateParts {
