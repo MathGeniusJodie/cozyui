@@ -19,8 +19,9 @@ use serde_json::{Value, json};
 
 const SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
-const W: usize = 268;
+const W: usize = 348;
 const H: usize = 318;
+const CONTENT_X_OFFSET: usize = 80;
 const PAD: usize = 8;
 const CHAT_Y: usize = 8;
 const CHAT_INPUT_GAP: usize = 6;
@@ -62,31 +63,39 @@ const PENCIL_SHADOW_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/toodle_pencil_shadow.png"
 );
+const LAMP_ON_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/lamp_on.png");
+const LAMP_OFF_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/lamp_off.png");
 const USER_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky.png");
 const INPUT_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky_stack.png");
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
 const FWEND_SHADOW_Y_OFFSET: isize = -2;
 const FWEND_SHADOW_RADIUS_Y: isize = 5;
+const LAMP_RIGHT_PAD: usize = 140;
+const LAMP_Y_OFFSET: usize = 70;
 
 const MODELS: [Model; 4] = [
     Model {
         id: "anthropic/claude-haiku-4.5",
+        thinking_id: "anthropic/claude-opus-4.5",
         name: "Claude",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/claw.png"),
     },
     Model {
         id: "deepseek/deepseek-v4-flash",
+        thinking_id: "deepseek/deepseek-v4-pro",
         name: "Deepseek",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/deep.png"),
     },
     Model {
         id: "qwen/qwen3.6-35b-a3b",
+        thinking_id: "qwen/qwen3.7-plus",
         name: "Qwen",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/qwen.png"),
     },
     Model {
         id: "moonshotai/kimi-k2.6",
+        thinking_id: "moonshotai/kimi-k2.6",
         name: "Kimi",
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/kimi.png"),
     },
@@ -99,11 +108,14 @@ pub(crate) struct Fwends {
     input_sticky: Image,
     pencil: Image,
     pencil_shadow: Image,
+    lamp_on_image: Image,
+    lamp_off_image: Image,
     font: BitmapFont,
     messages: Vec<Message>,
     input: String,
     input_edit: TextEdit,
     selected_model: usize,
+    lamp_on: bool,
     focused: bool,
     height: usize,
     scroll_y: usize,
@@ -139,11 +151,14 @@ impl Fwends {
             input_sticky: Image::load(INPUT_STICKY_PATH, palette)?,
             pencil: Image::load(FOCUS_PENCIL_PATH, palette)?,
             pencil_shadow: Image::load(PENCIL_SHADOW_PATH, palette)?,
+            lamp_on_image: Image::load(LAMP_ON_PATH, palette)?,
+            lamp_off_image: Image::load(LAMP_OFF_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
             messages: vec![Message::intro("pick a fwend and say hi".to_string())],
             input: String::new(),
             input_edit: TextEdit::default(),
             selected_model,
+            lamp_on: false,
             focused: false,
             height: H * SCALE,
             scroll_y: 0,
@@ -186,6 +201,7 @@ impl Fwends {
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
 
+        self.draw_lamp(fb);
         self.draw_messages(fb, palette);
         self.draw_input(fb, palette);
         self.draw_selected_fwend(fb, palette);
@@ -200,6 +216,11 @@ impl Fwends {
 
         let x = x as usize / SCALE;
         let y = y as usize / SCALE;
+        if self.lamp_contains(x, y) {
+            self.lamp_on = !self.lamp_on;
+            return;
+        }
+
         let fwend_rect = self.selected_fwend_rect();
         if fwend_rect.contains_point(x, y) {
             self.selected_model = (self.selected_model + 1) % MODELS.len();
@@ -326,15 +347,17 @@ impl Fwends {
         self.messages.push(Message::pending());
         self.scroll_to_bottom();
 
-        let model = MODELS[selected_model];
-        let model_id = model.id.to_string();
-        let system_prompt = fwend_system_prompt(&self.system_prompt, model.name);
+        let thinking = self.lamp_on;
+        let model = MODELS[selected_model.min(MODELS.len() - 1)];
+        let model_id = model.id(thinking).to_string();
+        let system_prompt = fwend_system_prompt(&self.system_prompt, model.name, thinking);
         let history = request_history(&self.messages);
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
 
         thread::spawn(move || {
-            let result = send_openrouter_request(&model_id, &system_prompt, &history, &text);
+            let result =
+                send_openrouter_request(&model_id, &system_prompt, &history, &text, thinking);
             let _ = tx.send(result);
         });
     }
@@ -460,6 +483,43 @@ impl Fwends {
         self.scroll_y = self.max_scroll();
     }
 
+    fn draw_lamp(&self, fb: &mut Framebuffer) {
+        let image = self.lamp_image();
+        let (x, y) = self.lamp_position();
+        fb.draw_image(image, x as isize, y as isize, SCALE);
+    }
+
+    fn lamp_contains(&self, x: usize, y: usize) -> bool {
+        let image = self.lamp_image();
+        let (lamp_x, lamp_y) = self.lamp_position();
+        if x < lamp_x
+            || y < lamp_y
+            || x >= lamp_x + image.width
+            || y >= lamp_y + image.height
+            || y >= self.input_y()
+        {
+            return false;
+        }
+
+        image.at(x - lamp_x, y - lamp_y).a != 0
+    }
+
+    fn lamp_image(&self) -> &Image {
+        if self.lamp_on {
+            &self.lamp_on_image
+        } else {
+            &self.lamp_off_image
+        }
+    }
+
+    fn lamp_position(&self) -> (usize, usize) {
+        let image = self.lamp_image();
+        (
+            W.saturating_sub(image.width + LAMP_RIGHT_PAD),
+            (self.height / SCALE).saturating_sub(image.height + LAMP_Y_OFFSET),
+        )
+    }
+
     fn draw_input(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.draw_image(
             &self.input_sticky,
@@ -508,14 +568,14 @@ impl Fwends {
         let avatar = &self.avatars[self.selected_model.min(self.avatars.len() - 1)];
         let rect = self.selected_fwend_rect();
         let avatar_x = rect.x + rect.w.saturating_sub(avatar.width) / 2;
-        let avatar_y = rect.y + rect.h.saturating_sub(avatar.height) / 2;
+        let avatar_y = rect.y + rect.h.saturating_sub(avatar.height);
         draw_filled_ellipse(
             fb,
             (avatar_x + avatar.width / 2) as isize,
             (avatar_y + avatar.height) as isize + FWEND_SHADOW_Y_OFFSET,
             (avatar.width / 3).max(1) as isize,
             FWEND_SHADOW_RADIUS_Y,
-            palette.color(palette_color::BROWN),
+            palette.color(palette_color::CRIMSON),
         );
         fb.draw_image(
             avatar,
@@ -527,7 +587,7 @@ impl Fwends {
 
     fn selected_fwend_rect(&self) -> FwendRect {
         FwendRect {
-            x: INPUT_X,
+            x: CONTENT_X_OFFSET + INPUT_X,
             y: self.input_y(),
             w: self.model_slot_w,
             h: self.model_slot_h,
@@ -594,7 +654,7 @@ impl Fwends {
     }
 
     fn input_sticky_x(&self) -> usize {
-        INPUT_X + self.model_slot_w + SELECTED_FWEND_GAP
+        CONTENT_X_OFFSET + INPUT_X + self.model_slot_w + SELECTED_FWEND_GAP
     }
 
     fn input_y(&self) -> usize {
@@ -782,8 +842,15 @@ fn prefix_chars(text: &str, len: usize) -> &str {
 #[derive(Clone, Copy)]
 struct Model {
     id: &'static str,
+    thinking_id: &'static str,
     name: &'static str,
     asset_path: &'static str,
+}
+
+impl Model {
+    fn id(self, thinking: bool) -> &'static str {
+        if thinking { self.thinking_id } else { self.id }
+    }
 }
 
 #[derive(Clone)]
@@ -919,8 +986,15 @@ fn request_history(messages: &[Message]) -> Vec<Message> {
         .collect()
 }
 
-fn fwend_system_prompt(template: &str, name: &str) -> String {
-    template.replace("[[FREND_NAME]]", name)
+fn fwend_system_prompt(template: &str, name: &str, thinking: bool) -> String {
+    let prompt = template.replace("[[FREND_NAME]]", name);
+    if thinking {
+        format!(
+            "{prompt}\n\nThe lamp is on: think carefully through hard requests before answering, but keep hidden reasoning out of the visible response."
+        )
+    } else {
+        prompt
+    }
 }
 
 fn send_openrouter_request(
@@ -928,10 +1002,11 @@ fn send_openrouter_request(
     system_prompt: &str,
     history: &[Message],
     latest_text: &str,
+    thinking: bool,
 ) -> Result<String, String> {
     let api_key =
         env::var("OPENROUTER_API_KEY").map_err(|_| "OPENROUTER_API_KEY is not set".to_string())?;
-    let body = chat_body(model, system_prompt, history, latest_text);
+    let body = chat_body(model, system_prompt, history, latest_text, thinking);
     let body_file = CurlBodyFile::new(body.as_bytes())?;
     let mut child = Command::new("curl")
         .args(["-sS", "--max-time", REQUEST_TIMEOUT_SECS, "--config", "-"])
@@ -1021,7 +1096,13 @@ fn unique_temp_path() -> PathBuf {
     path
 }
 
-fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text: &str) -> String {
+fn chat_body(
+    model: &str,
+    system_prompt: &str,
+    history: &[Message],
+    latest_text: &str,
+    thinking: bool,
+) -> String {
     let mut messages = vec![json!({
         "role": "system",
         "content": system_prompt.trim(),
@@ -1042,10 +1123,21 @@ fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text:
         }));
     }
 
+    let reasoning = if thinking {
+        json!({
+            "effort": "high",
+            "exclude": true,
+        })
+    } else {
+        json!({
+            "exclude": true,
+        })
+    };
+
     json!({
         "model": model,
         "messages": messages,
-        "reasoning": { "exclude": true },
+        "reasoning": reasoning,
         "include_reasoning": false,
     })
     .to_string()
@@ -1156,16 +1248,25 @@ mod tests {
 
     #[test]
     fn chat_body_preserves_unicode_and_escapes_json() {
-        let body = chat_body("model", "system", &[], "hi \"there\" 🩷");
+        let body = chat_body("model", "system", &[], "hi \"there\" 🩷", false);
         let parsed: Value = serde_json::from_str(&body).unwrap();
 
         assert_eq!(parsed["messages"][1]["content"], "hi \"there\" 🩷");
     }
 
     #[test]
+    fn chat_body_enables_high_effort_reasoning_when_thinking() {
+        let body = chat_body("model", "system", &[], "hi", true);
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(parsed["reasoning"]["effort"], "high");
+        assert_eq!(parsed["reasoning"]["exclude"], true);
+    }
+
+    #[test]
     fn fwend_system_prompt_replaces_name_placeholder() {
         assert_eq!(
-            fwend_system_prompt("you are [[FREND_NAME]]!", "Qwen"),
+            fwend_system_prompt("you are [[FREND_NAME]]!", "Qwen", false),
             "you are Qwen!"
         );
     }

@@ -72,6 +72,8 @@ const WHEEL_DOWN: u8 = 5;
 const WIDGET_GAP: usize = 16;
 const APP_LEFT_PADDING: usize = 54;
 const APP_BOTTOM_PADDING: usize = 54;
+const SHOW_FWENDS: bool = true;
+const FWENDS_LEFT_APRON: usize = 60;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WidgetId {
@@ -92,6 +94,27 @@ impl WidgetId {
         Self::Twirl,
         Self::Day,
     ];
+
+    const VISIBLE_WITH_FWENDS: [Self; 6] = Self::ALL;
+    const VISIBLE_WITHOUT_FWENDS: [Self; 5] = [
+        Self::Wavey,
+        Self::Puter,
+        Self::Toodle,
+        Self::Twirl,
+        Self::Day,
+    ];
+
+    fn visible() -> &'static [Self] {
+        if SHOW_FWENDS {
+            &Self::VISIBLE_WITH_FWENDS
+        } else {
+            &Self::VISIBLE_WITHOUT_FWENDS
+        }
+    }
+
+    fn is_visible(self) -> bool {
+        SHOW_FWENDS || self != Self::Fwends
+    }
 }
 
 struct App {
@@ -201,30 +224,44 @@ impl App {
     }
 
     fn width(&self) -> usize {
-        self.toodle_rect
+        let width = self
+            .toodle_rect
             .x
             .saturating_add(self.toodle_rect.w)
             .max(self.desk.width)
-            .max(self.fwends_rect.x + self.fwends_rect.w)
             .max(self.twirl_rect.x + self.twirl_rect.w)
             .max(self.wavey_rect.x + self.wavey_rect.w)
-            .max(self.day_rect.x + self.day_rect.w)
+            .max(self.day_rect.x + self.day_rect.w);
+        if SHOW_FWENDS {
+            width.max(self.fwends_rect.x + self.fwends_rect.w)
+        } else {
+            width
+        }
     }
 
     fn height(&self) -> usize {
-        self.target_app_height()
-            .max(self.fwends_rect.y + self.fwends_rect.h)
+        let height = self.target_app_height();
+        if SHOW_FWENDS {
+            height.max(self.fwends_rect.y + self.fwends_rect.h)
+        } else {
+            height
+        }
     }
 
     fn target_app_height(&self) -> usize {
-        self.puter_rect
+        let height = self
+            .puter_rect
             .h
             .max(self.desk.height)
-            .max(self.fwends_rect.y + self.fwends.min_height())
             .max(self.twirl_rect.y + self.twirl_rect.h)
             .max(self.wavey_rect.y + self.wavey_rect.h)
-            .max(self.day_rect.y + self.day_rect.h)
-            + APP_BOTTOM_PADDING
+            .max(self.day_rect.y + self.day_rect.h);
+        let height = if SHOW_FWENDS {
+            height.max(self.fwends_rect.y + self.fwends.min_height())
+        } else {
+            height
+        };
+        height + APP_BOTTOM_PADDING
     }
 
     fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -265,7 +302,7 @@ impl App {
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
         self.render_background(fb, palette);
-        for widget in WidgetId::ALL {
+        for widget in WidgetId::visible().iter().copied() {
             self.render_widget(fb, palette, widget);
         }
     }
@@ -316,6 +353,9 @@ impl App {
         palette: &Palette,
         widget: WidgetId,
     ) -> Result<(), Box<dyn Error>> {
+        if !widget.is_visible() {
+            return Ok(());
+        }
         let rect = self.rect_for(widget);
         self.render_rect(fb, palette, rect);
         xwin.draw_rect(fb, rect)
@@ -323,7 +363,7 @@ impl App {
 
     fn render_rect(&mut self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
         self.render_background_rect(fb, palette, rect);
-        for widget in WidgetId::ALL {
+        for widget in WidgetId::visible().iter().copied() {
             if rects_intersect(self.rect_for(widget), rect) {
                 self.render_widget(fb, palette, widget);
             }
@@ -395,7 +435,7 @@ impl App {
     }
 
     fn drain_replies(&mut self) -> bool {
-        self.fwends.drain_reply()
+        SHOW_FWENDS && self.fwends.drain_reply()
     }
 
     fn handle_key_press(
@@ -406,7 +446,8 @@ impl App {
         match self.focus {
             WidgetId::Puter => Ok(self.puter.handle_key_press(input, clipboard_text)),
             WidgetId::Toodle => self.toodle.handle_key_press(input, clipboard_text),
-            WidgetId::Fwends => self.fwends.handle_key_press(input, clipboard_text),
+            WidgetId::Fwends if SHOW_FWENDS => self.fwends.handle_key_press(input, clipboard_text),
+            WidgetId::Fwends => Ok(None),
             WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => Ok(None),
         }
     }
@@ -552,6 +593,7 @@ impl App {
             WidgetId::Puter,
         ]
         .into_iter()
+        .filter(|widget| widget.is_visible())
         .find_map(|widget| {
             let rect = self.rect_for(widget);
             rect.contains(x, y).then(|| {
@@ -625,7 +667,7 @@ impl WidgetLayout {
         let wavey_x = APP_LEFT_PADDING + 32;
         let wavey_y = wavey_y + 14;
         let day_x = wavey.width().saturating_sub(day.width()) + APP_LEFT_PADDING;
-        let fwends_x = middle_x + middle_w + WIDGET_GAP + APP_LEFT_PADDING;
+        let fwends_x = middle_x + middle_w + WIDGET_GAP + APP_LEFT_PADDING - FWENDS_LEFT_APRON;
         let fwends_y = 0;
 
         Self {
