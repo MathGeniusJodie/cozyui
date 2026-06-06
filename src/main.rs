@@ -270,30 +270,12 @@ impl App {
 
     fn render_background(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
-        let y = fb.height.saturating_sub(self.desk.height) as isize;
-        fb.draw_image(&self.desk, 0, y, 1);
+        draw_stretched_desk_region(fb, &self.desk, Rect::new(0, 0, fb.width, fb.height));
     }
 
     fn render_background_rect(&self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
         fb.fill_rect(rect.x, rect.y, rect.w, rect.h, self.fill_color(palette));
-
-        let desk_y = fb.height.saturating_sub(self.desk.height);
-        let x0 = rect.x.min(self.desk.width);
-        let x1 = rect.x.saturating_add(rect.w).min(self.desk.width);
-        let y0 = rect.y.max(desk_y);
-        let y1 = rect
-            .y
-            .saturating_add(rect.h)
-            .min(desk_y.saturating_add(self.desk.height));
-        if x0 < x1 && y0 < y1 {
-            fb.draw_image_region(
-                &self.desk,
-                Rect::new(x0, y0 - desk_y, x1 - x0, y1 - y0),
-                x0 as isize,
-                y0 as isize,
-                1,
-            );
-        }
+        draw_stretched_desk_region(fb, &self.desk, rect);
     }
 
     fn start(&mut self, window_id: u64) -> Result<(), Box<dyn Error>> {
@@ -702,6 +684,52 @@ fn rects_intersect(a: Rect, b: Rect) -> bool {
         && b.x < a.x.saturating_add(a.w)
         && a.y < b.y.saturating_add(b.h)
         && b.y < a.y.saturating_add(a.h)
+}
+
+fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Image, rect: Rect) {
+    let desk_y = fb.height.saturating_sub(desk.height);
+    let x0 = rect.x.min(fb.width);
+    let x1 = rect.x.saturating_add(rect.w).min(fb.width);
+    let y0 = rect.y.max(desk_y).min(fb.height);
+    let y1 = rect
+        .y
+        .saturating_add(rect.h)
+        .min(desk_y.saturating_add(desk.height))
+        .min(fb.height);
+
+    if x0 >= x1 || y0 >= y1 || desk.width == 0 || desk.height == 0 {
+        return;
+    }
+
+    for y in y0..y1 {
+        let source_y = y - desk_y;
+        for x in x0..x1 {
+            let source_x = stretched_desk_source_x(x, fb.width, desk.width);
+            let color = desk.at(source_x, source_y);
+            if color.a != 0 {
+                fb.fill_rect(x, y, 1, 1, color);
+            }
+        }
+    }
+}
+
+fn stretched_desk_source_x(x: usize, target_w: usize, source_w: usize) -> usize {
+    if source_w <= 1 || target_w <= source_w {
+        return x.min(source_w.saturating_sub(1));
+    }
+
+    let middle = source_w / 2;
+    let left_w = middle;
+    let right_w = source_w - middle - 1;
+    let middle_w = target_w.saturating_sub(left_w + right_w).max(1);
+
+    if x < left_w {
+        x
+    } else if x < left_w + middle_w {
+        middle
+    } else {
+        middle + 1 + (x - left_w - middle_w).min(right_w.saturating_sub(1))
+    }
 }
 
 pub(crate) fn draw_filled_circle(
