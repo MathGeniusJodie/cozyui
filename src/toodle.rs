@@ -362,6 +362,19 @@ impl Toodle {
 
         let PageRef { section, page } = self.current_page_ref();
         let mut text = self.todos[section].item(page, line).text.clone();
+        if matches!(edit_key(input), EditKey::Backspace) && text.is_empty() {
+            if self.todos[section].delete_item(page, line) {
+                self.todos[section].save(TODO_FILES[section])?;
+            }
+            self.keep_section_page_visible(PageRef { section, page });
+            self.focused_line = Some(line);
+
+            let PageRef { section, page } = self.current_page_ref();
+            let text = &self.todos[section].item(page, line).text;
+            self.text_edit.set_cursor(0, text);
+            return Ok(None);
+        }
+
         let outcome = self
             .text_edit
             .handle_key(input, &mut text, clipboard_text, |candidate| {
@@ -792,6 +805,15 @@ impl TodoList {
             self.items.resize_with(index + 1, TodoItem::default);
         }
         &mut self.items[index]
+    }
+
+    fn delete_item(&mut self, page: usize, line: usize) -> bool {
+        let index = page * LINE_COUNT + line;
+        if index >= self.items.len() {
+            return false;
+        }
+        self.items.remove(index);
+        true
     }
 
     fn trim_trailing_blank_items(&mut self) {
@@ -1383,6 +1405,19 @@ mod tests {
 
         assert_eq!(list.serialized_text().lines().count(), LINE_COUNT + 1);
         assert!(list.serialized_text().ends_with("overflow\n"));
+    }
+
+    #[test]
+    fn todo_list_delete_item_shifts_later_items_up() {
+        let mut list = TodoList { items: Vec::new() };
+        list.item_mut(0, 0).text = "first".to_string();
+        list.item_mut(0, 1).text = String::new();
+        list.item_mut(0, 2).text = "third".to_string();
+
+        assert!(list.delete_item(0, 1));
+
+        assert_eq!(list.item(0, 0).text, "first");
+        assert_eq!(list.item(0, 1).text, "third");
     }
 
     #[test]
