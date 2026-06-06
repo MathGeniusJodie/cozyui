@@ -149,6 +149,7 @@ static EMOJI_TO_ASCII: phf::Map<&'static str, &'static str> = phf_map! {
     "🎊" => "\\o/",
     "⭐" => "*",
     "🌟" => "*",
+    "🌞" => ":sun_with_face:",
     "✨" => "*~*",
     "💤" => "zzz",
     "🎅" => "*<|:)",
@@ -207,6 +208,7 @@ mod tests {
     fn replace_inline() {
         assert_eq!(replace_emoji("hi 🙂"), "hi :)");
         assert_eq!(replace_emoji("😭😭😭"), "D;D;D;");
+        assert_eq!(replace_emoji("hi 🌞"), "hi :sun_with_face:");
         assert_eq!(replace_emoji("plain text"), "plain text");
     }
 
