@@ -62,8 +62,8 @@ pub(crate) mod palette_color {
 pub(crate) mod app_color {
     use crate::palette_color;
 
-    pub(crate) const BACKGROUND: usize = palette_color::ROSE;
-    pub(crate) const BACKGROUND_SHADOW: usize = palette_color::CRIMSON;
+    pub(crate) const BACKGROUND: usize = palette_color::CYAN;
+    pub(crate) const BACKGROUND_SHADOW: usize = palette_color::BLUE;
 }
 
 const WHEEL_UP: u8 = 4;
@@ -270,12 +270,17 @@ impl App {
 
     fn render_background(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
-        draw_stretched_desk_region(fb, &self.desk, Rect::new(0, 0, fb.width, fb.height));
+        draw_stretched_desk_region(
+            fb,
+            &self.desk,
+            palette,
+            Rect::new(0, 0, fb.width, fb.height),
+        );
     }
 
     fn render_background_rect(&self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
         fb.fill_rect(rect.x, rect.y, rect.w, rect.h, self.fill_color(palette));
-        draw_stretched_desk_region(fb, &self.desk, rect);
+        draw_stretched_desk_region(fb, &self.desk, palette, rect);
     }
 
     fn start(&mut self, window_id: u64) -> Result<(), Box<dyn Error>> {
@@ -686,7 +691,7 @@ fn rects_intersect(a: Rect, b: Rect) -> bool {
         && b.y < a.y.saturating_add(a.h)
 }
 
-fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Image, rect: Rect) {
+fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Image, palette: &Palette, rect: Rect) {
     let desk_y = fb.height.saturating_sub(desk.height);
     let x0 = rect.x.min(fb.width);
     let x1 = rect.x.saturating_add(rect.w).min(fb.width);
@@ -705,7 +710,7 @@ fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Image, rect: Rect) {
         let source_y = y - desk_y;
         for x in x0..x1 {
             let source_x = stretched_desk_source_x(x, fb.width, desk.width);
-            let color = desk.at(source_x, source_y);
+            let color = desk_background_color(desk.at(source_x, source_y), palette);
             if color.a != 0 {
                 fb.fill_rect(x, y, 1, 1, color);
             }
@@ -730,6 +735,20 @@ fn stretched_desk_source_x(x: usize, target_w: usize, source_w: usize) -> usize 
     } else {
         middle + 1 + (x - left_w - middle_w).min(right_w.saturating_sub(1))
     }
+}
+
+fn desk_background_color(color: Rgba, palette: &Palette) -> Rgba {
+    if same_rgb(color, palette.color(palette_color::ROSE)) {
+        palette.color(app_color::BACKGROUND)
+    } else if same_rgb(color, palette.color(palette_color::CRIMSON)) {
+        palette.color(app_color::BACKGROUND_SHADOW)
+    } else {
+        color
+    }
+}
+
+fn same_rgb(a: Rgba, b: Rgba) -> bool {
+    a.r == b.r && a.g == b.g && a.b == b.b
 }
 
 pub(crate) fn draw_filled_circle(
