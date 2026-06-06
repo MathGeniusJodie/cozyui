@@ -13,6 +13,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode, point_to_viewport};
 use alacritty_terminal::tty;
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use xkbcommon::xkb::keysyms;
 
 use crate::palette_color;
@@ -51,6 +52,31 @@ const COLOR_ORANGE_GLOW: usize = palette_color::BROWN;
 const COLOR_GREEN_TEXT: usize = palette_color::LIME;
 const COLOR_GREEN_GLOW: usize = palette_color::GREEN;
 const COLOR_SELECTION: usize = palette_color::GUNMETAL;
+
+const TERM_COLOR_BLACK: usize = palette_color::BLACK;
+const TERM_COLOR_RED: usize = palette_color::CRIMSON;
+const TERM_COLOR_GREEN: usize = palette_color::GREEN;
+const TERM_COLOR_YELLOW: usize = palette_color::ORANGE;
+const TERM_COLOR_BLUE: usize = palette_color::BLUE;
+const TERM_COLOR_MAGENTA: usize = palette_color::PURPLE;
+const TERM_COLOR_CYAN: usize = palette_color::CYAN;
+const TERM_COLOR_WHITE: usize = palette_color::CREAM;
+const TERM_COLOR_BRIGHT_BLACK: usize = palette_color::GUNMETAL;
+const TERM_COLOR_BRIGHT_RED: usize = palette_color::ROSE;
+const TERM_COLOR_BRIGHT_GREEN: usize = palette_color::LIME;
+const TERM_COLOR_BRIGHT_YELLOW: usize = palette_color::PEACH;
+const TERM_COLOR_BRIGHT_BLUE: usize = palette_color::CYAN;
+const TERM_COLOR_BRIGHT_MAGENTA: usize = palette_color::LAVENDER;
+const TERM_COLOR_BRIGHT_CYAN: usize = palette_color::CYAN;
+const TERM_COLOR_BRIGHT_WHITE: usize = palette_color::CREAM;
+const TERM_COLOR_DIM_BLACK: usize = palette_color::PLUM;
+const TERM_COLOR_DIM_RED: usize = palette_color::BROWN;
+const TERM_COLOR_DIM_GREEN: usize = palette_color::PINE;
+const TERM_COLOR_DIM_YELLOW: usize = palette_color::BROWN;
+const TERM_COLOR_DIM_BLUE: usize = palette_color::PINE;
+const TERM_COLOR_DIM_MAGENTA: usize = palette_color::PLUM;
+const TERM_COLOR_DIM_CYAN: usize = palette_color::BLUE;
+const TERM_COLOR_DIM_WHITE: usize = palette_color::LAVENDER;
 
 const BUTTON_SPRITES_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/buttons.png");
 const BUTTON_PRESSED_SPRITES_PATH: &str =
@@ -309,27 +335,66 @@ impl Puter {
             if selected {
                 fb.fill_rect(x, y, cell_w, cell_h, palette.color(COLOR_SELECTION));
             }
+            let mut fg_color = cell.fg;
+            let mut fg = self.terminal_color(fg_color, palette);
+            let mut bg = self.terminal_background_color(cell.bg, palette);
+            let mut glow = Some(self.terminal_glow_color(fg_color, palette));
+            if cell.flags.contains(Flags::DIM) {
+                let dim_fg = dim_color(cell.fg);
+                fg_color = dim_fg;
+                fg = self.terminal_color(fg_color, palette);
+                glow = Some(self.terminal_glow_color(fg_color, palette));
+                bg = (cell.bg != Color::Named(NamedColor::Background))
+                    .then(|| self.terminal_color(dim_color(cell.bg), palette));
+            }
+            if cell.flags.contains(Flags::INVERSE) {
+                let inverse_bg = fg;
+                let inverse_fg = cell
+                    .bg
+                    .ne(&Color::Named(NamedColor::Background))
+                    .then_some(cell.bg)
+                    .unwrap_or(Color::Named(NamedColor::Foreground));
+                fg_color = inverse_fg;
+                fg = bg.unwrap_or_else(|| self.background_terminal_text_color(palette));
+                glow = Some(self.terminal_glow_color(fg_color, palette));
+                bg = Some(inverse_bg);
+            }
+            if selected {
+                fg = palette.color(palette_color::CREAM);
+                bg = Some(palette.color(COLOR_SELECTION));
+                glow = Some(palette.color(COLOR_SELECTION));
+            } else if self.settings.high_brightness {
+                let style = self.high_brightness_terminal_style(fg_color, palette);
+                fg = style.fg;
+                glow = style.glow;
+            }
+            if let Some(bg) = bg {
+                fb.fill_rect(x, y, cell_w, cell_h, bg);
+            }
             if cell.c == ' ' {
                 continue;
             }
-            let mut color = self.settings.text_color(palette);
-            if cell.flags.contains(Flags::DIM) {
-                color = self.settings.glow_color(palette);
-            }
-            if cell.flags.contains(Flags::BOLD) {
-                color = self.settings.text_color(palette);
-            }
-            if selected {
-                color = palette.color(palette_color::CREAM);
-            }
-            if self.settings.high_brightness {
-                let glow = self.settings.glow_color(palette);
+            if self.settings.high_brightness
+                && let Some(glow) = glow
+            {
                 draw_glyph(fb, &self.atlas, cell.c, x - 1, y, GLYPH_SCALE, glow);
                 draw_glyph(fb, &self.atlas, cell.c, x + 1, y, GLYPH_SCALE, glow);
                 draw_glyph(fb, &self.atlas, cell.c, x, y - 1, GLYPH_SCALE, glow);
                 draw_glyph(fb, &self.atlas, cell.c, x, y + 1, GLYPH_SCALE, glow);
             }
-            draw_glyph(fb, &self.atlas, cell.c, x, y, GLYPH_SCALE, color);
+            draw_glyph(fb, &self.atlas, cell.c, x, y, GLYPH_SCALE, fg);
+            if cell.flags.contains(Flags::BOLD) {
+                draw_glyph(fb, &self.atlas, cell.c, x + 1, y, GLYPH_SCALE, fg);
+            }
+            if cell.flags.intersects(Flags::ALL_UNDERLINES) {
+                fb.fill_rect(x, y + cell_h - 1, cell_w, 1, fg);
+                if cell.flags.contains(Flags::DOUBLE_UNDERLINE) && cell_h > 2 {
+                    fb.fill_rect(x, y + cell_h - 3, cell_w, 1, fg);
+                }
+            }
+            if cell.flags.contains(Flags::STRIKEOUT) {
+                fb.fill_rect(x, y + cell_h / 2, cell_w, 1, fg);
+            }
         }
 
         if let Some(cursor_point) = point_to_viewport(content.display_offset, content.cursor.point)
@@ -367,6 +432,86 @@ impl Puter {
             .as_ref()
             .expect("puter terminal must be started before use")
     }
+
+    fn terminal_color(&self, color: Color, palette: &Palette) -> Rgba {
+        match color {
+            Color::Named(NamedColor::Foreground) | Color::Named(NamedColor::BrightForeground) => {
+                self.background_terminal_text_color(palette)
+            }
+            Color::Named(NamedColor::DimForeground) => self.settings.glow_color(palette),
+            Color::Named(NamedColor::Background) => self.background_terminal_bg_color(palette),
+            Color::Named(NamedColor::Cursor) => palette.color(COLOR_CURSOR),
+            Color::Named(named) => palette.color(named_terminal_palette_index(named)),
+            Color::Indexed(index) => indexed_terminal_color(index, palette),
+            Color::Spec(rgb) => palette.nearest(rgb_to_rgba(rgb)),
+        }
+    }
+
+    fn terminal_background_color(&self, color: Color, palette: &Palette) -> Option<Rgba> {
+        (color != Color::Named(NamedColor::Background)).then(|| self.terminal_color(color, palette))
+    }
+
+    fn terminal_glow_color(&self, color: Color, palette: &Palette) -> Rgba {
+        match color {
+            Color::Named(NamedColor::Foreground) | Color::Named(NamedColor::BrightForeground) => {
+                self.settings.glow_color(palette)
+            }
+            Color::Named(NamedColor::DimForeground) => palette.color(TERM_COLOR_DIM_WHITE),
+            Color::Named(NamedColor::Background) => self.settings.glow_color(palette),
+            Color::Named(NamedColor::Cursor) => palette.color(COLOR_CURSOR),
+            Color::Named(named) => palette.color(named_terminal_glow_palette_index(named)),
+            Color::Indexed(index) => indexed_terminal_glow_color(index, palette),
+            Color::Spec(rgb) => palette.nearest(rgb_to_rgba(rgb)),
+        }
+    }
+
+    fn high_brightness_terminal_style(&self, color: Color, palette: &Palette) -> TerminalTextStyle {
+        match color {
+            Color::Named(named) if normal_terminal_named_color(named).is_some() => {
+                TerminalTextStyle {
+                    fg: palette.color(named_terminal_palette_index(named.to_bright())),
+                    glow: None,
+                }
+            }
+            Color::Indexed(index @ 0..=7) => TerminalTextStyle {
+                fg: palette.color(ANSI_16_TO_NA16[index as usize + 8]),
+                glow: None,
+            },
+            Color::Named(named) if bright_terminal_named_color(named).is_some() => {
+                TerminalTextStyle {
+                    fg: palette.color(palette_color::CREAM),
+                    glow: Some(palette.color(named_terminal_glow_palette_index(named))),
+                }
+            }
+            Color::Indexed(index @ 8..=15) => TerminalTextStyle {
+                fg: palette.color(palette_color::CREAM),
+                glow: Some(palette.color(ANSI_16_GLOW_TO_NA16[index as usize])),
+            },
+            Color::Named(NamedColor::Foreground) | Color::Named(NamedColor::BrightForeground) => {
+                TerminalTextStyle {
+                    fg: self.background_terminal_text_color(palette),
+                    glow: Some(self.settings.glow_color(palette)),
+                }
+            }
+            _ => TerminalTextStyle {
+                fg: self.terminal_color(color, palette),
+                glow: None,
+            },
+        }
+    }
+
+    fn background_terminal_text_color(&self, palette: &Palette) -> Rgba {
+        self.settings.text_color(palette)
+    }
+
+    fn background_terminal_bg_color(&self, palette: &Palette) -> Rgba {
+        palette.color(palette_color::BLACK)
+    }
+}
+
+struct TerminalTextStyle {
+    fg: Rgba,
+    glow: Option<Rgba>,
 }
 
 struct GlyphAtlas {
@@ -808,6 +953,216 @@ fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState, palette: &P
     fill_source_rect(fb, light.x, light.y, LIGHT_W, 1, top);
     fill_source_rect(fb, light.x + 1, light.y + 2, LIGHT_W - 2, LIGHT_H - 3, core);
 }
+
+fn named_terminal_palette_index(color: NamedColor) -> usize {
+    match color {
+        NamedColor::Black => TERM_COLOR_BLACK,
+        NamedColor::Red => TERM_COLOR_RED,
+        NamedColor::Green => TERM_COLOR_GREEN,
+        NamedColor::Yellow => TERM_COLOR_YELLOW,
+        NamedColor::Blue => TERM_COLOR_BLUE,
+        NamedColor::Magenta => TERM_COLOR_MAGENTA,
+        NamedColor::Cyan => TERM_COLOR_CYAN,
+        NamedColor::White => TERM_COLOR_WHITE,
+        NamedColor::BrightBlack => TERM_COLOR_BRIGHT_BLACK,
+        NamedColor::BrightRed => TERM_COLOR_BRIGHT_RED,
+        NamedColor::BrightGreen => TERM_COLOR_BRIGHT_GREEN,
+        NamedColor::BrightYellow => TERM_COLOR_BRIGHT_YELLOW,
+        NamedColor::BrightBlue => TERM_COLOR_BRIGHT_BLUE,
+        NamedColor::BrightMagenta => TERM_COLOR_BRIGHT_MAGENTA,
+        NamedColor::BrightCyan => TERM_COLOR_BRIGHT_CYAN,
+        NamedColor::BrightWhite => TERM_COLOR_BRIGHT_WHITE,
+        NamedColor::DimBlack => TERM_COLOR_DIM_BLACK,
+        NamedColor::DimRed => TERM_COLOR_DIM_RED,
+        NamedColor::DimGreen => TERM_COLOR_DIM_GREEN,
+        NamedColor::DimYellow => TERM_COLOR_DIM_YELLOW,
+        NamedColor::DimBlue => TERM_COLOR_DIM_BLUE,
+        NamedColor::DimMagenta => TERM_COLOR_DIM_MAGENTA,
+        NamedColor::DimCyan => TERM_COLOR_DIM_CYAN,
+        NamedColor::DimWhite => TERM_COLOR_DIM_WHITE,
+        NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::DimForeground => {
+            TERM_COLOR_WHITE
+        }
+        NamedColor::Background => TERM_COLOR_BLACK,
+        NamedColor::Cursor => COLOR_CURSOR,
+    }
+}
+
+fn named_terminal_glow_palette_index(color: NamedColor) -> usize {
+    match color {
+        NamedColor::Black | NamedColor::BrightBlack | NamedColor::DimBlack => TERM_COLOR_DIM_BLACK,
+        NamedColor::Red | NamedColor::BrightRed | NamedColor::DimRed => TERM_COLOR_DIM_RED,
+        NamedColor::Green | NamedColor::BrightGreen | NamedColor::DimGreen => TERM_COLOR_DIM_GREEN,
+        NamedColor::Yellow | NamedColor::BrightYellow | NamedColor::DimYellow => {
+            TERM_COLOR_DIM_YELLOW
+        }
+        NamedColor::Blue | NamedColor::BrightBlue | NamedColor::DimBlue => TERM_COLOR_DIM_BLUE,
+        NamedColor::Magenta | NamedColor::BrightMagenta | NamedColor::DimMagenta => {
+            TERM_COLOR_DIM_MAGENTA
+        }
+        NamedColor::Cyan | NamedColor::BrightCyan | NamedColor::DimCyan => TERM_COLOR_DIM_CYAN,
+        NamedColor::White | NamedColor::BrightWhite | NamedColor::DimWhite => TERM_COLOR_DIM_WHITE,
+        NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::DimForeground => {
+            TERM_COLOR_DIM_WHITE
+        }
+        NamedColor::Background => TERM_COLOR_DIM_BLACK,
+        NamedColor::Cursor => COLOR_CURSOR,
+    }
+}
+
+fn normal_terminal_named_color(color: NamedColor) -> Option<NamedColor> {
+    match color {
+        NamedColor::Black
+        | NamedColor::Red
+        | NamedColor::Green
+        | NamedColor::Yellow
+        | NamedColor::Blue
+        | NamedColor::Magenta
+        | NamedColor::Cyan
+        | NamedColor::White => Some(color),
+        _ => None,
+    }
+}
+
+fn bright_terminal_named_color(color: NamedColor) -> Option<NamedColor> {
+    match color {
+        NamedColor::BrightBlack
+        | NamedColor::BrightRed
+        | NamedColor::BrightGreen
+        | NamedColor::BrightYellow
+        | NamedColor::BrightBlue
+        | NamedColor::BrightMagenta
+        | NamedColor::BrightCyan
+        | NamedColor::BrightWhite => Some(color),
+        _ => None,
+    }
+}
+
+fn indexed_terminal_color(index: u8, palette: &Palette) -> Rgba {
+    if index < 16 {
+        return palette.color(ANSI_16_TO_NA16[index as usize]);
+    }
+
+    palette.nearest(indexed_terminal_rgb(index))
+}
+
+fn indexed_terminal_glow_color(index: u8, palette: &Palette) -> Rgba {
+    if index < 16 {
+        return palette.color(ANSI_16_GLOW_TO_NA16[index as usize]);
+    }
+
+    palette.nearest(indexed_terminal_rgb(index))
+}
+
+fn indexed_terminal_rgb(index: u8) -> Rgba {
+    if index < 16 {
+        return terminal_palette_rgba(ANSI_16_TO_NA16[index as usize]);
+    }
+
+    if index < 232 {
+        let index = index - 16;
+        let r = color_cube_value(index / 36);
+        let g = color_cube_value((index / 6) % 6);
+        let b = color_cube_value(index % 6);
+        return Rgba { r, g, b, a: 255 };
+    }
+
+    let value = 8 + (index - 232) * 10;
+    Rgba {
+        r: value,
+        g: value,
+        b: value,
+        a: 255,
+    }
+}
+
+fn color_cube_value(value: u8) -> u8 {
+    if value == 0 { 0 } else { 55 + value * 40 }
+}
+
+fn dim_color(color: Color) -> Color {
+    match color {
+        Color::Named(named) => Color::Named(named.to_dim()),
+        Color::Indexed(index @ 8..=15) => Color::Indexed(index - 8),
+        Color::Spec(rgb) => Color::Spec(Rgb {
+            r: rgb.r / 2,
+            g: rgb.g / 2,
+            b: rgb.b / 2,
+        }),
+        other => other,
+    }
+}
+
+fn rgb_to_rgba(rgb: Rgb) -> Rgba {
+    Rgba {
+        r: rgb.r,
+        g: rgb.g,
+        b: rgb.b,
+        a: 255,
+    }
+}
+
+fn terminal_palette_rgba(index: usize) -> Rgba {
+    let (r, g, b) = SOURCE_PALETTE_RGB[index % SOURCE_PALETTE_RGB.len()];
+    Rgba { r, g, b, a: 255 }
+}
+
+const ANSI_16_TO_NA16: [usize; 16] = [
+    TERM_COLOR_BLACK,
+    TERM_COLOR_RED,
+    TERM_COLOR_GREEN,
+    TERM_COLOR_YELLOW,
+    TERM_COLOR_BLUE,
+    TERM_COLOR_MAGENTA,
+    TERM_COLOR_CYAN,
+    TERM_COLOR_WHITE,
+    TERM_COLOR_BRIGHT_BLACK,
+    TERM_COLOR_BRIGHT_RED,
+    TERM_COLOR_BRIGHT_GREEN,
+    TERM_COLOR_BRIGHT_YELLOW,
+    TERM_COLOR_BRIGHT_BLUE,
+    TERM_COLOR_BRIGHT_MAGENTA,
+    TERM_COLOR_BRIGHT_CYAN,
+    TERM_COLOR_BRIGHT_WHITE,
+];
+
+const ANSI_16_GLOW_TO_NA16: [usize; 16] = [
+    TERM_COLOR_DIM_BLACK,
+    TERM_COLOR_DIM_RED,
+    TERM_COLOR_DIM_GREEN,
+    TERM_COLOR_DIM_YELLOW,
+    TERM_COLOR_DIM_BLUE,
+    TERM_COLOR_DIM_MAGENTA,
+    TERM_COLOR_DIM_CYAN,
+    TERM_COLOR_DIM_WHITE,
+    TERM_COLOR_DIM_BLACK,
+    TERM_COLOR_DIM_RED,
+    TERM_COLOR_DIM_GREEN,
+    TERM_COLOR_DIM_YELLOW,
+    TERM_COLOR_DIM_BLUE,
+    TERM_COLOR_DIM_MAGENTA,
+    TERM_COLOR_DIM_CYAN,
+    TERM_COLOR_DIM_WHITE,
+];
+
+const SOURCE_PALETTE_RGB: [(u8, u8, u8); 16] = [
+    (140, 143, 174),
+    (88, 69, 99),
+    (62, 33, 55),
+    (154, 99, 72),
+    (215, 155, 125),
+    (245, 237, 186),
+    (192, 199, 65),
+    (100, 125, 52),
+    (228, 148, 58),
+    (157, 48, 59),
+    (210, 100, 113),
+    (112, 55, 127),
+    (126, 196, 193),
+    (52, 133, 157),
+    (23, 67, 75),
+    (31, 14, 28),
+];
 
 fn fill_source_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize, color: Rgba) {
     fb.fill_rect(
