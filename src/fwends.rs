@@ -14,7 +14,7 @@ use crate::comicoro_font;
 use crate::palette_color;
 use crate::text_edit::{TextEdit, TextEditOutcome, char_len};
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Image, Palette, Rgba, draw_filled_ellipse};
+use crate::{Framebuffer, Image, Palette, Rect, Rgba, draw_filled_ellipse};
 use serde_json::{Value, json};
 
 const SCALE: usize = 1;
@@ -58,6 +58,10 @@ const SYSTEM_PROMPT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fwends_sy
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const REQUEST_TIMEOUT_SECS: &str = "30";
 const FOCUS_PENCIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/focus_pencil.png");
+const PENCIL_SHADOW_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/toodle_pencil_shadow.png"
+);
 const USER_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky.png");
 const INPUT_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky_stack.png");
 const PENCIL_TIP_X: usize = 0;
@@ -94,6 +98,7 @@ pub(crate) struct Fwends {
     user_sticky: Image,
     input_sticky: Image,
     pencil: Image,
+    pencil_shadow: Image,
     font: BitmapFont,
     messages: Vec<Message>,
     input: String,
@@ -133,6 +138,7 @@ impl Fwends {
             user_sticky: Image::load(USER_STICKY_PATH, palette)?,
             input_sticky: Image::load(INPUT_STICKY_PATH, palette)?,
             pencil: Image::load(FOCUS_PENCIL_PATH, palette)?,
+            pencil_shadow: Image::load(PENCIL_SHADOW_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
             messages: vec![Message::intro("pick a fwend and say hi".to_string())],
             input: String::new(),
@@ -495,7 +501,7 @@ impl Fwends {
                 palette.color(palette_color::BLACK),
             );
         }
-        self.draw_focused_pencil(fb);
+        self.draw_focused_pencil(fb, palette);
     }
 
     fn draw_selected_fwend(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -528,7 +534,7 @@ impl Fwends {
         }
     }
 
-    fn draw_focused_pencil(&self, fb: &mut Framebuffer) {
+    fn draw_focused_pencil(&self, fb: &mut Framebuffer, palette: &Palette) {
         if !self.focused {
             return;
         }
@@ -536,6 +542,13 @@ impl Fwends {
         let (cursor_x, cursor_y) = self.input_cursor_position();
         let dest_x = cursor_x.saturating_sub(PENCIL_TIP_X);
         let dest_y = cursor_y.saturating_sub(PENCIL_TIP_Y);
+        draw_yellow_pencil_shadow(
+            fb,
+            &self.pencil_shadow,
+            (dest_x * SCALE) as isize,
+            (dest_y * SCALE) as isize,
+            palette,
+        );
         fb.draw_image(
             &self.pencil,
             (dest_x * SCALE) as isize,
@@ -657,6 +670,66 @@ fn draw_selection(
         line_start = line_end;
     }
 }
+
+fn draw_yellow_pencil_shadow(
+    fb: &mut Framebuffer,
+    image: &Image,
+    dest_x: isize,
+    dest_y: isize,
+    palette: &Palette,
+) {
+    fb.draw_image_region_mapped(
+        image,
+        Rect::new(0, 0, image.width, image.height),
+        dest_x,
+        dest_y,
+        SCALE,
+        None,
+        |color| {
+            let source_color = palette_index(color, palette)?;
+            Some(palette.color(YELLOW_PAGE_REMAP[source_color]))
+        },
+    );
+}
+
+fn palette_index(color: Rgba, palette: &Palette) -> Option<usize> {
+    if color.a == 0 {
+        return None;
+    }
+
+    (0..PALETTE_COLOR_COUNT).find(|index| {
+        let palette_color = palette.color(*index);
+        color.r == palette_color.r && color.g == palette_color.g && color.b == palette_color.b
+    })
+}
+
+const PALETTE_COLOR_COUNT: usize = 16;
+
+const IDENTITY_PAGE_REMAP: [usize; PALETTE_COLOR_COUNT] = [
+    palette_color::LAVENDER,
+    palette_color::GUNMETAL,
+    palette_color::PLUM,
+    palette_color::BROWN,
+    palette_color::PEACH,
+    palette_color::CREAM,
+    palette_color::LIME,
+    palette_color::GREEN,
+    palette_color::ORANGE,
+    palette_color::CRIMSON,
+    palette_color::ROSE,
+    palette_color::PURPLE,
+    palette_color::CYAN,
+    palette_color::BLUE,
+    palette_color::PINE,
+    palette_color::BLACK,
+];
+
+const YELLOW_PAGE_REMAP: [usize; PALETTE_COLOR_COUNT] = {
+    let mut remap = IDENTITY_PAGE_REMAP;
+    remap[palette_color::LIME] = palette_color::PEACH;
+    remap[palette_color::ROSE] = palette_color::PEACH;
+    remap
+};
 
 fn line_for_char_index(lines: &[String], index: usize) -> Option<(usize, usize, &str)> {
     let mut line_start = 0;
