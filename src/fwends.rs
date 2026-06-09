@@ -19,8 +19,11 @@ use serde_json::{Value, json};
 
 const SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
-const W: usize = 348;
+const CONTENT_W: usize = 348;
+const W: usize = CONTENT_W + ERASER_W - ERASER_CONTENT_OVERLAP;
 const H: usize = 318;
+const ERASER_W: usize = 45;
+const ERASER_CONTENT_OVERLAP: usize = 30;
 const CONTENT_X_OFFSET: usize = 80;
 const PAD: usize = 8;
 const CHAT_Y: usize = 8;
@@ -59,6 +62,7 @@ const LINE_H: usize = 16;
 const MAX_INPUT_CHARS: usize = 96;
 const SYSTEM_PROMPT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fwends_system_prompt.txt");
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const OPENROUTER_FALLBACK_MODEL: &str = "@preset/free";
 const REQUEST_TIMEOUT_SECS: &str = "30";
 const FOCUS_PENCIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/focus_pencil.png");
 const PENCIL_SHADOW_PATH: &str = concat!(
@@ -67,12 +71,14 @@ const PENCIL_SHADOW_PATH: &str = concat!(
 );
 const LAMP_ON_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/lamp_on.png");
 const LAMP_OFF_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/lamp_off.png");
+const ERASER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/eraser.png");
 const USER_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky.png");
 const INPUT_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky_stack.png");
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
 const LAMP_RIGHT_PAD: usize = 140;
 const LAMP_Y_OFFSET: usize = 70;
+const ERASER_RIGHT_PAD: usize = 0;
 
 const MODELS: [Model; 4] = [
     Model {
@@ -110,6 +116,7 @@ pub(crate) struct Fwends {
     pencil_shadow: Image,
     lamp_on_image: Image,
     lamp_off_image: Image,
+    eraser: Image,
     font: BitmapFont,
     messages: Vec<Message>,
     input: String,
@@ -153,8 +160,9 @@ impl Fwends {
             pencil_shadow: Image::load(PENCIL_SHADOW_PATH, palette)?,
             lamp_on_image: Image::load(LAMP_ON_PATH, palette)?,
             lamp_off_image: Image::load(LAMP_OFF_PATH, palette)?,
+            eraser: Image::load(ERASER_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
-            messages: vec![Message::intro("pick a fwend and say hi".to_string())],
+            messages: vec![intro_message()],
             input: String::new(),
             input_edit: TextEdit::default(),
             selected_model,
@@ -205,6 +213,7 @@ impl Fwends {
         self.draw_messages(fb, palette);
         self.draw_input(fb, palette);
         self.draw_selected_fwend(fb, palette);
+        self.draw_eraser(fb);
     }
 
     pub(crate) fn click(&mut self, x: i16, y: i16) {
@@ -216,6 +225,11 @@ impl Fwends {
 
         let x = x as usize / SCALE;
         let y = y as usize / SCALE;
+        if self.eraser_contains(x, y) {
+            self.erase_chat_history();
+            return;
+        }
+
         if self.lamp_contains(x, y) {
             self.lamp_on = !self.lamp_on;
             return;
@@ -362,6 +376,12 @@ impl Fwends {
         });
     }
 
+    fn erase_chat_history(&mut self) {
+        self.pending = None;
+        self.messages = vec![intro_message()];
+        self.scroll_to_bottom();
+    }
+
     fn draw_messages(&self, fb: &mut Framebuffer, palette: &Palette) {
         let layouts = self.message_layouts();
         let viewport_top = CHAT_Y;
@@ -447,7 +467,7 @@ impl Fwends {
                 .max(style.top_cap + style.bottom_cap + 1)
                 .max(style.min_h);
             let x = if style.align_right {
-                W - PAD - w
+                CONTENT_W - PAD - w
             } else {
                 self.assistant_bubble_x()
             };
@@ -489,6 +509,31 @@ impl Fwends {
         fb.draw_image(image, x as isize, y as isize, SCALE);
     }
 
+    fn draw_eraser(&self, fb: &mut Framebuffer) {
+        let (x, y) = self.eraser_position();
+        fb.draw_image(&self.eraser, x as isize, y as isize, SCALE);
+    }
+
+    fn eraser_contains(&self, x: usize, y: usize) -> bool {
+        let (eraser_x, eraser_y) = self.eraser_position();
+        if x < eraser_x
+            || y < eraser_y
+            || x >= eraser_x + self.eraser.width
+            || y >= eraser_y + self.eraser.height
+        {
+            return false;
+        }
+
+        self.eraser.at(x - eraser_x, y - eraser_y).a != 0
+    }
+
+    fn eraser_position(&self) -> (usize, usize) {
+        (
+            W.saturating_sub(self.eraser.width + ERASER_RIGHT_PAD),
+            (self.height / SCALE).saturating_sub(self.eraser.height),
+        )
+    }
+
     fn lamp_contains(&self, x: usize, y: usize) -> bool {
         let image = self.lamp_image();
         let (lamp_x, lamp_y) = self.lamp_position();
@@ -515,7 +560,7 @@ impl Fwends {
     fn lamp_position(&self) -> (usize, usize) {
         let image = self.lamp_image();
         (
-            W.saturating_sub(image.width + LAMP_RIGHT_PAD),
+            CONTENT_W.saturating_sub(image.width + LAMP_RIGHT_PAD),
             (self.height / SCALE).saturating_sub(image.height + LAMP_Y_OFFSET),
         )
     }
@@ -689,7 +734,7 @@ impl Fwends {
         }
         let x = x as usize / SCALE;
         let y = y as usize / SCALE;
-        (PAD..W - PAD).contains(&x) && (CHAT_Y..CHAT_Y + self.chat_h()).contains(&y)
+        (PAD..CONTENT_W - PAD).contains(&x) && (CHAT_Y..CHAT_Y + self.chat_h()).contains(&y)
     }
 }
 
@@ -1029,6 +1074,10 @@ impl Message {
     }
 }
 
+fn intro_message() -> Message {
+    Message::intro("pick a fwend and say hi".to_string())
+}
+
 #[derive(Clone, Copy)]
 enum Role {
     User,
@@ -1246,7 +1295,7 @@ fn chat_body(
 
     let reasoning = if thinking {
         json!({
-            "effort": "high",
+            "effort": "low",
             "exclude": true,
         })
     } else {
@@ -1255,13 +1304,21 @@ fn chat_body(
         })
     };
 
-    json!({
+    let mut body = json!({
         "model": model,
+        "models": [OPENROUTER_FALLBACK_MODEL],
         "messages": messages,
         "reasoning": reasoning,
         "include_reasoning": false,
-    })
-    .to_string()
+    });
+    if thinking {
+        body["tools"] = json!([
+            {
+                "type": "openrouter:web_fetch",
+            }
+        ]);
+    }
+    body.to_string()
 }
 
 fn extract_content(response: &str) -> Result<String, &'static str> {
@@ -1372,16 +1429,27 @@ mod tests {
         let body = chat_body("model", "system", &[], "hi \"there\" 🩷", false);
         let parsed: Value = serde_json::from_str(&body).unwrap();
 
+        assert_eq!(parsed["model"], "model");
+        assert_eq!(parsed["models"][0], "@preset/free");
         assert_eq!(parsed["messages"][1]["content"], "hi \"there\" 🩷");
     }
 
     #[test]
-    fn chat_body_enables_high_effort_reasoning_when_thinking() {
+    fn chat_body_enables_low_effort_reasoning_and_web_fetch_when_thinking() {
         let body = chat_body("model", "system", &[], "hi", true);
         let parsed: Value = serde_json::from_str(&body).unwrap();
 
-        assert_eq!(parsed["reasoning"]["effort"], "high");
+        assert_eq!(parsed["reasoning"]["effort"], "low");
         assert_eq!(parsed["reasoning"]["exclude"], true);
+        assert_eq!(parsed["tools"][0]["type"], "openrouter:web_fetch");
+    }
+
+    #[test]
+    fn chat_body_omits_web_fetch_when_not_thinking() {
+        let body = chat_body("model", "system", &[], "hi", false);
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+
+        assert!(parsed.get("tools").is_none());
     }
 
     #[test]

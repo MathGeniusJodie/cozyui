@@ -15,37 +15,25 @@ const TOTAL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/twirl_total.txt")
 const SHADOW_X_OFFSET: isize = 1;
 const SHADOW_Y_OFFSET: isize = 4;
 
-const SEGMENT_COUNT: usize = 12;
+const SEGMENT_COUNT: usize = 6;
 const SEGMENT_NUMBERS: [&str; SEGMENT_COUNT] = [
-    "1", "2", "1", "3", "1", "4", "1", "5", "1", "10", "1", "100",
+    "1", "2", "4", "8", "16", "100"
 ];
 
 const SEGMENT_LIGHT_COLORS: [usize; SEGMENT_COUNT] = [
-    palette_color::LAVENDER,
     palette_color::CYAN,
     palette_color::LAVENDER,
-    palette_color::PURPLE,
-    palette_color::LAVENDER,
     palette_color::ROSE,
-    palette_color::LAVENDER,
     palette_color::ORANGE,
-    palette_color::LAVENDER,
     palette_color::CREAM,
-    palette_color::LAVENDER,
     palette_color::LIME,
 ];
 const SEGMENT_DARK_COLORS: [usize; SEGMENT_COUNT] = [
-    palette_color::GUNMETAL,
     palette_color::BLUE,
-    palette_color::GUNMETAL,
-    palette_color::BLACK,
-    palette_color::GUNMETAL,
+    palette_color::PURPLE,
     palette_color::CRIMSON,
-    palette_color::GUNMETAL,
     palette_color::BROWN,
-    palette_color::GUNMETAL,
     palette_color::ORANGE,
-    palette_color::GUNMETAL,
     palette_color::GREEN,
 ];
 
