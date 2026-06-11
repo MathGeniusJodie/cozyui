@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::app_color;
 use crate::bitmap_font::BitmapFont;
@@ -110,7 +111,13 @@ pub(crate) struct Toodle {
     focused_line: Option<usize>,
     text_edit: TextEdit,
     eraser_hovered: bool,
+    // Per-keystroke saves fsync and made typing lag; edits are saved after a
+    // typing pause instead (and flushed on shutdown).
+    dirty_sections: [bool; SECTION_COUNT],
+    last_edit: Instant,
 }
+
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 impl Toodle {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
@@ -149,6 +156,8 @@ impl Toodle {
             focused_line: None,
             text_edit: TextEdit::default(),
             eraser_hovered: false,
+            dirty_sections: [false; SECTION_COUNT],
+            last_edit: Instant::now(),
         })
     }
 
@@ -386,7 +395,10 @@ impl Toodle {
         if let TextEditOutcome::Handled { changed, copy } = outcome {
             if changed {
                 self.todos[section].item_mut(page, line).text = text;
-                self.save_current_section()?;
+                // Deferred save: an fsync per keystroke makes typing lag.
+                self.dirty_sections[section] = true;
+                self.last_edit = Instant::now();
+                self.keep_section_page_visible(PageRef { section, page });
             }
             return Ok(copy);
         }
@@ -447,7 +459,29 @@ impl Toodle {
     fn save_current_section(&mut self) -> Result<(), Box<dyn Error>> {
         let current_page = self.current_page_ref();
         self.todos[current_page.section].save(TODO_FILES[current_page.section])?;
+        self.dirty_sections[current_page.section] = false;
         self.keep_section_page_visible(current_page);
+        Ok(())
+    }
+
+    /// Write debounced edits once typing has paused. Call regularly.
+    pub(crate) fn maintain(&mut self) -> Result<(), Box<dyn Error>> {
+        if self.dirty_sections.iter().any(|&dirty| dirty)
+            && self.last_edit.elapsed() >= SAVE_DEBOUNCE
+        {
+            self.flush_saves()?;
+        }
+        Ok(())
+    }
+
+    /// Write all pending edits now (shutdown, structural changes).
+    pub(crate) fn flush_saves(&mut self) -> Result<(), Box<dyn Error>> {
+        for section in 0..SECTION_COUNT {
+            if self.dirty_sections[section] {
+                self.todos[section].save(TODO_FILES[section])?;
+                self.dirty_sections[section] = false;
+            }
+        }
         Ok(())
     }
 

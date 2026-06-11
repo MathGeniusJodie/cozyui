@@ -557,6 +557,9 @@ impl App {
     }
 
     fn shutdown(&mut self) {
+        if let Err(err) = self.toodle.flush_saves() {
+            eprintln!("toodle save failed on shutdown: {err}");
+        }
         self.wavey.shutdown();
         self.puter.shutdown_terminal();
     }
@@ -764,6 +767,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Day)?;
             drew_frame = true;
         }
+
+        // Debounced toodle saves: edits hit disk shortly after typing pauses.
+        app.toodle.maintain()?;
 
         let mut pending_motion_widget = None;
         while let Some(event) = xwin.conn.poll_for_event()? {
