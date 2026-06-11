@@ -103,12 +103,23 @@ fn run_wolfram(code: &str) -> String {
     truncate(&out, 2000)
 }
 
-// Web Q&A: one-shot web-search-enabled sub-call ("<model>:online" engages
-// OpenRouter's web plugin). Short answer + epistemic status, or honest miss.
+// Web Q&A: one-shot web-search-enabled sub-call using OpenRouter's
+// server-side tools (the old web plugin and ":online" suffix are deprecated).
+// Those tools currently 500 on @preset/ models, so this sub-call pins a
+// direct model id. Short answer + epistemic status, or honest miss.
+const WEB_QA_MODEL: &str = "deepseek/deepseek-v4-flash";
+
 fn web_qa(question: &str) -> String {
     let body = json!({
-        "model": format!("{STUDENT}:online"),
-        "max_tokens": 200,
+        "model": WEB_QA_MODEL,
+        "tools": [
+            {"type": "openrouter:web_search"},
+            {"type": "openrouter:web_fetch"}
+        ],
+        // No max_tokens: server-side tool rounds and (minimal) reasoning
+        // spend from the same budget, and a clipped budget surfaced as empty
+        // answers. The system prompt bounds the answer length instead.
+        "reasoning": {"effort": "minimal", "exclude": true},
         "messages": [
             {"role": "system", "content":
                 "Answer from web search results only. Format:\n\
@@ -121,10 +132,33 @@ fn web_qa(question: &str) -> String {
         ]
     });
     let resp = curl_post(&body);
-    choice(&resp)["message"]["content"]
-        .as_str()
-        .unwrap_or("A: NOT FOUND\nEPISTEMIC: web call failed")
-        .to_string()
+    let ch = choice(&resp);
+    let mut text = content_text(&ch["message"]["content"]);
+    if text.trim().is_empty() {
+        return format!(
+            "A: NOT FOUND\nEPISTEMIC: web call failed (finish_reason: {})",
+            ch["finish_reason"].as_str().unwrap_or("none")
+        );
+    }
+    // A clipped answer is still an answer; mark it rather than discard it.
+    if ch["finish_reason"] == "length" {
+        text.push_str("\n(answer truncated)");
+    }
+    text
+}
+
+/// Message content as plain text: either a JSON string or, when server-side
+/// tools ran, an array of parts whose text fields are concatenated.
+fn content_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
 }
 
 // ------------------------------------------------------------ chat archive
@@ -170,7 +204,9 @@ impl Chat {
         }
     }
 
-    /// One user-role message listing the archive summaries, or None.
+    /// One user-role message listing the archive summaries, or None. Carries
+    /// a cache breakpoint: its bytes only change at compaction, so between
+    /// compactions everything up to here is a stable cached prefix.
     fn summaries_message(&self) -> Option<Value> {
         if self.archive.is_empty() {
             return None;
@@ -181,10 +217,13 @@ impl Chat {
             .enumerate()
             .map(|(id, block)| format!("[block {id}] {}", block.summary))
             .collect();
-        Some(json!({"role": "user", "content": format!(
-            "(older conversation, summarized into blocks)\n{}",
-            lines.join("\n")
-        )}))
+        Some(cached_text_message(
+            "user",
+            &format!(
+                "(older conversation, summarized into blocks)\n{}",
+                lines.join("\n")
+            ),
+        ))
     }
 
     fn read_block(&self, id: usize) -> String {
@@ -193,6 +232,16 @@ impl Chat {
             None => format!("no such block: {id}"),
         }
     }
+}
+
+/// A text message carrying an Anthropic prompt-cache breakpoint: everything
+/// up to and including it becomes a reusable cached prefix (cache reads are
+/// ~1/10th input price). Ignored harmlessly by providers without caching.
+fn cached_text_message(role: &str, text: &str) -> Value {
+    json!({"role": role, "content": [{
+        "type": "text", "text": text,
+        "cache_control": {"type": "ephemeral"}
+    }]})
 }
 
 fn block_transcript(messages: &[Value]) -> String {
@@ -231,7 +280,9 @@ fn topic_boundary(messages: &[Value]) -> usize {
         })
         .collect();
     let resp = curl_post(&json!({
-        "model": STUDENT, "max_tokens": 10,
+        // Budget covers minimal reasoning too; the answer is a bare number.
+        "model": STUDENT, "max_tokens": 600,
+        "reasoning": {"effort": "minimal", "exclude": true},
         "messages": [
             {"role": "system", "content": BOUNDARY_SYSTEM},
             {"role": "user", "content": numbered},
@@ -257,6 +308,7 @@ Example: discussion about baking bread; user's cat is called Bingus.";
 fn summarize_block(messages: &[Value]) -> String {
     let resp = curl_post(&json!({
         "model": STUDENT, "max_tokens": 80,
+        "reasoning": {"enabled": false, "exclude": true},
         "messages": [
             {"role": "system", "content": SUMMARIZER_SYSTEM},
             {"role": "user", "content": block_transcript(messages)},
@@ -286,11 +338,12 @@ web-sourced answer with epistemic status, or NOT FOUND).
 For casual conversation tools are usually wrong: say so, and point out anything
 the junior might miss (tone, subtext, what the user actually wants to hear).
 
-In long conversations the oldest messages arrive as one-line summaries labeled
-[block N]; only the latest messages are verbatim. You have one tool,
-read_block(id), returning a block's full text. Use it only when that block
-plausibly matters for THIS reply (e.g. the user references something old);
-reading costs money, most replies need no blocks.
+You see the conversation so far; the final user message is the one being
+responded to now. In long conversations the oldest messages arrive as
+one-line summaries labeled [block N]; only the latest messages are verbatim.
+You have one tool, read_block(id), returning a block's full text. Use it only
+when that block plausibly matters for THIS reply (e.g. the user references
+something old); reading costs money, most replies need no blocks.
 
 Bad Example:
   message: integral of x^2 sin x, plus current marathon WR
@@ -319,25 +372,25 @@ const SENPAI_TOOLS_JSON: &str = r#"[
   "parameters":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}}
 ]"#;
 
+// Prompt layout is append-only between compactions so Anthropic's prefix
+// cache pays off every turn: [system (bp)] [summaries (bp)] [recent, plain]
+// [current message (bp)]. The current message is sent raw — next turn it sits
+// in `recent` byte-identical, extending the cached prefix instead of breaking
+// it. Only compaction (summaries change, recent head drained) takes a miss.
 fn senpai_briefing(chat: &Chat, user_message: &str) -> String {
     let tools: Value = serde_json::from_str(SENPAI_TOOLS_JSON).unwrap();
-    let mut messages = vec![
-        // cache_control: fixed prefix cached by Anthropic via OpenRouter
-        json!({"role": "system", "content": [{
-            "type": "text", "text": SENPAI_SYSTEM,
-            "cache_control": {"type": "ephemeral"}
-        }]}),
-    ];
+    let mut messages = vec![cached_text_message("system", SENPAI_SYSTEM)];
     if let Some(summaries) = chat.summaries_message() {
         messages.push(summaries);
     }
     messages.extend(chat.recent.iter().cloned());
-    messages.push(json!({"role": "user", "content": format!("message: {user_message}")}));
+    messages.push(cached_text_message("user", user_message));
 
     // Small tool loop: senpai may pull a few archive blocks before briefing.
     for _ in 0..4 {
         let resp = curl_post(&json!({
             "model": SENPAI, "max_tokens": 150, "messages": messages, "tools": tools,
+            "reasoning": {"enabled": false, "exclude": true},
         }));
         let ch = choice(&resp);
         let msg = ch["message"].clone();
@@ -358,7 +411,8 @@ fn senpai_briefing(chat: &Chat, user_message: &str) -> String {
             continue;
         }
 
-        let text = msg["content"].as_str().unwrap_or("").trim();
+        let text = content_text(&msg["content"]);
+        let text = text.trim();
         if !text.is_empty() {
             return text.to_string();
         }
@@ -400,9 +454,11 @@ fn run_turn(chat: &mut Chat, user_message: &str) {
     let briefing = senpai_briefing(chat, user_message);
     eprintln!("--- senpai ---\n{briefing}\n--------------");
 
-    // 2. student responds (same compacted view, no retrieval tool).
+    // 2. student responds (same compacted view, no retrieval tool). Same
+    // cache-friendly layout; the briefing-wrapped final message is the only
+    // per-turn divergence.
     let tools: Value = serde_json::from_str(STUDENT_TOOLS_JSON).unwrap();
-    let mut messages = vec![json!({"role": "system", "content": STUDENT_SYSTEM})];
+    let mut messages = vec![cached_text_message("system", STUDENT_SYSTEM)];
     if let Some(summaries) = chat.summaries_message() {
         messages.push(summaries);
     }
@@ -413,6 +469,7 @@ fn run_turn(chat: &mut Chat, user_message: &str) {
     for _step in 0..20 {
         let resp = curl_post(&json!({
             "model": STUDENT, "max_tokens": 1500,
+            "reasoning": {"enabled": false, "exclude": true},
             "messages": messages, "tools": tools,
         }));
         let ch = choice(&resp);
@@ -441,7 +498,8 @@ fn run_turn(chat: &mut Chat, user_message: &str) {
         }
 
         // 3. student replies to the user; only the raw exchange is kept.
-        let reply = msg["content"].as_str().unwrap_or("(no content)");
+        let text = content_text(&msg["content"]);
+        let reply = if text.trim().is_empty() { "(no content)" } else { &text };
         println!("{reply}");
         commit_turn(chat, user_message, reply);
         return;
