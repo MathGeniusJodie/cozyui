@@ -14,7 +14,7 @@ use crate::comicoro_font;
 use crate::palette_color;
 use crate::text_edit::{TextEdit, TextEditOutcome, char_len};
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Index, Palette, Rgb, Rgba, Sprite, Swap, TRANSPARENT};
+use crate::{Framebuffer, Index, Palette, Rect, Rgb, Rgba, Sprite, Swap, TRANSPARENT};
 use serde_json::{Value, json};
 
 const SCALE: usize = 1;
@@ -63,6 +63,7 @@ const MAX_INPUT_CHARS: usize = 96;
 const SYSTEM_PROMPT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fwends_system_prompt.txt");
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_FALLBACK_MODEL: &str = "@preset/free";
+const USER_NAME: &str = "Jodie";
 const REQUEST_TIMEOUT_SECS: &str = "30";
 const FOCUS_PENCIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/focus_pencil.png");
 const PENCIL_SHADOW_PATH: &str = concat!(
@@ -73,6 +74,10 @@ const LAMP_ON_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/lamp_on.
 const LAMP_OFF_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/lamp_off.png");
 const ERASER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/eraser.png");
 const USER_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky.png");
+const SMOL_FWENDS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/smol_fwends.png");
+const SMOL_ICON_SIZE: usize = 11;
+const SMOL_ICON_GAP: usize = 2;
+const SMOL_ICON_Y_OFFSET: usize = 3;
 const INPUT_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky_stack.png");
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
@@ -112,6 +117,7 @@ pub(crate) struct Fwends {
     bubble: Sprite,
     user_sticky: Sprite,
     input_sticky: Sprite,
+    smol_icons: Sprite,
     pencil: Sprite,
     pencil_shadow: Sprite,
     lamp_on_image: Sprite,
@@ -156,6 +162,7 @@ impl Fwends {
             )?,
             user_sticky: Sprite::load_native(USER_STICKY_PATH, palette)?,
             input_sticky: Sprite::load_native(INPUT_STICKY_PATH, palette)?,
+            smol_icons: Sprite::load_native(SMOL_FWENDS_PATH, palette)?,
             pencil: Sprite::load_native(FOCUS_PENCIL_PATH, palette)?,
             pencil_shadow: Sprite::load_native(PENCIL_SHADOW_PATH, palette)?,
             lamp_on_image: Sprite::load_native(LAMP_ON_PATH, palette)?,
@@ -320,7 +327,10 @@ impl Fwends {
         if let Some(message) = self.messages.last_mut()
             && message.kind == MessageKind::Pending
         {
-            message.text = text;
+            message.text = match message.author {
+                Some(name) => strip_self_prefix(&text, name),
+                None => text,
+            };
             message.kind = MessageKind::Normal;
             self.scroll_to_bottom();
             return true;
@@ -356,16 +366,19 @@ impl Fwends {
 
         self.input.clear();
         self.input_edit.set_cursor(0, &self.input);
+        self.messages
+            .retain(|message| message.kind != MessageKind::Intro);
         self.messages.push(Message::user(text.clone()));
         let selected_model = self.selected_model;
-        self.messages.push(Message::pending());
-        self.scroll_to_bottom();
-
         let thinking = self.lamp_on;
         let model = MODELS[selected_model.min(MODELS.len() - 1)];
+        self.messages.push(Message::pending(model.name));
+        self.scroll_to_bottom();
+
         let model_id = model.id(thinking).to_string();
         let system_prompt = fwend_system_prompt(&self.system_prompt, model.name, thinking);
-        let history = request_history(&self.messages);
+        let history = request_history(&self.messages, model.name);
+        let text = format!("{USER_NAME}: {text}");
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
 
@@ -396,6 +409,23 @@ impl Fwends {
             }
 
             self.draw_bubble(fb, palette, layout.x, y, layout.w, layout.h, layout.style);
+            if let Some(src) = layout.author.and_then(smol_icon_rect) {
+                let clip = Rect::new(0, viewport_top * SCALE, self.width(), self.chat_h() * SCALE);
+                let icon_x = (layout.x + layout.w + SMOL_ICON_GAP) * SCALE;
+                let icon_y =
+                    (y + layout.h as isize - (SMOL_ICON_SIZE + SMOL_ICON_Y_OFFSET) as isize)
+                        * SCALE as isize;
+                fb.draw_sprite_full(
+                    &self.smol_icons,
+                    src,
+                    icon_x as isize,
+                    icon_y,
+                    SCALE,
+                    Some(clip),
+                    palette,
+                    None,
+                );
+            }
             let text_x = layout.x + layout.style.pad_left;
             let mut text_y = y + layout.style.pad_top as isize;
             for line in layout.lines {
@@ -475,6 +505,7 @@ impl Fwends {
             layouts.push(MessageLayout {
                 style,
                 lines,
+                author: message.author,
                 x,
                 y,
                 w,
@@ -1012,11 +1043,13 @@ struct Message {
     role: Role,
     text: String,
     kind: MessageKind,
+    author: Option<&'static str>,
 }
 
 struct MessageLayout {
     style: MessageStyle,
     lines: Vec<String>,
+    author: Option<&'static str>,
     x: usize,
     y: usize,
     w: usize,
@@ -1029,6 +1062,7 @@ impl Message {
             role: Role::User,
             text,
             kind: MessageKind::Normal,
+            author: None,
         }
     }
 
@@ -1037,6 +1071,7 @@ impl Message {
             role: Role::Assistant,
             text,
             kind: MessageKind::Normal,
+            author: None,
         }
     }
 
@@ -1047,9 +1082,10 @@ impl Message {
         }
     }
 
-    fn pending() -> Self {
+    fn pending(author: &'static str) -> Self {
         Self {
             kind: MessageKind::Pending,
+            author: Some(author),
             ..Self::assistant("...".to_string())
         }
     }
@@ -1064,6 +1100,22 @@ impl Message {
 
 fn intro_message() -> Message {
     Message::intro("pick a fwend and say hi".to_string())
+}
+
+fn smol_icon_rect(name: &str) -> Option<Rect> {
+    let index = match name {
+        "Qwen" => 0,
+        "Deepseek" => 1,
+        "Claude" => 2,
+        "Kimi" => 3,
+        _ => return None,
+    };
+    Some(Rect::new(
+        (index % 2) * SMOL_ICON_SIZE,
+        (index / 2) * SMOL_ICON_SIZE,
+        SMOL_ICON_SIZE,
+        SMOL_ICON_SIZE,
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -1131,7 +1183,7 @@ const USER_MESSAGE_STYLE: MessageStyle = MessageStyle {
     align_right: true,
 };
 
-fn request_history(messages: &[Message]) -> Vec<Message> {
+fn request_history(messages: &[Message], current_name: &str) -> Vec<Message> {
     messages
         .iter()
         .filter(|message| message.kind == MessageKind::Normal)
@@ -1141,11 +1193,31 @@ fn request_history(messages: &[Message]) -> Vec<Message> {
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
+        .map(|message| match (message.role, message.author) {
+            (Role::User, _) => Message::user(format!("{USER_NAME}: {}", message.text)),
+            (Role::Assistant, Some(author)) if author != current_name => {
+                Message::user(format!("{author}: {}", message.text))
+            }
+            (Role::Assistant, _) => message,
+        })
         .collect()
 }
 
+fn strip_self_prefix(text: &str, name: &str) -> String {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix(name)
+        && let Some(rest) = rest.trim_start().strip_prefix(':')
+    {
+        return rest.trim_start().to_string();
+    }
+    trimmed.to_string()
+}
+
 fn fwend_system_prompt(template: &str, name: &str, thinking: bool) -> String {
-    let prompt = template.replace("[[FREND_NAME]]", name);
+    let mut prompt = template.replace("[[FREND_NAME]]", name);
+    prompt.push_str(&format!(
+        "\n\nThis is a group chat: messages from {USER_NAME} and from other fwends arrive labeled like \"{USER_NAME}: ...\" or \"Qwen: ...\". Your own earlier replies are unlabeled. Never start your reply with \"{name}:\" — just speak."
+    ));
     if thinking {
         format!(
             "{prompt}\n\nThe lamp is on: think carefully through hard requests before answering, but keep hidden reasoning out of the visible response."
@@ -1442,9 +1514,41 @@ mod tests {
 
     #[test]
     fn fwend_system_prompt_replaces_name_placeholder() {
-        assert_eq!(
-            fwend_system_prompt("you are [[FREND_NAME]]!", "Qwen", false),
-            "you are Qwen!"
-        );
+        let prompt = fwend_system_prompt("you are [[FREND_NAME]]!", "Qwen", false);
+
+        assert!(prompt.starts_with("you are Qwen!"));
+        assert!(prompt.contains("Never start your reply with \"Qwen:\""));
+    }
+
+    #[test]
+    fn request_history_tags_user_and_other_models() {
+        let mut claude_reply = Message::assistant("hi jodie".to_string());
+        claude_reply.author = Some("Claude");
+        let mut qwen_reply = Message::assistant("hello!".to_string());
+        qwen_reply.author = Some("Qwen");
+        let messages = vec![
+            intro_message(),
+            Message::user("hey".to_string()),
+            claude_reply,
+            qwen_reply,
+        ];
+
+        let history = request_history(&messages, "Qwen");
+
+        assert_eq!(history.len(), 3);
+        assert!(matches!(history[0].role, Role::User));
+        assert_eq!(history[0].text, "Jodie: hey");
+        assert!(matches!(history[1].role, Role::User));
+        assert_eq!(history[1].text, "Claude: hi jodie");
+        assert!(matches!(history[2].role, Role::Assistant));
+        assert_eq!(history[2].text, "hello!");
+    }
+
+    #[test]
+    fn strips_reflexive_name_prefix_from_reply() {
+        assert_eq!(strip_self_prefix("Qwen: hi there", "Qwen"), "hi there");
+        assert_eq!(strip_self_prefix("  Qwen : hi", "Qwen"), "hi");
+        assert_eq!(strip_self_prefix("Qwen is great", "Qwen"), "Qwen is great");
+        assert_eq!(strip_self_prefix("hi there", "Qwen"), "hi there");
     }
 }
