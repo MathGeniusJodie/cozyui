@@ -147,6 +147,62 @@ fn web_qa(question: &str) -> String {
     text
 }
 
+// Raw page fetch: curl + crude HTML-to-text, no LLM tokens spent. For when
+// the URL is already known; web_qa is for finding answers.
+fn fetch_url(url: &str) -> String {
+    let out = Command::new("curl")
+        .args(["-sL", "--max-time", "15", url])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_else(|e| format!("fetch error: {e}"));
+    truncate(&html_to_text(&out), 6000)
+}
+
+/// Crude tag stripper: drops script/style bodies, removes tags, decodes a few
+/// common entities, collapses blank runs. Good enough for reading articles.
+fn html_to_text(html: &str) -> String {
+    fn starts_ci(bytes: &[u8], pat: &str) -> bool {
+        bytes.len() >= pat.len() && bytes[..pat.len()].eq_ignore_ascii_case(pat.as_bytes())
+    }
+
+    let mut text = String::with_capacity(html.len() / 2);
+    let bytes = html.as_bytes();
+    let mut chars = html.char_indices().peekable();
+    let mut skip_until: Option<&str> = None;
+    while let Some((i, c)) = chars.next() {
+        if let Some(end) = skip_until {
+            if starts_ci(&bytes[i..], end) {
+                skip_until = None;
+            }
+            continue;
+        }
+        if c == '<' {
+            if starts_ci(&bytes[i..], "<script") {
+                skip_until = Some("</script>");
+            } else if starts_ci(&bytes[i..], "<style") {
+                skip_until = Some("</style>");
+            }
+            // Skip to the closing '>'.
+            for (_, c2) in chars.by_ref() {
+                if c2 == '>' {
+                    break;
+                }
+            }
+            text.push(' ');
+        } else {
+            text.push(c);
+        }
+    }
+    let text = text
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Message content as plain text: either a JSON string or, when server-side
 /// tools ran, an array of parts whose text fields are concatenated.
 fn content_text(content: &Value) -> String {
@@ -334,7 +390,8 @@ Telegraphic style permitted: imperative fragments, no full sentences required.
 
 The junior has tools: run_python (python3 -c), wolfram
 (wolframscript, symbolic/exact math), web_qa (one factual question -> short
-web-sourced answer with epistemic status, or NOT FOUND).
+web-sourced answer with epistemic status, or NOT FOUND), fetch_url (raw page
+text), and read_block (same as yours) — you can tell it which block to read.
 For casual conversation tools are usually wrong: say so, and point out anything
 the junior might miss (tone, subtext, what the user actually wants to hear).
 
@@ -424,13 +481,18 @@ fn senpai_briefing(chat: &Chat, user_message: &str) -> String {
 // ------------------------------------------------------------------ student
 
 const STUDENT_SYSTEM: &str = "\
-You are a helpful assistant with tools: run_python, wolfram, web_qa.
+You are a helpful assistant with tools: run_python, wolfram, web_qa,
+fetch_url, read_block.
 The user's message may be a task, a question, or casual conversation; tools
-are only for when the answer actually needs them. A smart and wise senpai has
-read the message; their private briefing is attached to it. Follow it unless
-evidence contradicts it; never mention the briefing or senpai to the user.
-Work step by step when the message calls for it, then reply to the user
-directly, concisely, and in a tone that matches theirs.";
+are only for when the answer actually needs them. Older conversation arrives
+as one-line summaries labeled [block N]; read_block(id) retrieves a block's
+full text when the user refers to something only summarized. Use fetch_url
+when you already know the page you need; web_qa when you need an answer
+found. A smart and wise senpai has read the message; their private briefing
+is attached to it. Follow it unless evidence contradicts it; never mention
+the briefing or senpai to the user. Work step by step when the message calls
+for it, then reply to the user directly, concisely, and in a tone that
+matches theirs.";
 
 const STUDENT_TOOLS_JSON: &str = r#"[
  {"type":"function","function":{"name":"run_python",
@@ -441,7 +503,13 @@ const STUDENT_TOOLS_JSON: &str = r#"[
   "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}}},
  {"type":"function","function":{"name":"web_qa",
   "description":"Ask a web-search-backed sub-agent one factual question. Returns short answer + epistemic status, or NOT FOUND.",
-  "parameters":{"type":"object","properties":{"question":{"type":"string"}},"required":["question"]}}}
+  "parameters":{"type":"object","properties":{"question":{"type":"string"}},"required":["question"]}}},
+ {"type":"function","function":{"name":"fetch_url",
+  "description":"Fetch a URL and return its readable text (truncated). Use when the exact page is already known.",
+  "parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}},
+ {"type":"function","function":{"name":"read_block",
+  "description":"Retrieve the full text of a summarized conversation block by its [block N] id.",
+  "parameters":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}}
 ]"#;
 
 // One conversation turn. `chat` holds the cleaned transcript of earlier
@@ -487,6 +555,10 @@ fn run_turn(chat: &mut Chat, user_message: &str) {
                     "run_python" => run_python(args["code"].as_str().unwrap_or("")),
                     "wolfram" => run_wolfram(args["code"].as_str().unwrap_or("")),
                     "web_qa" => web_qa(args["question"].as_str().unwrap_or("")),
+                    "fetch_url" => fetch_url(args["url"].as_str().unwrap_or("")),
+                    "read_block" => {
+                        chat.read_block(args["id"].as_u64().unwrap_or(u64::MAX) as usize)
+                    }
                     _ => "unknown tool".into(),
                 };
                 eprintln!("[{name}] -> {}", truncate(&result, 200));
