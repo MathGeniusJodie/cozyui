@@ -370,6 +370,33 @@ def main():
                 if glyph_covers_pixel(contours, font_x, font_y):
                     pixels[(cell_y + y) * atlas_w + cell_x + x] = 255
 
+    # Pixel TTFs often declare a taller ascent/descent than any glyph ink
+    # actually reaches, which would bake permanently blank rows into every
+    # cell. Trim rows that are empty across all glyphs so a draw position
+    # means the top of the ink and cell_h reflects the real text height.
+    row_has_ink = [
+        any(
+            pixels[(cell_row * cell_h + y) * atlas_w + x]
+            for cell_row in range(rows)
+            for x in range(atlas_w)
+        )
+        for y in range(cell_h)
+    ]
+    if any(row_has_ink):
+        top = row_has_ink.index(True)
+        bottom = len(row_has_ink) - 1 - row_has_ink[::-1].index(True)
+        if (top, bottom) != (0, cell_h - 1):
+            trimmed_h = bottom - top + 1
+            trimmed = bytearray(atlas_w * rows * trimmed_h)
+            for cell_row in range(rows):
+                for y in range(trimmed_h):
+                    src = (cell_row * cell_h + top + y) * atlas_w
+                    dst = (cell_row * trimmed_h + y) * atlas_w
+                    trimmed[dst : dst + atlas_w] = pixels[src : src + atlas_w]
+            pixels = trimmed
+            cell_h = trimmed_h
+            atlas_h = rows * cell_h
+
     atlas_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     write_rgb_png(atlas_path, atlas_w, atlas_h, pixels)

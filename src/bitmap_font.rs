@@ -99,6 +99,33 @@ impl BitmapFont {
         self.draw_text_limited(fb, text, x, y, scale, color, usize::MAX);
     }
 
+    /// Draw text whose origin may sit left of the visible area, keeping only
+    /// pixels with x in `clip_x..clip_x + clip_w`: marquees, panning text.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_text_clipped(
+        &self,
+        fb: &mut Framebuffer,
+        text: &str,
+        x: isize,
+        y: usize,
+        scale: usize,
+        color: Rgb,
+        clip_x: usize,
+        clip_w: usize,
+    ) {
+        let mut cursor_x = x;
+        for ch in text.chars() {
+            let advance = (self.advance(ch) * scale) as isize;
+            if cursor_x >= (clip_x + clip_w) as isize {
+                break;
+            }
+            if cursor_x + (self.spec.cell_w * scale) as isize > clip_x as isize {
+                self.draw_glyph_clipped(fb, ch, cursor_x, y, scale, color, clip_x, clip_x + clip_w);
+            }
+            cursor_x += advance;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_text_limited(
         &self,
@@ -133,14 +160,30 @@ impl BitmapFont {
         scale: usize,
         color: Rgb,
     ) {
+        self.draw_glyph_clipped(fb, ch, x as isize, y, scale, color, 0, usize::MAX);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_glyph_clipped(
+        &self,
+        fb: &mut Framebuffer,
+        ch: char,
+        x: isize,
+        y: usize,
+        scale: usize,
+        color: Rgb,
+        clip_left: usize,
+        clip_right: usize,
+    ) {
         for gy in 0..self.spec.cell_h {
             for gx in 0..self.spec.cell_w {
                 if !self.is_on(ch, gx, gy) {
                     continue;
                 }
-                let dest_x =
-                    x as isize + (gx as isize - self.spec.x_origin as isize) * scale as isize;
-                if dest_x < 0 {
+                let dest_x = x + (gx as isize - self.spec.x_origin as isize) * scale as isize;
+                if dest_x < clip_left as isize
+                    || (dest_x as usize).saturating_add(scale) > clip_right
+                {
                     continue;
                 }
                 fb.fill_rect(dest_x as usize, y + gy * scale, scale, scale, color);

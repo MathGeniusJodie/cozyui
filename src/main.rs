@@ -441,11 +441,12 @@ impl App {
         }
     }
 
-    fn click(&mut self, x: i16, y: i16, state: u16) -> Result<(), Box<dyn Error>> {
+    /// Returns text the clicked widget wants copied to the clipboard.
+    fn click(&mut self, x: i16, y: i16, state: u16) -> Result<Option<String>, Box<dyn Error>> {
         self.puter_pressed = false;
         self.text_drag = None;
         let Some((widget, x, y)) = self.widget_at(x, y) else {
-            return Ok(());
+            return Ok(None);
         };
         self.focus = widget;
         match widget {
@@ -469,11 +470,11 @@ impl App {
             }
             WidgetId::Twirl => self.twirl.click(x, y),
             WidgetId::Wavey => {
-                self.wavey.click(x, y);
+                return Ok(self.wavey.click(x, y));
             }
             WidgetId::Day => self.day.toggle_mode(),
         }
-        Ok(())
+        Ok(None)
     }
 
     fn release(&mut self, x: i16, y: i16) -> Option<WidgetId> {
@@ -879,7 +880,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     detail if detail == u8::from(ButtonIndex::M1) => {
-                        app.click(event.event_x, event.event_y, event.state.into())?;
+                        if let Some(copy_text) =
+                            app.click(event.event_x, event.event_y, event.state.into())?
+                        {
+                            xwin.set_clipboard_text(copy_text)?;
+                        }
                         if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
                             app.render(&mut fb, &palette);
                             xwin.draw(&fb)?;

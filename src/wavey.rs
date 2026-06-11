@@ -28,15 +28,15 @@ const CLOCK_COLON_SRC_X: usize = 36;
 const CLOCK_COLON_SRC_Y: usize = 26;
 const CLOCK_COLON_H: usize = 22;
 
-const TUNER_ALL_Y: usize = 7;
-const TUNER_X: usize = 102;
+const TUNER_ALL_Y: usize = 5;
+const TUNER_X: usize = 98;
 const TUNER_Y: usize = TUNER_ALL_Y + 12;
-const TUNER_W: usize = 96;
+const TUNER_W: usize = 94;
 const TUNER_H: usize = 26;
 const TUNER_MARK_Y: usize = TUNER_ALL_Y + 23;
 const TUNER_MARK_SIZE: usize = 5;
-const LABEL_ABOVE_Y: usize = TUNER_ALL_Y + 9;
-const LABEL_BELOW_Y: usize = TUNER_ALL_Y + 24;
+const LABEL_ABOVE_Y: usize = TUNER_ALL_Y + 14;
+const LABEL_BELOW_Y: usize = TUNER_ALL_Y + 30;
 
 const MEDIA_BUTTON_X: usize = 185;
 const MEDIA_BUTTON_Y: usize = 4;
@@ -58,7 +58,15 @@ const MAX_VOLUME: u8 = 100;
 const CLOCK_REFRESH: Duration = Duration::from_millis(250);
 const VOLUME_REFRESH: Duration = Duration::from_secs(3);
 const TITLE_REFRESH: Duration = Duration::from_secs(1);
-const TITLE_GAP: usize = 3;
+// Song title display: TITLE_X/TITLE_Y position the text's top-left corner,
+// TITLE_W is the fixed text window width (longer titles marquee through it);
+// the black box extends TITLE_BOX_PAD around the window on every side.
+const TITLE_X: usize = TUNER_X - 20;
+const TITLE_Y: usize = 47;
+const TITLE_W: usize = TUNER_W + 24;
+const TITLE_BOX_PAD: usize = 2;
+const MARQUEE_STEP: Duration = Duration::from_millis(60);
+const MARQUEE_SEP: &str = "  ~  ";
 const TITLE_READ_TIMEOUT: Duration = Duration::from_millis(200);
 
 #[derive(Clone)]
@@ -88,6 +96,8 @@ pub(crate) struct Wavey {
     last_volume_check: Instant,
     last_title_check: Instant,
     current_title: String,
+    marquee_offset: usize,
+    last_marquee_step: Instant,
     playing: bool,
 }
 
@@ -107,6 +117,8 @@ impl Wavey {
             last_volume_check: Instant::now(),
             last_title_check: Instant::now(),
             current_title: String::new(),
+            marquee_offset: 0,
+            last_marquee_step: Instant::now(),
             playing: false,
         };
         wavey.resume_running_player();
@@ -135,7 +147,9 @@ impl Wavey {
     }
 
     pub(crate) fn height(&self) -> usize {
-        self.image.height + TITLE_GAP + self.font.cell_h()
+        self.image
+            .height
+            .max(TITLE_Y + self.font.cell_h() + TITLE_BOX_PAD)
     }
 
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
@@ -182,44 +196,77 @@ impl Wavey {
             };
             if title != self.current_title {
                 self.current_title = title;
+                self.marquee_offset = 0;
                 dirty = true;
             }
+        }
+
+        if self.font.text_width(&self.current_title) > TITLE_W
+            && now.duration_since(self.last_marquee_step) >= MARQUEE_STEP
+        {
+            self.last_marquee_step = now;
+            let loop_w =
+                self.font.text_width(&self.current_title) + self.font.text_width(MARQUEE_SEP);
+            self.marquee_offset = (self.marquee_offset + 1) % loop_w;
+            dirty = true;
         }
 
         dirty
     }
 
-    pub(crate) fn click(&mut self, x: i16, y: i16) -> bool {
+    /// Returns text to copy to the clipboard when the click asks for it.
+    pub(crate) fn click(&mut self, x: i16, y: i16) -> Option<String> {
         if x < 0 || y < 0 {
-            return false;
+            return None;
         }
         let x = x as usize;
         let y = y as usize;
 
         if let Some(button) = media_button_at(x, y) {
             self.press_media_button(button);
-            return true;
+            return None;
         }
 
         if self.clock_contains(x, y) {
             self.clock_24h = !self.clock_24h;
             self.last_clock_text = clock_text(self.clock_24h);
-            return true;
+            return None;
         }
 
         if self.knob_contains(x, y) {
             self.dragging_knob = true;
             self.set_volume_from_point(x, y, false);
-            return true;
+            return None;
         }
 
         if self.tuner_contains(x, y) {
             self.station = self.station_at(x);
             self.play_station();
-            return true;
+            return None;
         }
 
-        false
+        if self.title_contains(x, y) {
+            return self.title_copy_text();
+        }
+
+        None
+    }
+
+    fn title_contains(&self, x: usize, y: usize) -> bool {
+        !self.current_title.is_empty()
+            && (TITLE_X.saturating_sub(TITLE_BOX_PAD)..TITLE_X + TITLE_W + TITLE_BOX_PAD)
+                .contains(&x)
+            && (TITLE_Y.saturating_sub(TITLE_BOX_PAD)
+                ..TITLE_Y + self.font.cell_h() + TITLE_BOX_PAD)
+                .contains(&y)
+    }
+
+    fn title_copy_text(&self) -> Option<String> {
+        let title = self.current_title.clone();
+        match self.mpv_property("path").as_ref().and_then(json_string) {
+            Some(url) => Some(format!("{title}\n{url}")),
+            None => Some(title),
+        }
     }
 
     pub(crate) fn release(&mut self) -> bool {
@@ -488,16 +535,35 @@ impl Wavey {
             return;
         }
 
-        let text = fit_text(&self.font, &self.current_title, self.image.width);
-        let text_w = self.font.text_width(&text);
-        let x = self.image.width.saturating_sub(text_w) / 2;
-        self.font.draw_text(
+        let y = TITLE_Y;
+        fb.fill_rect(
+            TITLE_X.saturating_sub(TITLE_BOX_PAD),
+            y.saturating_sub(TITLE_BOX_PAD),
+            TITLE_W + TITLE_BOX_PAD * 2,
+            self.font.cell_h() + TITLE_BOX_PAD * 2,
+            palette.color(palette_color::BLACK),
+        );
+
+        let cream = palette.color(palette_color::CREAM);
+        let text_w = self.font.text_width(&self.current_title);
+        if text_w <= TITLE_W {
+            let x = TITLE_X + (TITLE_W - text_w) / 2;
+            self.font.draw_text(fb, &self.current_title, x, y, 1, cream);
+            return;
+        }
+
+        // Two copies around the separator cover the window for any pixel
+        // offset within the loop (title width + separator width).
+        let looped = format!("{}{MARQUEE_SEP}{}", self.current_title, self.current_title);
+        self.font.draw_text_clipped(
             fb,
-            &text,
-            x,
-            self.image.height + TITLE_GAP,
+            &looped,
+            TITLE_X as isize - self.marquee_offset as isize,
+            y,
             1,
-            palette.color(palette_color::CREAM),
+            cream,
+            TITLE_X,
+            TITLE_W,
         );
     }
 }
@@ -515,10 +581,19 @@ fn title_from_metadata(value: &serde_json::Value) -> Option<String> {
 
 fn track_line_from_metadata(value: &serde_json::Value) -> Option<String> {
     let object = value.as_object()?;
+    let title = title_from_metadata(value);
+    // Untagged web tracks (e.g. SoundCloud) have no artist tag, only the
+    // uploading account; use it unless the title already names the artist
+    // dash-style, as YouTube channel uploads usually do.
     let artist = ["artist", "album_artist", "albumartist"]
         .iter()
-        .find_map(|key| metadata_value(object, key));
-    let title = title_from_metadata(value);
+        .find_map(|key| metadata_value(object, key))
+        .or_else(|| {
+            if title.as_deref().is_some_and(|title| title.contains(" - ")) {
+                return None;
+            }
+            metadata_value(object, "uploader")
+        });
 
     match (artist, title) {
         (Some(artist), Some(title)) => {
@@ -558,31 +633,6 @@ fn clean_title(title: String) -> Option<String> {
     let title = deunicode::deunicode(&title);
     let title = title.split_whitespace().collect::<Vec<&str>>().join(" ");
     (!title.is_empty()).then_some(title)
-}
-
-fn fit_text(font: &BitmapFont, text: &str, max_width: usize) -> String {
-    if font.text_width(text) <= max_width {
-        return text.to_string();
-    }
-
-    let ellipsis = "...";
-    let ellipsis_w = font.text_width(ellipsis);
-    if ellipsis_w >= max_width {
-        return String::new();
-    }
-
-    let mut fitted = String::new();
-    let mut width = 0;
-    for ch in text.chars() {
-        let next_w = font.advance(ch);
-        if width + next_w + ellipsis_w > max_width {
-            break;
-        }
-        fitted.push(ch);
-        width += next_w;
-    }
-    fitted.push_str(ellipsis);
-    fitted
 }
 
 fn media_button_at(x: usize, y: usize) -> Option<MediaButton> {
@@ -910,7 +960,7 @@ fn parse_station(line: &str) -> Option<Station> {
         return None;
     }
     Some(Station {
-        label: label.chars().take(5).collect(),
+        label: label.chars().take(6).collect(),
         mpv_args: mpv_args.trim().to_string(),
     })
 }
@@ -1044,6 +1094,36 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_line_falls_back_to_uploader_when_untagged() {
+        let soundcloud = serde_json::json!({
+            "title": "Double Spire (Unbroken Edit)",
+            "uploader": "UnbrokenOne",
+        });
+        let tagged = serde_json::json!({
+            "title": "Ask Me",
+            "artist": "Duck Sauce",
+            "uploader": "ducksaucenyc",
+        });
+        let youtube_upload = serde_json::json!({
+            "title": "Soichi Terada - Double Spire",
+            "uploader": "TheDailyDose",
+        });
+
+        assert_eq!(
+            track_line_from_metadata(&soundcloud).as_deref(),
+            Some("UnbrokenOne - Double Spire (Unbroken Edit)")
+        );
+        assert_eq!(
+            track_line_from_metadata(&tagged).as_deref(),
+            Some("Duck Sauce - Ask Me")
+        );
+        assert_eq!(
+            track_line_from_metadata(&youtube_upload).as_deref(),
+            Some("Soichi Terada - Double Spire")
+        );
+    }
 
     #[test]
     fn station_from_script_opts_reads_stamped_index() {

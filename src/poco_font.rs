@@ -5,7 +5,7 @@ use crate::bitmap_font::FontSpec;
 pub(crate) const POCO_ATLAS_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/assets/poco_ascii.png");
 pub(crate) const POCO_CELL_W: usize = 6;
-pub(crate) const POCO_CELL_H: usize = 12;
+pub(crate) const POCO_CELL_H: usize = 7;
 pub(crate) const POCO_COLS: usize = 16;
 pub(crate) const POCO_X_ORIGIN: usize = 0;
 #[rustfmt::skip]

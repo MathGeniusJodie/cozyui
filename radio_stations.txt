@@ -7,8 +7,7 @@
 
 local | --shuffle --no-audio-display ~/Desktop/allfiles/jangles/* ~/Desktop/allfiles/musiclib/* ~/Desktop/allfiles/work_music/* ~/Downloads/gbb26/*
 pool | --shuffle --no-audio-display --playlist=~/quickscripts/poolsuite.txt
-yt | --shuffle --no-video --playlist=~/quickscripts/yt_dj.txt
+oldies | --shuffle --no-video --playlist=~/quickscripts/yt_dj.txt
 synth | --no-video https://www.youtube.com/watch?v=4xDzrJKXOOY
-lofi | --no-video https://www.youtube.com/watch?v=jfKfPfyJRdk
-dd | --shuffle --no-video https://www.youtube.com/@TheDailyDoseMusic/videos
-ng | --shuffle --no-video  https://www.youtube.com/@NiceGuys/videos
+indie1 | --shuffle --no-video https://www.youtube.com/@TheDailyDoseMusic/videos
+indie2 | --shuffle --no-video  https://www.youtube.com/@NiceGuys/videos
