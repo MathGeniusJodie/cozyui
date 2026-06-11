@@ -2,18 +2,27 @@
 // student does all the actual work and gives the final answer.
 //
 // Flow (always, no escalation tool):
-//   1. senpai (anthropic/claude-opus-4.5) reads the task, emits a terse
-//      free-form briefing. Aggressively capped output; telegraphic style, so
-//      truncation degrades gracefully.
-//   2. student (@preset/fast) executes with tools (run_python, wolfram,
-//      web_qa) with the briefing in context, and answers the user.
+//   1. senpai (anthropic/claude-opus-4.5) reads the user's message (a task,
+//      a question, or casual chat), emits a terse free-form briefing.
+//      Aggressively capped output; telegraphic style, so truncation degrades
+//      gracefully.
+//   2. student (@preset/fast) responds, with tools (run_python, wolfram,
+//      web_qa) available and the briefing in context.
 //
 // Cost notes: senpai's system prompt carries cache_control (cached input is
 // ~1/50th the price of output tokens, so the fixed prefix is deliberately
 // rich). senpai's output is the expensive part => terse style + low
 // max_tokens.
 //
-// Run: OPENROUTER_API_KEY=... cargo run -- "your task"
+// History across turns is curated by us (the chat API is stateless): only
+// raw user/assistant exchanges are kept — senpai briefings and tool-call
+// traffic never leave the turn they happened in. Old messages are compacted
+// into archive blocks: full text kept locally, a one-line summary (written by
+// the cheap student model) shown in context. Senpai alone can pull a block's
+// full text back via the read_block tool.
+//
+// Run: OPENROUTER_API_KEY=... cargo run -- "one-shot message"
+//      OPENROUTER_API_KEY=... cargo run            (interactive chat)
 
 use serde_json::{json, Value};
 use std::io::Write;
@@ -21,6 +30,8 @@ use std::process::{Command, Stdio};
 
 const API: &str = "https://openrouter.ai/api/v1/chat/completions";
 const SENPAI: &str = "anthropic/claude-opus-4.5";
+// Note: OpenRouter rejects presets whose fallback list has more than 3
+// models ("'models' array must have 3 items or fewer").
 const STUDENT: &str = "@preset/fast";
 
 // ---------------------------------------------------------------- transport
@@ -46,6 +57,13 @@ fn curl_post(body: &Value) -> Value {
 }
 
 fn choice(resp: &Value) -> &Value {
+    if resp["choices"][0].is_null() {
+        // Error responses have no choices; don't fail silently.
+        eprintln!(
+            "[api error: {}]",
+            resp["error"]["message"].as_str().unwrap_or("unknown")
+        );
+    }
     &resp["choices"][0]
 }
 
@@ -109,63 +127,256 @@ fn web_qa(question: &str) -> String {
         .to_string()
 }
 
+// ------------------------------------------------------------ chat archive
+// Older conversation is compacted into blocks: full text kept locally, a
+// super-short summary (made by the cheap student model) shown in context.
+// Senpai can pull a block's full text by id via the read_block tool — but
+// only senpai, and only when it thinks the block matters.
+
+const RECENT_KEEP: usize = 6; // raw messages always shown verbatim
+const COMPACT_TRIGGER: usize = 10; // overflow beyond RECENT_KEEP that triggers compaction
+const MIN_BLOCK: usize = 2; // block size clamps: keep blocks meaningful even
+const MAX_BLOCK: usize = 24; // when the boundary model answers nonsense
+
+struct Block {
+    summary: String,
+    messages: Vec<Value>,
+}
+
+#[derive(Default)]
+struct Chat {
+    archive: Vec<Block>,
+    recent: Vec<Value>,
+}
+
+impl Chat {
+    /// Fold the oldest messages into summarized blocks once enough overflow
+    /// has built up beyond the verbatim tail. Blocks follow topic boundaries
+    /// (found by the cheap model), so each summary covers one coherent
+    /// subject instead of an arbitrary slice.
+    fn compact(&mut self) {
+        while self.recent.len() >= RECENT_KEEP + COMPACT_TRIGGER {
+            let region = self.recent.len() - RECENT_KEEP;
+            let cut = topic_boundary(&self.recent[..region])
+                .clamp(MIN_BLOCK, region.min(MAX_BLOCK));
+            let messages: Vec<Value> = self.recent.drain(..cut).collect();
+            let summary = summarize_block(&messages);
+            eprintln!(
+                "[archived block {} ({} messages): {summary}]",
+                self.archive.len(),
+                messages.len()
+            );
+            self.archive.push(Block { summary, messages });
+        }
+    }
+
+    /// One user-role message listing the archive summaries, or None.
+    fn summaries_message(&self) -> Option<Value> {
+        if self.archive.is_empty() {
+            return None;
+        }
+        let lines: Vec<String> = self
+            .archive
+            .iter()
+            .enumerate()
+            .map(|(id, block)| format!("[block {id}] {}", block.summary))
+            .collect();
+        Some(json!({"role": "user", "content": format!(
+            "(older conversation, summarized into blocks)\n{}",
+            lines.join("\n")
+        )}))
+    }
+
+    fn read_block(&self, id: usize) -> String {
+        match self.archive.get(id) {
+            Some(block) => block_transcript(&block.messages),
+            None => format!("no such block: {id}"),
+        }
+    }
+}
+
+fn block_transcript(messages: &[Value]) -> String {
+    messages
+        .iter()
+        .map(|message| {
+            format!(
+                "{}: {}",
+                message["role"].as_str().unwrap_or("?"),
+                message["content"].as_str().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const BOUNDARY_SYSTEM: &str = "\
+You will see a numbered chat transcript. The earliest messages form one
+topical block. Reply with ONLY the number of the first message that starts a
+clearly NEW topic. If the whole excerpt stays on one topic, reply with the
+count of messages. Nothing but the number.";
+
+/// Where the first topic ends in `messages`: index of the first message that
+/// starts a new topic, i.e. the size of the leading block. Falls back to a
+/// fixed cut if the model's answer doesn't parse.
+fn topic_boundary(messages: &[Value]) -> usize {
+    let numbered: String = messages
+        .iter()
+        .enumerate()
+        .map(|(i, message)| {
+            format!(
+                "{i} {}: {}\n",
+                message["role"].as_str().unwrap_or("?"),
+                message["content"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    let resp = curl_post(&json!({
+        "model": STUDENT, "max_tokens": 10,
+        "messages": [
+            {"role": "system", "content": BOUNDARY_SYSTEM},
+            {"role": "user", "content": numbered},
+        ],
+    }));
+    choice(&resp)["message"]["content"]
+        .as_str()
+        .and_then(|text| {
+            let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+            digits.parse().ok()
+        })
+        .unwrap_or(8)
+}
+
+const SUMMARIZER_SYSTEM: &str = "\
+Compress this chat excerpt into one tiny summary line (<=25 words).
+Start with the topic in a few words. Then append any standalone facts that
+do NOT follow from the topic (names, pets, preferences, decisions, dates) —
+the summary is the only way anyone can know to look for them later.
+Telegraphic, no preamble.
+Example: discussion about baking bread; user's cat is called Bingus.";
+
+fn summarize_block(messages: &[Value]) -> String {
+    let resp = curl_post(&json!({
+        "model": STUDENT, "max_tokens": 80,
+        "messages": [
+            {"role": "system", "content": SUMMARIZER_SYSTEM},
+            {"role": "user", "content": block_transcript(messages)},
+        ],
+    }));
+    let text = choice(&resp)["message"]["content"].as_str().unwrap_or("");
+    if text.trim().is_empty() {
+        "(summary unavailable)".to_string()
+    } else {
+        text.trim().to_string()
+    }
+}
+
 // ------------------------------------------------------------------- senpai
 // Always runs first, once. Rich fixed prefix (cached), terse output.
 
 const SENPAI_SYSTEM: &str = "\
 You are senpai: a terse senior advisor briefing a not very smart or knowledgable junior agent before it
-attempts a task. The junior agent doesn't know better, you have to give them the best chance of succeeding
-with the minimum ammount of advice. (hard cap of 100 tokens).
+responds to a user message. The message may be a task, a question, or just casual chat. The junior agent
+doesn't know better, you have to give them the best chance of responding well with the minimum ammount
+of advice. (hard cap of 100 tokens).
 Telegraphic style permitted: imperative fragments, no full sentences required.
 
 The junior has tools: run_python (python3 -c), wolfram
 (wolframscript, symbolic/exact math), web_qa (one factual question -> short
 web-sourced answer with epistemic status, or NOT FOUND).
+For casual conversation tools are usually wrong: say so, and point out anything
+the junior might miss (tone, subtext, what the user actually wants to hear).
+
+In long conversations the oldest messages arrive as one-line summaries labeled
+[block N]; only the latest messages are verbatim. You have one tool,
+read_block(id), returning a block's full text. Use it only when that block
+plausibly matters for THIS reply (e.g. the user references something old);
+reading costs money, most replies need no blocks.
 
 Bad Example:
-  task: integral of x^2 sin x, plus current marathon WR
+  message: integral of x^2 sin x, plus current marathon WR
   you: 'use the wolfram and web_qa tool'
   reason: you could be more idiot-proof.
 
 Good Example:
-  task: integral of x^2 sin x, plus current marathon WR
+  message: integral of x^2 sin x, plus current marathon WR
   you: wolfram Integrate[x^2 Sin[x],x], web_qa marathon WR, WR likely stands for world record
 
 Good Example:
-    task: How do I divide 4 oranges among 4 children if I have only one knife?
+    message: How do I divide 4 oranges among 4 children if I have only one knife?
     you: the knife is a red herring, 4 oranges, 4 children, give each child one orange.
 
+Good Example:
+    message: ugh, my deploy broke at 2am again lol
+    you: venting, not a request. no tools. commiserate first, maybe one light question; don't lecture.
+
 Bad (never do):
-    you: 'Looking at this task, the first thing to consider...'
+    you: 'Looking at this message, the first thing to consider...'
     reason: lots of wasted tokens.";
 
-fn senpai_briefing(task: &str) -> String {
-    let messages = vec![
+const SENPAI_TOOLS_JSON: &str = r#"[
+ {"type":"function","function":{"name":"read_block",
+  "description":"Retrieve the full text of a summarized conversation block by its id.",
+  "parameters":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}}
+]"#;
+
+fn senpai_briefing(chat: &Chat, user_message: &str) -> String {
+    let tools: Value = serde_json::from_str(SENPAI_TOOLS_JSON).unwrap();
+    let mut messages = vec![
         // cache_control: fixed prefix cached by Anthropic via OpenRouter
         json!({"role": "system", "content": [{
             "type": "text", "text": SENPAI_SYSTEM,
             "cache_control": {"type": "ephemeral"}
         }]}),
-        json!({"role": "user", "content": format!("task: {task}")}),
     ];
-
-    let resp = curl_post(&json!({
-        "model": SENPAI, "max_tokens": 150, "messages": messages,
-    }));
-    let text = choice(&resp)["message"]["content"].as_str().unwrap_or("");
-    if text.trim().is_empty() {
-        return "(senpai unavailable; proceed with your own judgement)".into();
+    if let Some(summaries) = chat.summaries_message() {
+        messages.push(summaries);
     }
-    text.trim().to_string()
+    messages.extend(chat.recent.iter().cloned());
+    messages.push(json!({"role": "user", "content": format!("message: {user_message}")}));
+
+    // Small tool loop: senpai may pull a few archive blocks before briefing.
+    for _ in 0..4 {
+        let resp = curl_post(&json!({
+            "model": SENPAI, "max_tokens": 150, "messages": messages, "tools": tools,
+        }));
+        let ch = choice(&resp);
+        let msg = ch["message"].clone();
+
+        if ch["finish_reason"] == "tool_calls" {
+            messages.push(msg.clone());
+            for tc in msg["tool_calls"].as_array().cloned().unwrap_or_default() {
+                let args: Value = serde_json::from_str(
+                    tc["function"]["arguments"].as_str().unwrap_or("{}"),
+                ).unwrap_or(json!({}));
+                let id = args["id"].as_u64().unwrap_or(u64::MAX) as usize;
+                eprintln!("[senpai read block {id}]");
+                messages.push(json!({
+                    "role": "tool", "tool_call_id": tc["id"],
+                    "content": chat.read_block(id)
+                }));
+            }
+            continue;
+        }
+
+        let text = msg["content"].as_str().unwrap_or("").trim();
+        if !text.is_empty() {
+            return text.to_string();
+        }
+        break;
+    }
+    "(senpai unavailable; proceed with your own judgement)".into()
 }
 
 // ------------------------------------------------------------------ student
 
 const STUDENT_SYSTEM: &str = "\
-You are a fast agent with tools: run_python, wolfram, web_qa.
-A smart and wise senpai has reviewed the task; their briefing is included
-with the task. Follow it unless evidence contradicts it. Work step by step,
-then answer the user directly and concisely.";
+You are a helpful assistant with tools: run_python, wolfram, web_qa.
+The user's message may be a task, a question, or casual conversation; tools
+are only for when the answer actually needs them. A smart and wise senpai has
+read the message; their private briefing is attached to it. Follow it unless
+evidence contradicts it; never mention the briefing or senpai to the user.
+Work step by step when the message calls for it, then reply to the user
+directly, concisely, and in a tone that matches theirs.";
 
 const STUDENT_TOOLS_JSON: &str = r#"[
  {"type":"function","function":{"name":"run_python",
@@ -179,18 +390,25 @@ const STUDENT_TOOLS_JSON: &str = r#"[
   "parameters":{"type":"object","properties":{"question":{"type":"string"}},"required":["question"]}}}
 ]"#;
 
-fn run_task(task: &str) {
-    // 1. senpai briefs.
-    let briefing = senpai_briefing(task);
+// One conversation turn. `chat` holds the cleaned transcript of earlier
+// turns: raw user/assistant messages only, with the oldest folded into
+// summarized archive blocks. The chat API is stateless, so curation is ours —
+// briefings and tool traffic exist only in this turn's working transcript and
+// are never carried forward. Appends this turn's raw exchange to the chat.
+fn run_turn(chat: &mut Chat, user_message: &str) {
+    // 1. senpai briefs (summaries + recent messages; may pull blocks).
+    let briefing = senpai_briefing(chat, user_message);
     eprintln!("--- senpai ---\n{briefing}\n--------------");
 
-    // 2. student executes.
+    // 2. student responds (same compacted view, no retrieval tool).
     let tools: Value = serde_json::from_str(STUDENT_TOOLS_JSON).unwrap();
-    let mut messages = vec![
-        json!({"role": "system", "content": STUDENT_SYSTEM}),
-        json!({"role": "user", "content":
-            format!("TASK: {task}\n\nSENPAI BRIEFING:\n{briefing}")}),
-    ];
+    let mut messages = vec![json!({"role": "system", "content": STUDENT_SYSTEM})];
+    if let Some(summaries) = chat.summaries_message() {
+        messages.push(summaries);
+    }
+    messages.extend(chat.recent.iter().cloned());
+    messages.push(json!({"role": "user", "content":
+        format!("USER MESSAGE: {user_message}\n\nSENPAI BRIEFING (private):\n{briefing}")}));
 
     for _step in 0..20 {
         let resp = curl_post(&json!({
@@ -222,20 +440,43 @@ fn run_task(task: &str) {
             continue;
         }
 
-        // 3. student gives the final answer.
-        println!("{}", msg["content"].as_str().unwrap_or("(no content)"));
+        // 3. student replies to the user; only the raw exchange is kept.
+        let reply = msg["content"].as_str().unwrap_or("(no content)");
+        println!("{reply}");
+        commit_turn(chat, user_message, reply);
         return;
     }
     eprintln!("step limit reached");
+    commit_turn(chat, user_message, "(I ran out of steps before finishing.)");
+}
+
+fn commit_turn(chat: &mut Chat, user_message: &str, reply: &str) {
+    chat.recent.push(json!({"role": "user", "content": user_message}));
+    chat.recent.push(json!({"role": "assistant", "content": reply}));
+    chat.compact();
 }
 
 fn main() {
-    let task = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
-    let task = if task.is_empty() {
-        "What is the integral of x^2 * sin(x), verified numerically, and \
-         what's the current world record for the marathon?".to_string()
-    } else {
-        task
-    };
-    run_task(&task);
+    let message = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    let mut chat = Chat::default();
+    if !message.is_empty() {
+        run_turn(&mut chat, &message);
+        return;
+    }
+
+    // No argument: interactive chat. History carries across turns, cleaned
+    // and compacted.
+    let stdin = std::io::stdin();
+    loop {
+        eprint!("you: ");
+        let mut line = String::new();
+        if stdin.read_line(&mut line).unwrap_or(0) == 0 {
+            return; // EOF
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        run_turn(&mut chat, line);
+    }
 }
