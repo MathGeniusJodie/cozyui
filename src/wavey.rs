@@ -5,6 +5,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::bitmap_font::BitmapFont;
@@ -94,7 +96,7 @@ pub(crate) struct Wavey {
     last_clock_text: String,
     last_clock_check: Instant,
     last_volume_check: Instant,
-    last_title_check: Instant,
+    title_updates: mpsc::Receiver<String>,
     current_title: String,
     marquee_offset: usize,
     last_marquee_step: Instant,
@@ -115,7 +117,7 @@ impl Wavey {
             last_clock_text: clock_text(false),
             last_clock_check: Instant::now(),
             last_volume_check: Instant::now(),
-            last_title_check: Instant::now(),
+            title_updates: spawn_title_poller(),
             current_title: String::new(),
             marquee_offset: 0,
             last_marquee_step: Instant::now(),
@@ -130,7 +132,7 @@ impl Wavey {
     /// --script-opts at launch, so the running player itself records which
     /// station it is; querying any property doubles as the liveness check.
     fn resume_running_player(&mut self) {
-        let Some(opts) = self.mpv_property("script-opts") else {
+        let Some(opts) = mpv_property("script-opts") else {
             return;
         };
 
@@ -187,13 +189,8 @@ impl Wavey {
             }
         }
 
-        if now.duration_since(self.last_title_check) >= TITLE_REFRESH {
-            self.last_title_check = now;
-            let title = if self.playing {
-                self.current_mpv_title().unwrap_or_default()
-            } else {
-                String::new()
-            };
+        if let Some(title) = self.title_updates.try_iter().last() {
+            let title = if self.playing { title } else { String::new() };
             if title != self.current_title {
                 self.current_title = title;
                 self.marquee_offset = 0;
@@ -263,7 +260,7 @@ impl Wavey {
 
     fn title_copy_text(&self) -> Option<String> {
         let title = self.current_title.clone();
-        match self.mpv_property("path").as_ref().and_then(json_string) {
+        match mpv_property("path").as_ref().and_then(json_string) {
             Some(url) => Some(format!("{title}\n{url}")),
             None => Some(title),
         }
@@ -377,68 +374,6 @@ impl Wavey {
         ensure_player_session();
         queue_player_command(&command_line);
         self.playing = true;
-    }
-
-    fn current_mpv_title(&self) -> Option<String> {
-        let chapter_title = self
-            .mpv_property("chapter-metadata")
-            .as_ref()
-            .and_then(title_from_metadata);
-        let media_title = self
-            .mpv_property("media-title")
-            .as_ref()
-            .and_then(json_string);
-
-        if let Some(chapter_title) = chapter_title {
-            if let Some(media_title) = media_title.as_deref()
-                && !media_title.eq_ignore_ascii_case(&chapter_title)
-            {
-                return clean_title(format!("{media_title} - {chapter_title}"));
-            }
-            return clean_title(chapter_title);
-        }
-
-        self.mpv_property("metadata")
-            .as_ref()
-            .and_then(track_line_from_metadata)
-            .or(media_title)
-            .and_then(clean_title)
-    }
-
-    fn mpv_property(&self, property: &str) -> Option<serde_json::Value> {
-        let mut stream = UnixStream::connect(mpv_ipc_path()).ok()?;
-        let _ = stream.set_read_timeout(Some(TITLE_READ_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(TITLE_READ_TIMEOUT));
-
-        let message = serde_json::json!({
-            "command": ["get_property", property],
-            "request_id": 1
-        })
-        .to_string();
-        stream.write_all(message.as_bytes()).ok()?;
-        stream.write_all(b"\n").ok()?;
-
-        let mut reader = BufReader::new(stream);
-        for _ in 0..8 {
-            let mut line = String::new();
-            if reader.read_line(&mut line).ok()? == 0 {
-                return None;
-            }
-            let response = serde_json::from_str::<serde_json::Value>(&line).ok()?;
-            if response
-                .get("request_id")
-                .and_then(serde_json::Value::as_i64)
-                != Some(1)
-            {
-                continue;
-            }
-            if response.get("error").and_then(serde_json::Value::as_str) != Some("success") {
-                return None;
-            }
-            return response.get("data").cloned();
-        }
-
-        None
     }
 
     fn press_media_button(&mut self, button: MediaButton) {
@@ -658,6 +593,82 @@ fn media_button_at(x: usize, y: usize) -> Option<MediaButton> {
         3 => Some(MediaButton::Forward),
         _ => None,
     }
+}
+
+/// The currently playing track's display title, fetched from mpv over IPC.
+/// Blocking (socket round trips with read timeouts) — call off the UI thread.
+fn current_mpv_title() -> Option<String> {
+    let chapter_title = mpv_property("chapter-metadata")
+        .as_ref()
+        .and_then(title_from_metadata);
+    let media_title = mpv_property("media-title").as_ref().and_then(json_string);
+
+    if let Some(chapter_title) = chapter_title {
+        if let Some(media_title) = media_title.as_deref()
+            && !media_title.eq_ignore_ascii_case(&chapter_title)
+        {
+            return clean_title(format!("{media_title} - {chapter_title}"));
+        }
+        return clean_title(chapter_title);
+    }
+
+    mpv_property("metadata")
+        .as_ref()
+        .and_then(track_line_from_metadata)
+        .or(media_title)
+        .and_then(clean_title)
+}
+
+fn mpv_property(property: &str) -> Option<serde_json::Value> {
+    let mut stream = UnixStream::connect(mpv_ipc_path()).ok()?;
+    let _ = stream.set_read_timeout(Some(TITLE_READ_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(TITLE_READ_TIMEOUT));
+
+    let message = serde_json::json!({
+        "command": ["get_property", property],
+        "request_id": 1
+    })
+    .to_string();
+    stream.write_all(message.as_bytes()).ok()?;
+    stream.write_all(b"\n").ok()?;
+
+    let mut reader = BufReader::new(stream);
+    for _ in 0..8 {
+        let mut line = String::new();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        let response = serde_json::from_str::<serde_json::Value>(&line).ok()?;
+        if response
+            .get("request_id")
+            .and_then(serde_json::Value::as_i64)
+            != Some(1)
+        {
+            continue;
+        }
+        if response.get("error").and_then(serde_json::Value::as_str) != Some("success") {
+            return None;
+        }
+        return response.get("data").cloned();
+    }
+
+    None
+}
+
+/// Poll mpv for the playing title off the UI thread; a wedged mpv then can't
+/// stall rendering. The thread exits once the receiver is dropped.
+fn spawn_title_poller() -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            let title = current_mpv_title().unwrap_or_default();
+            if tx.send(title).is_err() {
+                return;
+            }
+            thread::sleep(TITLE_REFRESH);
+        }
+    });
+    rx
 }
 
 fn mpv_ipc_path() -> PathBuf {

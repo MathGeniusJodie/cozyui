@@ -468,10 +468,13 @@ impl Framebuffer {
         fill_pattern(&mut self.pixels, &color);
     }
 
+    /// Fill the whole framebuffer with `sprite` scaled up, repeating edge
+    /// pixels past the sprite's extent. Transparent pixels keep the
+    /// framebuffer's existing content (e.g. a widget's see-through corners).
     pub(crate) fn clear_scaled(&mut self, sprite: &Sprite, scale: usize, palette: &Palette) {
         // Resolve each source row once into a byte row, write it, and copy it
-        // to the remaining rows of the scaled band. Transparent pixels keep
-        // the framebuffer's existing content, which rules out the row copy.
+        // to the remaining rows of the scaled band; rows with transparency
+        // fall back to per-pixel writes since they can't be blanket-copied.
         let mut row = vec![0u8; self.width * Self::BYTES_PER_PIXEL];
         let sx_map: Vec<usize> = (0..self.width)
             .map(|x| (x / scale).min(sprite.width - 1))
