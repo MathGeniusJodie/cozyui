@@ -7,7 +7,7 @@ use crate::palette_color;
 use crate::pixolde_bold_font;
 use crate::poco_font;
 use crate::rozha_one_48_font;
-use crate::{Framebuffer, Image, Palette, Rgba, draw_filled_circle};
+use crate::{Framebuffer, Paint, Palette, Rgb, Rgba, Sprite, draw_filled_circle};
 
 const WIDTH: usize = 116;
 const HEIGHT: usize = 116;
@@ -67,7 +67,7 @@ struct DateParts {
 }
 
 pub(crate) struct Day {
-    background: Image,
+    background: Sprite,
     label_font: BitmapFont,
     number_font: BitmapFont,
     calendar_font: BitmapFont,
@@ -79,7 +79,7 @@ pub(crate) struct Day {
 impl Day {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
-            background: Image::load(BACKGROUND_PATH, palette)?,
+            background: Sprite::load_native(BACKGROUND_PATH, palette)?,
             label_font: BitmapFont::load(&pixolde_bold_font::PIXOLDE_BOLD_SPEC)?,
             number_font: BitmapFont::load(&rozha_one_48_font::ROZHA_ONE_48_SPEC)?,
             calendar_font: BitmapFont::load(&poco_font::POCO_SPEC)?,
@@ -102,14 +102,15 @@ impl Day {
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.draw_image_shadow(
+        fb.draw_sprite_silhouette(
             &self.background,
             SHADOW_X_OFFSET,
             SHADOW_Y_OFFSET,
             1,
-            palette.color(app_color::BACKGROUND_SHADOW),
+            palette,
+            Paint::Solid(app_color::BACKGROUND_SHADOW),
         );
-        fb.draw_image(&self.background, 0, 0, 1);
+        fb.draw_sprite(&self.background, 0, 0, 1, palette);
 
         if self.calendar_mode {
             self.render_calendar(fb, palette);
@@ -208,7 +209,7 @@ impl Day {
         font: &BitmapFont,
         text: &str,
         y: usize,
-        color: Rgba,
+        color: Rgb,
     ) {
         let Some(bounds) = font.text_ink_bounds(text) else {
             return;
@@ -224,7 +225,7 @@ impl Day {
         font: &BitmapFont,
         text: &str,
         y: usize,
-        color: Rgba,
+        color: Rgb,
     ) {
         let x = centered_x(font.text_width(text));
         font.draw_text(fb, text, x, y, 1, color);
@@ -236,7 +237,7 @@ impl Day {
         text: &str,
         col: usize,
         y: usize,
-        color: Rgba,
+        color: Rgb,
     ) {
         let cell_x = CALENDAR_LEFT + col * CALENDAR_COL_W;
         let text_x =

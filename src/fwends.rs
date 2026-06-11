@@ -14,7 +14,7 @@ use crate::comicoro_font;
 use crate::palette_color;
 use crate::text_edit::{TextEdit, TextEditOutcome, char_len};
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Image, Palette, Rect, Rgba};
+use crate::{Framebuffer, Index, Palette, Rgb, Rgba, Sprite, Swap, TRANSPARENT};
 use serde_json::{Value, json};
 
 const SCALE: usize = 1;
@@ -108,15 +108,15 @@ const MODELS: [Model; 4] = [
 ];
 
 pub(crate) struct Fwends {
-    avatars: [Image; 4],
-    bubble: Image,
-    user_sticky: Image,
-    input_sticky: Image,
-    pencil: Image,
-    pencil_shadow: Image,
-    lamp_on_image: Image,
-    lamp_off_image: Image,
-    eraser: Image,
+    avatars: [Sprite; 4],
+    bubble: Sprite,
+    user_sticky: Sprite,
+    input_sticky: Sprite,
+    pencil: Sprite,
+    pencil_shadow: Sprite,
+    lamp_on_image: Sprite,
+    lamp_off_image: Sprite,
+    eraser: Sprite,
     font: BitmapFont,
     messages: Vec<Message>,
     input: String,
@@ -135,10 +135,10 @@ pub(crate) struct Fwends {
 impl Fwends {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         let avatars = [
-            Image::load(MODELS[0].asset_path, palette)?,
-            Image::load(MODELS[1].asset_path, palette)?,
-            Image::load(MODELS[2].asset_path, palette)?,
-            Image::load(MODELS[3].asset_path, palette)?,
+            Sprite::load_native(MODELS[0].asset_path, palette)?,
+            Sprite::load_native(MODELS[1].asset_path, palette)?,
+            Sprite::load_native(MODELS[2].asset_path, palette)?,
+            Sprite::load_native(MODELS[3].asset_path, palette)?,
         ];
         let model_slot_w = avatars.iter().map(|avatar| avatar.width).max().unwrap_or(1);
         let model_slot_h = avatars
@@ -150,17 +150,17 @@ impl Fwends {
 
         Ok(Self {
             avatars,
-            bubble: Image::load(
+            bubble: Sprite::load_native(
                 concat!(env!("CARGO_MANIFEST_DIR"), "/assets/bubble.png"),
                 palette,
             )?,
-            user_sticky: Image::load(USER_STICKY_PATH, palette)?,
-            input_sticky: Image::load(INPUT_STICKY_PATH, palette)?,
-            pencil: Image::load(FOCUS_PENCIL_PATH, palette)?,
-            pencil_shadow: Image::load(PENCIL_SHADOW_PATH, palette)?,
-            lamp_on_image: Image::load(LAMP_ON_PATH, palette)?,
-            lamp_off_image: Image::load(LAMP_OFF_PATH, palette)?,
-            eraser: Image::load(ERASER_PATH, palette)?,
+            user_sticky: Sprite::load_native(USER_STICKY_PATH, palette)?,
+            input_sticky: Sprite::load_native(INPUT_STICKY_PATH, palette)?,
+            pencil: Sprite::load_native(FOCUS_PENCIL_PATH, palette)?,
+            pencil_shadow: Sprite::load_native(PENCIL_SHADOW_PATH, palette)?,
+            lamp_on_image: Sprite::load_native(LAMP_ON_PATH, palette)?,
+            lamp_off_image: Sprite::load_native(LAMP_OFF_PATH, palette)?,
+            eraser: Sprite::load_native(ERASER_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
             messages: vec![intro_message()],
             input: String::new(),
@@ -209,11 +209,11 @@ impl Fwends {
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
 
-        self.draw_lamp(fb);
+        self.draw_lamp(fb, palette);
         self.draw_messages(fb, palette);
         self.draw_input(fb, palette);
         self.draw_selected_fwend(fb, palette);
-        self.draw_eraser(fb);
+        self.draw_eraser(fb, palette);
     }
 
     pub(crate) fn click(&mut self, x: i16, y: i16) {
@@ -395,7 +395,7 @@ impl Fwends {
                 continue;
             }
 
-            self.draw_bubble(fb, layout.x, y, layout.w, layout.h, layout.style);
+            self.draw_bubble(fb, palette, layout.x, y, layout.w, layout.h, layout.style);
             let text_x = layout.x + layout.style.pad_left;
             let mut text_y = y + layout.style.pad_top as isize;
             for line in layout.lines {
@@ -416,9 +416,11 @@ impl Fwends {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_bubble(
         &self,
         fb: &mut Framebuffer,
+        palette: &Palette,
         x: usize,
         y: isize,
         w: usize,
@@ -441,10 +443,9 @@ impl Fwends {
                 let px = x + dx;
                 let sx = stretch_source_coord(dx, w, image.width, style.left_cap, style.right_cap);
                 let sy = stretch_source_coord(dy, h, image.height, style.top_cap, style.bottom_cap);
-                let color = image.at(sx, sy);
-                if color.a == 0 {
+                let Some(color) = palette.resolve(image.at(sx, sy), px, py as usize) else {
                     continue;
-                }
+                };
                 fb.fill_rect(px * SCALE, py as usize * SCALE, SCALE, SCALE, color);
             }
         }
@@ -503,15 +504,15 @@ impl Fwends {
         self.scroll_y = self.max_scroll();
     }
 
-    fn draw_lamp(&self, fb: &mut Framebuffer) {
+    fn draw_lamp(&self, fb: &mut Framebuffer, palette: &Palette) {
         let image = self.lamp_image();
         let (x, y) = self.lamp_position();
-        fb.draw_image(image, x as isize, y as isize, SCALE);
+        fb.draw_sprite(image, x as isize, y as isize, SCALE, palette);
     }
 
-    fn draw_eraser(&self, fb: &mut Framebuffer) {
+    fn draw_eraser(&self, fb: &mut Framebuffer, palette: &Palette) {
         let (x, y) = self.eraser_position();
-        fb.draw_image(&self.eraser, x as isize, y as isize, SCALE);
+        fb.draw_sprite(&self.eraser, x as isize, y as isize, SCALE, palette);
     }
 
     fn eraser_contains(&self, x: usize, y: usize) -> bool {
@@ -524,7 +525,7 @@ impl Fwends {
             return false;
         }
 
-        self.eraser.at(x - eraser_x, y - eraser_y).a != 0
+        self.eraser.is_opaque(x - eraser_x, y - eraser_y)
     }
 
     fn eraser_position(&self) -> (usize, usize) {
@@ -546,10 +547,10 @@ impl Fwends {
             return false;
         }
 
-        image.at(x - lamp_x, y - lamp_y).a != 0
+        image.is_opaque(x - lamp_x, y - lamp_y)
     }
 
-    fn lamp_image(&self) -> &Image {
+    fn lamp_image(&self) -> &Sprite {
         if self.lamp_on {
             &self.lamp_on_image
         } else {
@@ -568,6 +569,7 @@ impl Fwends {
     fn draw_input(&self, fb: &mut Framebuffer, palette: &Palette) {
         draw_resized_image(
             fb,
+            palette,
             &self.input_sticky,
             self.input_sticky_x(),
             self.input_y(),
@@ -632,11 +634,12 @@ impl Fwends {
             lamp_x,
             lamp_y,
         );
-        fb.draw_image(
+        fb.draw_sprite(
             avatar,
             (avatar_x * SCALE) as isize,
             (avatar_y * SCALE) as isize,
             SCALE,
+            palette,
         );
     }
 
@@ -664,11 +667,12 @@ impl Fwends {
             (dest_y * SCALE) as isize,
             palette,
         );
-        fb.draw_image(
+        fb.draw_sprite(
             &self.pencil,
             (dest_x * SCALE) as isize,
             (dest_y * SCALE) as isize,
             SCALE,
+            palette,
         );
     }
 
@@ -762,7 +766,7 @@ fn draw_selection(
     max_width: usize,
     line_h: usize,
     scale: usize,
-    color: Rgba,
+    color: Rgb,
 ) {
     let Some((selection_start, selection_end)) = selection else {
         return;
@@ -802,7 +806,7 @@ fn draw_lamp_masked_ellipse(
     diameter_w: usize,
     diameter_h: usize,
     palette: &Palette,
-    lamp: &Image,
+    lamp: &Sprite,
     lamp_x: usize,
     lamp_y: usize,
 ) {
@@ -835,46 +839,46 @@ fn draw_lamp_masked_ellipse(
     }
 }
 
-fn lamp_masks_pixel(lamp: &Image, lamp_x: usize, lamp_y: usize, x: usize, y: usize) -> bool {
+fn lamp_masks_pixel(lamp: &Sprite, lamp_x: usize, lamp_y: usize, x: usize, y: usize) -> bool {
     let Some(local_x) = x.checked_sub(lamp_x) else {
         return false;
     };
     let Some(local_y) = y.checked_sub(lamp_y) else {
         return false;
     };
-    local_x < lamp.width && local_y < lamp.height && lamp.at(local_x, local_y).a != 0
+    local_x < lamp.width && local_y < lamp.height && lamp.is_opaque(local_x, local_y)
 }
 
 fn lamp_shadow_color(
-    lamp: &Image,
+    lamp: &Sprite,
     lamp_x: usize,
     lamp_y: usize,
     x: usize,
     y: usize,
     palette: &Palette,
-) -> Option<Rgba> {
+) -> Option<Rgb> {
     let local_x = x.checked_sub(lamp_x)?;
     let local_y = y.checked_sub(lamp_y)?;
     if local_x >= lamp.width || local_y >= lamp.height {
         return None;
     }
 
-    let color = lamp.at(local_x, local_y);
-    let source = palette_index(color, palette)?;
-    let mapped = match source {
+    let mapped = match lamp.at(local_x, local_y) {
+        TRANSPARENT => return None,
         palette_color::ROSE => palette_color::CRIMSON,
         palette_color::PEACH => palette_color::CRIMSON,
         palette_color::PLUM => palette_color::BLACK,
         palette_color::CRIMSON => palette_color::PLUM,
-        _ => source,
+        other => other,
     };
-    Some(palette.color(mapped))
+    palette.resolve(mapped, x, y)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn draw_resized_image(
     fb: &mut Framebuffer,
-    image: &Image,
+    palette: &Palette,
+    image: &Sprite,
     x: usize,
     y: usize,
     w: usize,
@@ -888,10 +892,9 @@ fn draw_resized_image(
         let sy = stretch_source_coord(dy, h, image.height, top_cap, bottom_cap);
         for dx in 0..w {
             let sx = stretch_source_coord(dx, w, image.width, left_cap, right_cap);
-            let color = image.at(sx, sy);
-            if color.a == 0 {
+            let Some(color) = palette.resolve(image.at(sx, sy), x + dx, y + dy) else {
                 continue;
-            }
+            };
             fb.fill_rect((x + dx) * SCALE, (y + dy) * SCALE, SCALE, SCALE, color);
         }
     }
@@ -899,39 +902,24 @@ fn draw_resized_image(
 
 fn draw_yellow_pencil_shadow(
     fb: &mut Framebuffer,
-    image: &Image,
+    image: &Sprite,
     dest_x: isize,
     dest_y: isize,
     palette: &Palette,
 ) {
-    fb.draw_image_region_mapped(
+    fb.draw_sprite_swapped(
         image,
-        Rect::new(0, 0, image.width, image.height),
         dest_x,
         dest_y,
         SCALE,
-        None,
-        |color| {
-            let source_color = palette_index(color, palette)?;
-            Some(palette.color(YELLOW_PAGE_REMAP[source_color]))
-        },
+        palette,
+        &Swap::from_indices(&YELLOW_PAGE_REMAP),
     );
-}
-
-fn palette_index(color: Rgba, palette: &Palette) -> Option<usize> {
-    if color.a == 0 {
-        return None;
-    }
-
-    (0..PALETTE_COLOR_COUNT).find(|index| {
-        let palette_color = palette.color(*index);
-        color.r == palette_color.r && color.g == palette_color.g && color.b == palette_color.b
-    })
 }
 
 const PALETTE_COLOR_COUNT: usize = 16;
 
-const IDENTITY_PAGE_REMAP: [usize; PALETTE_COLOR_COUNT] = [
+const IDENTITY_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = [
     palette_color::LAVENDER,
     palette_color::GUNMETAL,
     palette_color::PLUM,
@@ -950,10 +938,10 @@ const IDENTITY_PAGE_REMAP: [usize; PALETTE_COLOR_COUNT] = [
     palette_color::BLACK,
 ];
 
-const YELLOW_PAGE_REMAP: [usize; PALETTE_COLOR_COUNT] = {
+const YELLOW_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = {
     let mut remap = IDENTITY_PAGE_REMAP;
-    remap[palette_color::LIME] = palette_color::PEACH;
-    remap[palette_color::ROSE] = palette_color::PEACH;
+    remap[palette_color::LIME as usize] = palette_color::PEACH;
+    remap[palette_color::ROSE as usize] = palette_color::PEACH;
     remap
 };
 

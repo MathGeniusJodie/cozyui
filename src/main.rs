@@ -32,7 +32,10 @@ mod twirl;
 mod wavey;
 mod x_window;
 
-pub(crate) use graphics::{Framebuffer, Image, Palette, Rect, Rgba, decode_png_with_size};
+pub(crate) use graphics::{
+    Framebuffer, Index, Paint, Palette, Rect, Rgb, Rgba, Sprite, Swap, TRANSPARENT,
+    decode_png_with_size,
+};
 use x_window::XWindow;
 
 const PALETTE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/na16-1x.png");
@@ -40,30 +43,33 @@ const DESK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/desk.png");
 
 #[allow(dead_code)]
 pub(crate) mod palette_color {
-    pub(crate) const LAVENDER: usize = 0;
-    pub(crate) const GUNMETAL: usize = 1;
-    pub(crate) const PLUM: usize = 2;
-    pub(crate) const BROWN: usize = 3;
-    pub(crate) const PEACH: usize = 4;
-    pub(crate) const CREAM: usize = 5;
-    pub(crate) const LIME: usize = 6;
-    pub(crate) const GREEN: usize = 7;
-    pub(crate) const ORANGE: usize = 8;
-    pub(crate) const CRIMSON: usize = 9;
-    pub(crate) const ROSE: usize = 10;
-    pub(crate) const PURPLE: usize = 11;
-    pub(crate) const CYAN: usize = 12;
-    pub(crate) const BLUE: usize = 13;
-    pub(crate) const PINE: usize = 14;
-    pub(crate) const BLACK: usize = 15;
+    use crate::Index;
+
+    pub(crate) const LAVENDER: Index = 0;
+    pub(crate) const GUNMETAL: Index = 1;
+    pub(crate) const PLUM: Index = 2;
+    pub(crate) const BROWN: Index = 3;
+    pub(crate) const PEACH: Index = 4;
+    pub(crate) const CREAM: Index = 5;
+    pub(crate) const LIME: Index = 6;
+    pub(crate) const GREEN: Index = 7;
+    pub(crate) const ORANGE: Index = 8;
+    pub(crate) const CRIMSON: Index = 9;
+    pub(crate) const ROSE: Index = 10;
+    pub(crate) const PURPLE: Index = 11;
+    pub(crate) const CYAN: Index = 12;
+    pub(crate) const BLUE: Index = 13;
+    pub(crate) const PINE: Index = 14;
+    pub(crate) const BLACK: Index = 15;
 }
 
 #[allow(dead_code)]
 pub(crate) mod app_color {
+    use crate::Index;
     use crate::palette_color;
 
-    pub(crate) const BACKGROUND: usize = palette_color::CYAN;
-    pub(crate) const BACKGROUND_SHADOW: usize = palette_color::BLUE;
+    pub(crate) const BACKGROUND: Index = palette_color::CYAN;
+    pub(crate) const BACKGROUND_SHADOW: Index = palette_color::BLUE;
 }
 
 const WHEEL_UP: u8 = 4;
@@ -124,7 +130,7 @@ struct App {
     twirl: twirl::Twirl,
     wavey: wavey::Wavey,
     day: day::Day,
-    desk: Image,
+    desk: Sprite,
     puter_fb: Framebuffer,
     toodle_fb: Framebuffer,
     fwends_fb: Framebuffer,
@@ -150,7 +156,7 @@ impl App {
         let twirl = twirl::Twirl::load(palette)?;
         let wavey = wavey::Wavey::load(palette)?;
         let day = day::Day::load(palette)?;
-        let desk = Image::load(DESK_PATH, palette)?;
+        let desk = Sprite::load_native(DESK_PATH, palette)?;
         let layout = WidgetLayout::new(&puter, &toodle, &twirl, &wavey, &day);
         let puter_rect = Rect {
             x: layout.puter_x,
@@ -265,17 +271,13 @@ impl App {
     }
 
     fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(app_color::BACKGROUND)
+        palette.color(app_color::BACKGROUND).into()
     }
 
     fn render_background(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
-        draw_stretched_desk_region(
-            fb,
-            &self.desk,
-            palette,
-            Rect::new(0, 0, fb.width, fb.height),
-        );
+        let full = Rect::new(0, 0, fb.width, fb.height);
+        draw_stretched_desk_region(fb, &self.desk, palette, full);
     }
 
     fn render_background_rect(&self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
@@ -691,7 +693,7 @@ fn rects_intersect(a: Rect, b: Rect) -> bool {
         && b.y < a.y.saturating_add(a.h)
 }
 
-fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Image, palette: &Palette, rect: Rect) {
+fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Palette, rect: Rect) {
     let desk_y = fb.height.saturating_sub(desk.height);
     let x0 = rect.x.min(fb.width);
     let x1 = rect.x.saturating_add(rect.w).min(fb.width);
@@ -710,8 +712,8 @@ fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Image, palette: &Pale
         let source_y = y - desk_y;
         for x in x0..x1 {
             let source_x = stretched_desk_source_x(x, fb.width, desk.width);
-            let color = desk_background_color(desk.at(source_x, source_y), palette);
-            if color.a != 0 {
+            let index = desk_background_index(desk.at(source_x, source_y));
+            if let Some(color) = palette.resolve(index, x, y) {
                 fb.fill_rect(x, y, 1, 1, color);
             }
         }
@@ -737,18 +739,12 @@ fn stretched_desk_source_x(x: usize, target_w: usize, source_w: usize) -> usize 
     }
 }
 
-fn desk_background_color(color: Rgba, palette: &Palette) -> Rgba {
-    if same_rgb(color, palette.color(palette_color::ROSE)) {
-        palette.color(app_color::BACKGROUND)
-    } else if same_rgb(color, palette.color(palette_color::CRIMSON)) {
-        palette.color(app_color::BACKGROUND_SHADOW)
-    } else {
-        color
+fn desk_background_index(index: Index) -> Index {
+    match index {
+        palette_color::ROSE => app_color::BACKGROUND,
+        palette_color::CRIMSON => app_color::BACKGROUND_SHADOW,
+        other => other,
     }
-}
-
-fn same_rgb(a: Rgba, b: Rgba) -> bool {
-    a.r == b.r && a.g == b.g && a.b == b.b
 }
 
 pub(crate) fn draw_filled_circle(
@@ -756,7 +752,7 @@ pub(crate) fn draw_filled_circle(
     center_x: isize,
     center_y: isize,
     radius: isize,
-    color: Rgba,
+    color: Rgb,
 ) {
     draw_filled_ellipse(fb, center_x, center_y, radius, radius, color);
 }
@@ -767,7 +763,7 @@ pub(crate) fn draw_filled_ellipse(
     center_y: isize,
     radius_x: isize,
     radius_y: isize,
-    color: Rgba,
+    color: Rgb,
 ) {
     if radius_x <= 0 || radius_y <= 0 {
         return;

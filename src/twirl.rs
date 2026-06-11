@@ -8,7 +8,7 @@ use crate::app_color;
 use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
-use crate::{Framebuffer, Image, Palette, Rgba};
+use crate::{Framebuffer, Index, Paint, Palette, Rgba, Sprite, TRANSPARENT};
 
 const WHEEL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/wheel.png");
 const TOTAL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/twirl_total.txt");
@@ -20,7 +20,7 @@ const SEGMENT_NUMBERS: [&str; SEGMENT_COUNT] = [
     "1", "2", "4", "8", "16", "100"
 ];
 
-const SEGMENT_LIGHT_COLORS: [usize; SEGMENT_COUNT] = [
+const SEGMENT_LIGHT_COLORS: [Index; SEGMENT_COUNT] = [
     palette_color::CYAN,
     palette_color::LAVENDER,
     palette_color::ROSE,
@@ -28,7 +28,7 @@ const SEGMENT_LIGHT_COLORS: [usize; SEGMENT_COUNT] = [
     palette_color::CREAM,
     palette_color::LIME,
 ];
-const SEGMENT_DARK_COLORS: [usize; SEGMENT_COUNT] = [
+const SEGMENT_DARK_COLORS: [Index; SEGMENT_COUNT] = [
     palette_color::BLUE,
     palette_color::PURPLE,
     palette_color::CRIMSON,
@@ -49,7 +49,7 @@ const CLICK_VOLUME: f32 = 1200.0;
 const TOTAL_GAP: usize = 4;
 
 pub(crate) struct Twirl {
-    wheel: Image,
+    wheel: Sprite,
     font: BitmapFont,
     angle: f32,
     speed: f32,
@@ -61,7 +61,7 @@ pub(crate) struct Twirl {
 impl Twirl {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
-            wheel: Image::load(WHEEL_PATH, palette)?,
+            wheel: Sprite::load_native(WHEEL_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
             angle: 0.0,
             speed: 0.0,
@@ -84,25 +84,25 @@ impl Twirl {
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.draw_image_shadow(
+        fb.draw_sprite_silhouette(
             &self.wheel,
             SHADOW_X_OFFSET,
             SHADOW_Y_OFFSET,
             1,
-            palette.color(app_color::BACKGROUND_SHADOW),
+            palette,
+            Paint::Solid(app_color::BACKGROUND_SHADOW),
         );
 
-        let lime = palette.color(palette_color::LIME);
-        let green = palette.color(palette_color::GREEN);
         for y in 0..self.wheel.height {
             for x in 0..self.wheel.width {
                 let source = self.wheel.at(x, y);
-                let color = if same_color(source, lime) || same_color(source, green) {
-                    self.segment_color(x, y, same_color(source, lime), palette)
-                } else {
-                    source
+                let index = match source {
+                    palette_color::LIME => self.segment_index(x, y, true),
+                    palette_color::GREEN => self.segment_index(x, y, false),
+                    TRANSPARENT => continue,
+                    other => other,
                 };
-                if color.a != 0 {
+                if let Some(color) = palette.resolve(index, x, y) {
                     fb.fill_rect(x, y, 1, 1, color);
                 }
             }
@@ -168,14 +168,13 @@ impl Twirl {
         play_click();
     }
 
-    fn segment_color(&self, x: usize, y: usize, light: bool, palette: &Palette) -> Rgba {
+    fn segment_index(&self, x: usize, y: usize, light: bool) -> Index {
         let segment = self.segment_at(x, y);
-        let color_index = if light {
+        if light {
             SEGMENT_LIGHT_COLORS[segment]
         } else {
             SEGMENT_DARK_COLORS[segment]
-        };
-        palette.color(color_index)
+        }
     }
 
     fn draw_numbers(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -226,10 +225,6 @@ impl Twirl {
         let dy = y as f32 + 0.5 - center_y;
         segment_for_angle(dy.atan2(dx) + self.angle)
     }
-}
-
-fn same_color(a: Rgba, b: Rgba) -> bool {
-    a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a
 }
 
 fn segment_center_angle(segment: usize) -> f32 {

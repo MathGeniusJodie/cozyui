@@ -18,7 +18,7 @@ use xkbcommon::xkb::keysyms;
 
 use crate::palette_color;
 use crate::text_input::KeyInput;
-use crate::{Framebuffer, Image, Palette, Rgba, decode_png_with_size};
+use crate::{Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Rgba, Sprite, decode_png_with_size};
 
 const BG_SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
@@ -37,46 +37,46 @@ const HIGH_CONTRAST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/puter_hc.
 const ART_CROP_X: usize = 19;
 const ART_CROP_Y: usize = 17;
 
-const COLOR_CURSOR: usize = palette_color::LAVENDER;
-const COLOR_LIGHT_OFF: usize = palette_color::GUNMETAL;
-const COLOR_LIGHT_OFF_CORE: usize = palette_color::PLUM;
-const COLOR_LIGHT_OFF_TOP: usize = palette_color::PEACH;
-const COLOR_LIGHT_RED: usize = palette_color::CRIMSON;
-const COLOR_LIGHT_RED_CORE: usize = palette_color::ORANGE;
-const COLOR_LIGHT_RED_TOP: usize = palette_color::ORANGE;
-const COLOR_LIGHT_GREEN: usize = palette_color::GREEN;
-const COLOR_LIGHT_GREEN_CORE: usize = palette_color::LIME;
-const COLOR_LIGHT_GREEN_TOP: usize = palette_color::LIME;
-const COLOR_ORANGE_TEXT: usize = palette_color::ORANGE;
-const COLOR_ORANGE_GLOW: usize = palette_color::BROWN;
-const COLOR_GREEN_TEXT: usize = palette_color::LIME;
-const COLOR_GREEN_GLOW: usize = palette_color::GREEN;
-const COLOR_SELECTION: usize = palette_color::GUNMETAL;
+const COLOR_CURSOR: Index = palette_color::LAVENDER;
+const COLOR_LIGHT_OFF: Index = palette_color::GUNMETAL;
+const COLOR_LIGHT_OFF_CORE: Index = palette_color::PLUM;
+const COLOR_LIGHT_OFF_TOP: Index = palette_color::PEACH;
+const COLOR_LIGHT_RED: Index = palette_color::CRIMSON;
+const COLOR_LIGHT_RED_CORE: Index = palette_color::ORANGE;
+const COLOR_LIGHT_RED_TOP: Index = palette_color::ORANGE;
+const COLOR_LIGHT_GREEN: Index = palette_color::GREEN;
+const COLOR_LIGHT_GREEN_CORE: Index = palette_color::LIME;
+const COLOR_LIGHT_GREEN_TOP: Index = palette_color::LIME;
+const COLOR_ORANGE_TEXT: Index = palette_color::ORANGE;
+const COLOR_ORANGE_GLOW: Index = palette_color::BROWN;
+const COLOR_GREEN_TEXT: Index = palette_color::LIME;
+const COLOR_GREEN_GLOW: Index = palette_color::GREEN;
+const COLOR_SELECTION: Index = palette_color::GUNMETAL;
 
-const TERM_COLOR_BLACK: usize = palette_color::BLACK;
-const TERM_COLOR_RED: usize = palette_color::CRIMSON;
-const TERM_COLOR_GREEN: usize = palette_color::GREEN;
-const TERM_COLOR_YELLOW: usize = palette_color::ORANGE;
-const TERM_COLOR_BLUE: usize = palette_color::BLUE;
-const TERM_COLOR_MAGENTA: usize = palette_color::PURPLE;
-const TERM_COLOR_CYAN: usize = palette_color::CYAN;
-const TERM_COLOR_WHITE: usize = palette_color::CREAM;
-const TERM_COLOR_BRIGHT_BLACK: usize = palette_color::GUNMETAL;
-const TERM_COLOR_BRIGHT_RED: usize = palette_color::ROSE;
-const TERM_COLOR_BRIGHT_GREEN: usize = palette_color::LIME;
-const TERM_COLOR_BRIGHT_YELLOW: usize = palette_color::PEACH;
-const TERM_COLOR_BRIGHT_BLUE: usize = palette_color::CYAN;
-const TERM_COLOR_BRIGHT_MAGENTA: usize = palette_color::LAVENDER;
-const TERM_COLOR_BRIGHT_CYAN: usize = palette_color::CYAN;
-const TERM_COLOR_BRIGHT_WHITE: usize = palette_color::CREAM;
-const TERM_COLOR_DIM_BLACK: usize = palette_color::PLUM;
-const TERM_COLOR_DIM_RED: usize = palette_color::BROWN;
-const TERM_COLOR_DIM_GREEN: usize = palette_color::PINE;
-const TERM_COLOR_DIM_YELLOW: usize = palette_color::BROWN;
-const TERM_COLOR_DIM_BLUE: usize = palette_color::PINE;
-const TERM_COLOR_DIM_MAGENTA: usize = palette_color::PLUM;
-const TERM_COLOR_DIM_CYAN: usize = palette_color::BLUE;
-const TERM_COLOR_DIM_WHITE: usize = palette_color::LAVENDER;
+const TERM_COLOR_BLACK: Index = palette_color::BLACK;
+const TERM_COLOR_RED: Index = palette_color::CRIMSON;
+const TERM_COLOR_GREEN: Index = palette_color::GREEN;
+const TERM_COLOR_YELLOW: Index = palette_color::ORANGE;
+const TERM_COLOR_BLUE: Index = palette_color::BLUE;
+const TERM_COLOR_MAGENTA: Index = palette_color::PURPLE;
+const TERM_COLOR_CYAN: Index = palette_color::CYAN;
+const TERM_COLOR_WHITE: Index = palette_color::CREAM;
+const TERM_COLOR_BRIGHT_BLACK: Index = palette_color::GUNMETAL;
+const TERM_COLOR_BRIGHT_RED: Index = palette_color::ROSE;
+const TERM_COLOR_BRIGHT_GREEN: Index = palette_color::LIME;
+const TERM_COLOR_BRIGHT_YELLOW: Index = palette_color::PEACH;
+const TERM_COLOR_BRIGHT_BLUE: Index = palette_color::CYAN;
+const TERM_COLOR_BRIGHT_MAGENTA: Index = palette_color::LAVENDER;
+const TERM_COLOR_BRIGHT_CYAN: Index = palette_color::CYAN;
+const TERM_COLOR_BRIGHT_WHITE: Index = palette_color::CREAM;
+const TERM_COLOR_DIM_BLACK: Index = palette_color::PLUM;
+const TERM_COLOR_DIM_RED: Index = palette_color::BROWN;
+const TERM_COLOR_DIM_GREEN: Index = palette_color::PINE;
+const TERM_COLOR_DIM_YELLOW: Index = palette_color::BROWN;
+const TERM_COLOR_DIM_BLUE: Index = palette_color::PINE;
+const TERM_COLOR_DIM_MAGENTA: Index = palette_color::PLUM;
+const TERM_COLOR_DIM_CYAN: Index = palette_color::BLUE;
+const TERM_COLOR_DIM_WHITE: Index = palette_color::LAVENDER;
 
 const BUTTON_SPRITES_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/buttons.png");
 const BUTTON_PRESSED_SPRITES_PATH: &str =
@@ -169,10 +169,10 @@ const BUTTON_TARGETS: [Button; 5] = [
 
 pub(crate) struct Puter {
     mode_images: ModeImages,
-    button_sprites: Image,
-    button_pressed_sprites: Image,
-    power_button: Image,
-    lock_button: Image,
+    button_sprites: Sprite,
+    button_pressed_sprites: Sprite,
+    power_button: Sprite,
+    lock_button: Sprite,
     atlas: GlyphAtlas,
     terminal: Option<Terminal>,
     settings: DisplaySettings,
@@ -185,10 +185,10 @@ impl Puter {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             mode_images: ModeImages::load(palette)?,
-            button_sprites: Image::load(BUTTON_SPRITES_PATH, palette)?,
-            button_pressed_sprites: Image::load(BUTTON_PRESSED_SPRITES_PATH, palette)?,
-            power_button: Image::load(POWER_BUTTON_PATH, palette)?,
-            lock_button: Image::load(LOCK_BUTTON_PATH, palette)?,
+            button_sprites: Sprite::load_native(BUTTON_SPRITES_PATH, palette)?,
+            button_pressed_sprites: Sprite::load_native(BUTTON_PRESSED_SPRITES_PATH, palette)?,
+            power_button: Sprite::load_native(POWER_BUTTON_PATH, palette)?,
+            lock_button: Sprite::load_native(LOCK_BUTTON_PATH, palette)?,
             atlas: GlyphAtlas::load()?,
             terminal: None,
             settings: DisplaySettings::new(),
@@ -290,7 +290,7 @@ impl Puter {
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         let term = self.terminal().term();
 
-        fb.clear_scaled(self.mode_images.for_settings(self.settings), BG_SCALE);
+        fb.clear_scaled(self.mode_images.for_settings(self.settings), BG_SCALE, palette);
         fb.fill_rect(
             art_x(CONTROL_CLEAR_X),
             art_y(CONTROL_CLEAR_Y),
@@ -298,19 +298,21 @@ impl Puter {
             CONTROL_CLEAR_H * BG_SCALE,
             palette.color(palette_color::CREAM),
         );
-        draw_mode_buttons(fb, &self.button_sprites);
+        draw_mode_buttons(fb, &self.button_sprites, palette);
         draw_lights(fb, self.settings, palette);
-        fb.draw_image(
+        fb.draw_sprite(
             &self.power_button,
             art_x(POWER_BUTTON_X) as isize,
             art_y(ICON_BUTTON_Y) as isize,
             BG_SCALE,
+            palette,
         );
-        fb.draw_image(
+        fb.draw_sprite(
             &self.lock_button,
             art_x(LOCK_BUTTON_X) as isize,
             art_y(ICON_BUTTON_Y) as isize,
             BG_SCALE,
+            palette,
         );
 
         let cell_w = GLYPH_W * GLYPH_SCALE;
@@ -413,15 +415,18 @@ impl Puter {
         if let Some(index) = self.active_button {
             let button = BUTTON_TARGETS[index];
             if let Some(sprite_index) = button.pressed_sprite {
-                fb.draw_scaled_region(
+                fb.draw_sprite_region(
                     &self.button_pressed_sprites,
-                    BUTTON_SPRITE_OFFSET_X + sprite_index * BUTTON_SPRITE_STRIDE,
-                    0,
-                    art_x(button.x),
-                    art_y(button.y),
-                    BUTTON_W,
-                    BUTTON_H,
+                    Rect::new(
+                        BUTTON_SPRITE_OFFSET_X + sprite_index * BUTTON_SPRITE_STRIDE,
+                        0,
+                        BUTTON_W,
+                        BUTTON_H,
+                    ),
+                    art_x(button.x) as isize,
+                    art_y(button.y) as isize,
                     BG_SCALE,
+                    palette,
                 );
             }
         }
@@ -433,7 +438,7 @@ impl Puter {
             .expect("puter terminal must be started before use")
     }
 
-    fn terminal_color(&self, color: Color, palette: &Palette) -> Rgba {
+    fn terminal_color(&self, color: Color, palette: &Palette) -> PaletteRgb {
         match color {
             Color::Named(NamedColor::Foreground) | Color::Named(NamedColor::BrightForeground) => {
                 self.background_terminal_text_color(palette)
@@ -443,15 +448,15 @@ impl Puter {
             Color::Named(NamedColor::Cursor) => palette.color(COLOR_CURSOR),
             Color::Named(named) => palette.color(named_terminal_palette_index(named)),
             Color::Indexed(index) => indexed_terminal_color(index, palette),
-            Color::Spec(rgb) => palette.nearest(rgb_to_rgba(rgb)),
+            Color::Spec(rgb) => palette.nearest(terminal_rgb(rgb)),
         }
     }
 
-    fn terminal_background_color(&self, color: Color, palette: &Palette) -> Option<Rgba> {
+    fn terminal_background_color(&self, color: Color, palette: &Palette) -> Option<PaletteRgb> {
         (color != Color::Named(NamedColor::Background)).then(|| self.terminal_color(color, palette))
     }
 
-    fn terminal_glow_color(&self, color: Color, palette: &Palette) -> Rgba {
+    fn terminal_glow_color(&self, color: Color, palette: &Palette) -> PaletteRgb {
         match color {
             Color::Named(NamedColor::Foreground) | Color::Named(NamedColor::BrightForeground) => {
                 self.settings.glow_color(palette)
@@ -461,7 +466,7 @@ impl Puter {
             Color::Named(NamedColor::Cursor) => palette.color(COLOR_CURSOR),
             Color::Named(named) => palette.color(named_terminal_glow_palette_index(named)),
             Color::Indexed(index) => indexed_terminal_glow_color(index, palette),
-            Color::Spec(rgb) => palette.nearest(rgb_to_rgba(rgb)),
+            Color::Spec(rgb) => palette.nearest(terminal_rgb(rgb)),
         }
     }
 
@@ -500,18 +505,18 @@ impl Puter {
         }
     }
 
-    fn background_terminal_text_color(&self, palette: &Palette) -> Rgba {
+    fn background_terminal_text_color(&self, palette: &Palette) -> PaletteRgb {
         self.settings.text_color(palette)
     }
 
-    fn background_terminal_bg_color(&self, palette: &Palette) -> Rgba {
+    fn background_terminal_bg_color(&self, palette: &Palette) -> PaletteRgb {
         palette.color(palette_color::BLACK)
     }
 }
 
 struct TerminalTextStyle {
-    fg: Rgba,
-    glow: Option<Rgba>,
+    fg: PaletteRgb,
+    glow: Option<PaletteRgb>,
 }
 
 struct GlyphAtlas {
@@ -613,7 +618,17 @@ impl Terminal {
             ..Config::default()
         };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, proxy.clone())));
-        let pty = tty::new(&tty::Options::default(), window_size, window_id)?;
+        // Run the shell inside a persistent abduco session so the terminal
+        // survives cozyui restarts; -A reattaches if "puter" already exists.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let options = tty::Options {
+            shell: Some(tty::Shell::new(
+                "abduco".to_string(),
+                vec!["-A".to_string(), "puter".to_string(), shell],
+            )),
+            ..tty::Options::default()
+        };
+        let pty = tty::new(&options, window_size, window_id)?;
         let event_loop = EventLoop::new(term.clone(), proxy, pty, true, false)?;
         let tx = event_loop.channel();
         let event_thread = Some(event_loop.spawn());
@@ -836,7 +851,7 @@ impl DisplaySettings {
         }
     }
 
-    fn text_color(&self, palette: &Palette) -> Rgba {
+    fn text_color(&self, palette: &Palette) -> PaletteRgb {
         if self.high_brightness {
             return palette.closest_to_white();
         }
@@ -847,7 +862,7 @@ impl DisplaySettings {
         }
     }
 
-    fn glow_color(&self, palette: &Palette) -> Rgba {
+    fn glow_color(&self, palette: &Palette) -> PaletteRgb {
         match self.text_mode {
             TextMode::Green => palette.color(COLOR_GREEN_GLOW),
             TextMode::Orange => palette.color(COLOR_ORANGE_GLOW),
@@ -879,21 +894,21 @@ impl DisplaySettings {
 }
 
 struct ModeImages {
-    green_low_contrast: Image,
-    orange_low_contrast: Image,
-    high_contrast: Image,
+    green_low_contrast: Sprite,
+    orange_low_contrast: Sprite,
+    high_contrast: Sprite,
 }
 
 impl ModeImages {
     fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
-            green_low_contrast: Image::load(GREEN_LOW_CONTRAST_PATH, palette)?,
-            orange_low_contrast: Image::load(ORANGE_LOW_CONTRAST_PATH, palette)?,
-            high_contrast: Image::load(HIGH_CONTRAST_PATH, palette)?,
+            green_low_contrast: Sprite::load_native(GREEN_LOW_CONTRAST_PATH, palette)?,
+            orange_low_contrast: Sprite::load_native(ORANGE_LOW_CONTRAST_PATH, palette)?,
+            high_contrast: Sprite::load_native(HIGH_CONTRAST_PATH, palette)?,
         })
     }
 
-    fn for_settings(&self, settings: DisplaySettings) -> &Image {
+    fn for_settings(&self, settings: DisplaySettings) -> &Sprite {
         if settings.high_contrast {
             return &self.high_contrast;
         }
@@ -905,21 +920,24 @@ impl ModeImages {
     }
 }
 
-fn draw_mode_buttons(fb: &mut Framebuffer, button_sprites: &Image) {
+fn draw_mode_buttons(fb: &mut Framebuffer, button_sprites: &Sprite, palette: &Palette) {
     for button in BUTTON_TARGETS {
         let Some(sprite_index) = button.pressed_sprite else {
             continue;
         };
 
-        fb.draw_scaled_region(
+        fb.draw_sprite_region(
             button_sprites,
-            BUTTON_SPRITE_OFFSET_X + sprite_index * BUTTON_SPRITE_STRIDE,
-            0,
-            art_x(button.x),
-            art_y(button.y),
-            BUTTON_W,
-            BUTTON_H,
+            Rect::new(
+                BUTTON_SPRITE_OFFSET_X + sprite_index * BUTTON_SPRITE_STRIDE,
+                0,
+                BUTTON_W,
+                BUTTON_H,
+            ),
+            art_x(button.x) as isize,
+            art_y(button.y) as isize,
             BG_SCALE,
+            palette,
         );
     }
 }
@@ -954,7 +972,7 @@ fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState, palette: &P
     fill_source_rect(fb, light.x + 1, light.y + 2, LIGHT_W - 2, LIGHT_H - 3, core);
 }
 
-fn named_terminal_palette_index(color: NamedColor) -> usize {
+fn named_terminal_palette_index(color: NamedColor) -> Index {
     match color {
         NamedColor::Black => TERM_COLOR_BLACK,
         NamedColor::Red => TERM_COLOR_RED,
@@ -988,7 +1006,7 @@ fn named_terminal_palette_index(color: NamedColor) -> usize {
     }
 }
 
-fn named_terminal_glow_palette_index(color: NamedColor) -> usize {
+fn named_terminal_glow_palette_index(color: NamedColor) -> Index {
     match color {
         NamedColor::Black | NamedColor::BrightBlack | NamedColor::DimBlack => TERM_COLOR_DIM_BLACK,
         NamedColor::Red | NamedColor::BrightRed | NamedColor::DimRed => TERM_COLOR_DIM_RED,
@@ -1038,7 +1056,7 @@ fn bright_terminal_named_color(color: NamedColor) -> Option<NamedColor> {
     }
 }
 
-fn indexed_terminal_color(index: u8, palette: &Palette) -> Rgba {
+fn indexed_terminal_color(index: u8, palette: &Palette) -> PaletteRgb {
     if index < 16 {
         return palette.color(ANSI_16_TO_NA16[index as usize]);
     }
@@ -1046,7 +1064,7 @@ fn indexed_terminal_color(index: u8, palette: &Palette) -> Rgba {
     palette.nearest(indexed_terminal_rgb(index))
 }
 
-fn indexed_terminal_glow_color(index: u8, palette: &Palette) -> Rgba {
+fn indexed_terminal_glow_color(index: u8, palette: &Palette) -> PaletteRgb {
     if index < 16 {
         return palette.color(ANSI_16_GLOW_TO_NA16[index as usize]);
     }
@@ -1054,9 +1072,9 @@ fn indexed_terminal_glow_color(index: u8, palette: &Palette) -> Rgba {
     palette.nearest(indexed_terminal_rgb(index))
 }
 
-fn indexed_terminal_rgb(index: u8) -> Rgba {
+fn indexed_terminal_rgb(index: u8) -> PaletteRgb {
     if index < 16 {
-        return terminal_palette_rgba(ANSI_16_TO_NA16[index as usize]);
+        return terminal_palette_rgb(ANSI_16_TO_NA16[index as usize]);
     }
 
     if index < 232 {
@@ -1064,15 +1082,14 @@ fn indexed_terminal_rgb(index: u8) -> Rgba {
         let r = color_cube_value(index / 36);
         let g = color_cube_value((index / 6) % 6);
         let b = color_cube_value(index % 6);
-        return Rgba { r, g, b, a: 255 };
+        return PaletteRgb { r, g, b };
     }
 
     let value = 8 + (index - 232) * 10;
-    Rgba {
+    PaletteRgb {
         r: value,
         g: value,
         b: value,
-        a: 255,
     }
 }
 
@@ -1093,21 +1110,20 @@ fn dim_color(color: Color) -> Color {
     }
 }
 
-fn rgb_to_rgba(rgb: Rgb) -> Rgba {
-    Rgba {
+fn terminal_rgb(rgb: Rgb) -> PaletteRgb {
+    PaletteRgb {
         r: rgb.r,
         g: rgb.g,
         b: rgb.b,
-        a: 255,
     }
 }
 
-fn terminal_palette_rgba(index: usize) -> Rgba {
-    let (r, g, b) = SOURCE_PALETTE_RGB[index % SOURCE_PALETTE_RGB.len()];
-    Rgba { r, g, b, a: 255 }
+fn terminal_palette_rgb(index: Index) -> PaletteRgb {
+    let (r, g, b) = SOURCE_PALETTE_RGB[index as usize % SOURCE_PALETTE_RGB.len()];
+    PaletteRgb { r, g, b }
 }
 
-const ANSI_16_TO_NA16: [usize; 16] = [
+const ANSI_16_TO_NA16: [Index; 16] = [
     TERM_COLOR_BLACK,
     TERM_COLOR_RED,
     TERM_COLOR_GREEN,
@@ -1126,7 +1142,7 @@ const ANSI_16_TO_NA16: [usize; 16] = [
     TERM_COLOR_BRIGHT_WHITE,
 ];
 
-const ANSI_16_GLOW_TO_NA16: [usize; 16] = [
+const ANSI_16_GLOW_TO_NA16: [Index; 16] = [
     TERM_COLOR_DIM_BLACK,
     TERM_COLOR_DIM_RED,
     TERM_COLOR_DIM_GREEN,
@@ -1164,7 +1180,7 @@ const SOURCE_PALETTE_RGB: [(u8, u8, u8); 16] = [
     (31, 14, 28),
 ];
 
-fn fill_source_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize, color: Rgba) {
+fn fill_source_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize, color: PaletteRgb) {
     fb.fill_rect(
         x * BG_SCALE,
         y * BG_SCALE,
@@ -1181,7 +1197,7 @@ fn draw_glyph(
     x: usize,
     y: usize,
     scale: usize,
-    color: Rgba,
+    color: PaletteRgb,
 ) {
     for gy in 0..GLYPH_H {
         for gx in 0..GLYPH_W {

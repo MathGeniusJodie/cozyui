@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use crate::text_wrap;
-use crate::{Framebuffer, Rgba, decode_png_with_size};
+use crate::{Framebuffer, Rgb, Rgba, decode_png_with_size};
 
 pub(crate) struct FontSpec {
     pub(crate) atlas_path: &'static str,
@@ -94,7 +94,7 @@ impl BitmapFont {
         x: usize,
         y: usize,
         scale: usize,
-        color: Rgba,
+        color: Rgb,
     ) {
         self.draw_text_limited(fb, text, x, y, scale, color, usize::MAX);
     }
@@ -107,7 +107,7 @@ impl BitmapFont {
         x: usize,
         y: usize,
         scale: usize,
-        color: Rgba,
+        color: Rgb,
         max_chars: usize,
     ) {
         let mut cursor_x = x;
@@ -131,7 +131,7 @@ impl BitmapFont {
         x: usize,
         y: usize,
         scale: usize,
-        color: Rgba,
+        color: Rgb,
     ) {
         for gy in 0..self.spec.cell_h {
             for gx in 0..self.spec.cell_w {

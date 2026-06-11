@@ -4,13 +4,13 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::poco_font;
-use crate::{Framebuffer, Image, Palette, Rgba};
+use crate::{Framebuffer, Palette, Rgba, Sprite};
 
 const WAVEY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wavey.png");
 const STATIONS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/radio_stations.txt");
@@ -76,7 +76,7 @@ enum MediaButton {
 }
 
 pub(crate) struct Wavey {
-    image: Image,
+    image: Sprite,
     font: BitmapFont,
     stations: Vec<Station>,
     station: usize,
@@ -88,15 +88,14 @@ pub(crate) struct Wavey {
     last_volume_check: Instant,
     last_title_check: Instant,
     current_title: String,
-    player: Option<Child>,
-    player_ipc_path: Option<PathBuf>,
+    playing: bool,
 }
 
 impl Wavey {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         let volume = read_system_volume().unwrap_or(50);
-        Ok(Self {
-            image: Image::load(WAVEY_PATH, palette)?,
+        let mut wavey = Self {
+            image: Sprite::load_native(WAVEY_PATH, palette)?,
             font: BitmapFont::load(&poco_font::POCO_SPEC)?,
             stations: load_stations(STATIONS_PATH),
             station: 0,
@@ -108,9 +107,27 @@ impl Wavey {
             last_volume_check: Instant::now(),
             last_title_check: Instant::now(),
             current_title: String::new(),
-            player: None,
-            player_ipc_path: None,
-        })
+            playing: false,
+        };
+        wavey.resume_running_player();
+        Ok(wavey)
+    }
+
+    /// Reconnect to an mpv left running in the "wavey" abduco session by a
+    /// previous cozyui instance.
+    fn resume_running_player(&mut self) {
+        let Some(path) = self.mpv_property("path").as_ref().and_then(json_string) else {
+            return;
+        };
+
+        self.playing = true;
+        if let Some(station) = self
+            .stations
+            .iter()
+            .position(|station| station.mpv_args.contains(&path))
+        {
+            self.station = station;
+        }
     }
 
     pub(crate) fn width(&self) -> usize {
@@ -126,7 +143,7 @@ impl Wavey {
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.draw_image(&self.image, 0, 0, 1);
+        fb.draw_sprite(&self.image, 0, 0, 1, palette);
         self.draw_clock(fb, palette);
         self.draw_tuner(fb, palette);
         self.draw_knob(fb, palette);
@@ -158,7 +175,7 @@ impl Wavey {
 
         if now.duration_since(self.last_title_check) >= TITLE_REFRESH {
             self.last_title_check = now;
-            let title = if self.player.is_some() {
+            let title = if self.playing {
                 self.current_mpv_title().unwrap_or_default()
             } else {
                 String::new()
@@ -229,7 +246,8 @@ impl Wavey {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        self.stop_player();
+        // The player lives in the "wavey" abduco session and keeps playing
+        // across cozyui restarts; only the stop button kills it.
     }
 
     fn tuner_contains(&self, x: usize, y: usize) -> bool {
@@ -309,14 +327,22 @@ impl Wavey {
             "exec mpv --input-terminal=no --input-ipc-server=\"$COZYUI_MPV_IPC\" {}",
             station.mpv_args
         );
-        let mut command = Command::new("sh");
-        command
-            .arg("-c")
-            .arg(command_line)
-            .env("COZYUI_MPV_IPC", &ipc_path);
-        if let Ok(child) = command.spawn() {
-            self.player = Some(child);
-            self.player_ipc_path = Some(ipc_path);
+        // Detached abduco session: the player outlives cozyui restarts.
+        // The previous mpv quits asynchronously, so the "wavey" session can
+        // briefly linger; retry until abduco accepts the name again.
+        for _ in 0..10 {
+            let spawned = Command::new("abduco")
+                .args(["-n", "wavey", "sh", "-c", &command_line])
+                .env("COZYUI_MPV_IPC", &ipc_path)
+                .spawn();
+            let Ok(mut child) = spawned else {
+                return;
+            };
+            if child.wait().is_ok_and(|status| status.success()) {
+                self.playing = true;
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -347,8 +373,7 @@ impl Wavey {
     }
 
     fn mpv_property(&self, property: &str) -> Option<serde_json::Value> {
-        let path = self.player_ipc_path.as_ref()?;
-        let mut stream = UnixStream::connect(path).ok()?;
+        let mut stream = UnixStream::connect(mpv_ipc_path()).ok()?;
         let _ = stream.set_read_timeout(Some(TITLE_READ_TIMEOUT));
         let _ = stream.set_write_timeout(Some(TITLE_READ_TIMEOUT));
 
@@ -386,7 +411,7 @@ impl Wavey {
     fn press_media_button(&mut self, button: MediaButton) {
         match button {
             MediaButton::PlayPause => {
-                if self.player.is_some() {
+                if self.playing {
                     self.send_mpv_command(&["cycle", "pause"]);
                 } else {
                     self.play_station();
@@ -399,14 +424,11 @@ impl Wavey {
     }
 
     fn send_mpv_command(&mut self, command: &[&str]) {
-        if self.player.is_none() {
+        if !self.playing {
             return;
         }
-        let Some(path) = self.player_ipc_path.as_ref() else {
-            return;
-        };
 
-        let Ok(mut stream) = UnixStream::connect(path) else {
+        let Ok(mut stream) = UnixStream::connect(mpv_ipc_path()) else {
             return;
         };
         let message = serde_json::json!({ "command": command }).to_string();
@@ -416,14 +438,11 @@ impl Wavey {
     }
 
     fn stop_player(&mut self) {
-        let Some(mut child) = self.player.take() else {
-            return;
-        };
-        let _ = child.kill();
-        let _ = child.wait();
-        if let Some(path) = self.player_ipc_path.take() {
-            let _ = fs::remove_file(path);
+        if self.playing {
+            self.send_mpv_command(&["quit"]);
         }
+        let _ = fs::remove_file(mpv_ipc_path());
+        self.playing = false;
         self.current_title.clear();
     }
 
@@ -461,7 +480,7 @@ impl Wavey {
                 .draw_text(fb, &station.label, label_x, label_y, 1, text);
         }
 
-        let marker_x = if self.player.is_some() {
+        let marker_x = if self.playing {
             station_center(self.station, count)
         } else {
             TUNER_X.saturating_sub(TUNER_MARK_SIZE + 2)
@@ -608,11 +627,9 @@ fn media_button_at(x: usize, y: usize) -> Option<MediaButton> {
 }
 
 fn mpv_ipc_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_nanos();
-    std::env::temp_dir().join(format!("cozyui-mpv-{}-{nanos}.sock", std::process::id()))
+    // Fixed path so a restarted cozyui can find the mpv left running in the
+    // "wavey" abduco session.
+    std::env::temp_dir().join("cozyui-mpv-wavey.sock")
 }
 
 fn volume_angle(volume: u8) -> f32 {
@@ -625,7 +642,7 @@ fn clear_clock_art(fb: &mut Framebuffer, palette: &Palette) {
 }
 
 fn copy_clock_digit(
-    image: &Image,
+    image: &Sprite,
     fb: &mut Framebuffer,
     digit: char,
     dest_x: usize,
@@ -654,7 +671,7 @@ fn copy_clock_digit(
 }
 
 fn copy_clock_colon(
-    image: &Image,
+    image: &Sprite,
     fb: &mut Framebuffer,
     dest_x: usize,
     dest_y: usize,
@@ -677,7 +694,7 @@ fn copy_clock_colon(
 }
 
 fn copy_clock_pixels(
-    image: &Image,
+    image: &Sprite,
     fb: &mut Framebuffer,
     src: SourceRect,
     anchor: (usize, usize),
@@ -685,19 +702,16 @@ fn copy_clock_pixels(
     dest_y: usize,
     palette: &Palette,
 ) {
-    let red = palette.color(palette_color::CRIMSON);
-    let rose = palette.color(palette_color::ROSE);
     for y in 0..src.h {
         for x in 0..src.w {
-            let color = image.at(src.x + x, src.y + y);
-            if same_color(color, red) || same_color(color, rose) {
-                fb.fill_rect(
-                    dest_x + src.x + x - anchor.0,
-                    dest_y + src.y + y - anchor.1,
-                    1,
-                    1,
-                    color,
-                );
+            let index = image.at(src.x + x, src.y + y);
+            if !matches!(index, palette_color::CRIMSON | palette_color::ROSE) {
+                continue;
+            }
+            let px = dest_x + src.x + x - anchor.0;
+            let py = dest_y + src.y + y - anchor.1;
+            if let Some(color) = palette.resolve(index, px, py) {
+                fb.fill_rect(px, py, 1, 1, color);
             }
         }
     }
@@ -780,26 +794,24 @@ fn clock_segment_rect(segment: usize) -> SourceRect {
     }
 }
 
-fn clear_knob_marker(image: &Image, fb: &mut Framebuffer, palette: &Palette) {
-    let grey = palette.color(palette_color::LAVENDER);
-    let knob_shadow = palette.color(palette_color::PLUM);
-
+fn clear_knob_marker(image: &Sprite, fb: &mut Framebuffer, palette: &Palette) {
     for y in KNOB_MARKER_SRC_Y..KNOB_MARKER_SRC_Y + KNOB_MARKER_SRC_H {
         for x in KNOB_MARKER_SRC_X..KNOB_MARKER_SRC_X + KNOB_MARKER_SRC_W {
-            if same_color(image.at(x, y), grey) {
-                fb.fill_rect(x, y, 1, 1, knob_shadow);
+            if image.at(x, y) == palette_color::LAVENDER
+                && let Some(color) = palette.resolve(palette_color::PLUM, x, y)
+            {
+                fb.fill_rect(x, y, 1, 1, color);
             }
         }
     }
 }
 
 fn copy_moved_knob_marker(
-    image: &Image,
+    image: &Sprite,
     fb: &mut Framebuffer,
     target_angle: f32,
     palette: &Palette,
 ) {
-    let grey = palette.color(palette_color::LAVENDER);
     let marker_center_x = KNOB_MARKER_SRC_X as f32 + KNOB_MARKER_SRC_W as f32 / 2.0 - 0.5;
     let marker_center_y = KNOB_MARKER_SRC_Y as f32 + KNOB_MARKER_SRC_H as f32 / 2.0 - 0.5;
     let radius = ((marker_center_x - KNOB_X as f32).powi(2)
@@ -812,22 +824,21 @@ fn copy_moved_knob_marker(
 
     for y in KNOB_MARKER_SRC_Y..KNOB_MARKER_SRC_Y + KNOB_MARKER_SRC_H {
         for x in KNOB_MARKER_SRC_X..KNOB_MARKER_SRC_X + KNOB_MARKER_SRC_W {
-            let color = image.at(x, y);
-            if !same_color(color, grey) {
+            let index = image.at(x, y);
+            if index != palette_color::LAVENDER {
                 continue;
             }
 
             let dest_x = dest_left + (x - KNOB_MARKER_SRC_X) as isize;
             let dest_y = dest_top + (y - KNOB_MARKER_SRC_Y) as isize;
-            if dest_x >= 0 && dest_y >= 0 {
+            if dest_x >= 0
+                && dest_y >= 0
+                && let Some(color) = palette.resolve(index, dest_x as usize, dest_y as usize)
+            {
                 fb.fill_rect(dest_x as usize, dest_y as usize, 1, 1, color);
             }
         }
     }
-}
-
-fn same_color(a: Rgba, b: Rgba) -> bool {
-    a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a
 }
 
 fn load_stations(path: &str) -> Vec<Station> {

@@ -9,7 +9,7 @@ use crate::palette_color;
 use crate::peanut_money_font;
 use crate::text_edit::{TextEdit, TextEditOutcome};
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Image, Palette, Rect, Rgba};
+use crate::{Framebuffer, Index, Paint, Palette, Rect, Rgb, Rgba, Sprite, Swap};
 
 const SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
@@ -93,16 +93,16 @@ enum PageColor {
 }
 
 pub(crate) struct Toodle {
-    pages: [Image; VISIBLE_PAGE_COUNT],
-    checkboxes: Image,
-    checks: Image,
-    eraser: Image,
-    priority_urgent: Image,
-    priority_frog: Image,
-    priority_snail: Image,
-    goldstar: Image,
-    pencil: Image,
-    pencil_shadow: Image,
+    pages: [Sprite; VISIBLE_PAGE_COUNT],
+    checkboxes: Sprite,
+    checks: Sprite,
+    eraser: Sprite,
+    priority_urgent: Sprite,
+    priority_frog: Sprite,
+    priority_snail: Sprite,
+    goldstar: Sprite,
+    pencil: Sprite,
+    pencil_shadow: Sprite,
     font: BitmapFont,
     todos: [TodoList; SECTION_COUNT],
     done_counts: [usize; SECTION_COUNT],
@@ -118,20 +118,20 @@ impl Toodle {
 
         Ok(Self {
             pages: [
-                Image::load(TOP_PAGE_PATH, palette)?,
-                Image::load(SECOND_PAGE_PATH, palette)?,
-                Image::load(THIRD_PAGE_PATH, palette)?,
-                Image::load(THIRD_PAGE_PATH, palette)?,
+                Sprite::load_native(TOP_PAGE_PATH, palette)?,
+                Sprite::load_native(SECOND_PAGE_PATH, palette)?,
+                Sprite::load_native(THIRD_PAGE_PATH, palette)?,
+                Sprite::load_native(THIRD_PAGE_PATH, palette)?,
             ],
-            checkboxes: Image::load(CHECKBOXES_PATH, palette)?,
-            checks: Image::load(CHECKS_PATH, palette)?,
-            eraser: Image::load(ERASER_PATH, palette)?,
-            priority_urgent: Image::load(PRIORITY_URGENT_PATH, palette)?,
-            priority_frog: Image::load(PRIORITY_FROG_PATH, palette)?,
-            priority_snail: Image::load(PRIORITY_SNAIL_PATH, palette)?,
-            goldstar: Image::load(GOLDSTAR_PATH, palette)?,
-            pencil: Image::load(PENCIL_PATH, palette)?,
-            pencil_shadow: Image::load(PENCIL_SHADOW_PATH, palette)?,
+            checkboxes: Sprite::load_native(CHECKBOXES_PATH, palette)?,
+            checks: Sprite::load_native(CHECKS_PATH, palette)?,
+            eraser: Sprite::load_native(ERASER_PATH, palette)?,
+            priority_urgent: Sprite::load_native(PRIORITY_URGENT_PATH, palette)?,
+            priority_frog: Sprite::load_native(PRIORITY_FROG_PATH, palette)?,
+            priority_snail: Sprite::load_native(PRIORITY_SNAIL_PATH, palette)?,
+            goldstar: Sprite::load_native(GOLDSTAR_PATH, palette)?,
+            pencil: Sprite::load_native(PENCIL_PATH, palette)?,
+            pencil_shadow: Sprite::load_native(PENCIL_SHADOW_PATH, palette)?,
             font: BitmapFont::load(&peanut_money_font::PEANUT_MONEY_SPEC)?,
             todos: [
                 TodoList::load(TODO_FILES[0])?,
@@ -177,15 +177,16 @@ impl Toodle {
             self.render_page(fb, palette, logical_page, visual_page);
         }
 
-        fb.draw_image(
+        fb.draw_sprite(
             &self.eraser,
             (ERASER_X * SCALE) as isize,
             (ERASER_Y * SCALE) as isize,
             SCALE,
+            palette,
         );
-        self.draw_priority_icon(fb);
+        self.draw_priority_icon(fb, palette);
         self.draw_goldstar(fb, palette);
-        self.draw_focused_pencil(fb);
+        self.draw_focused_pencil(fb, palette);
     }
 
     fn draw_page_shadow(&self, fb: &mut Framebuffer, palette: &Palette, visual_page: usize) {
@@ -193,12 +194,13 @@ impl Toodle {
         let page_offset = visual_page * PAGE_STACK_OFFSET;
         let page_x = PAGE_OFFSET_X + page_offset;
         let page_y = page_offset;
-        fb.draw_image_shadow(
+        fb.draw_sprite_silhouette(
             page_image,
             (page_x * SCALE) as isize + SHADOW_X_OFFSET,
             (page_y * SCALE) as isize + SHADOW_Y_OFFSET,
             SCALE,
-            palette.color(app_color::BACKGROUND_SHADOW),
+            palette,
+            Paint::Solid(app_color::BACKGROUND_SHADOW),
         );
     }
 
@@ -222,11 +224,12 @@ impl Toodle {
             page_x,
             page_y,
         );
-        fb.draw_image(
+        fb.draw_sprite(
             &self.checkboxes,
             (page_x * SCALE) as isize,
             (page_y * SCALE) as isize,
             SCALE,
+            palette,
         );
         if visual_page == 0 {
             self.draw_focused_pencil_shadow(fb, palette);
@@ -422,30 +425,23 @@ impl Toodle {
         let src_x = (page + line) % CHECK_VARIANTS * CHECK_SPRITE_W;
         let dest_x = (PAGE_OFFSET_X + page_offset + CHECK_X - 1) * SCALE;
         let dest_y = (page_offset + CHECK_Y[line] - 4) * SCALE;
+        let src = Rect::new(src_x, 0, CHECK_SPRITE_W, CHECK_SPRITE_H);
 
-        if self.eraser_hovered {
-            let tint = palette.color(palette_color::GUNMETAL);
-            fb.draw_image_region_mapped(
-                &self.checks,
-                Rect::new(src_x, 0, CHECK_SPRITE_W, CHECK_SPRITE_H),
-                dest_x as isize,
-                dest_y as isize,
-                SCALE,
-                None,
-                |color| (color.a != 0).then_some(tint),
-            );
+        let swap = if self.eraser_hovered {
+            Swap::uniform(Paint::Solid(palette_color::GUNMETAL))
         } else {
-            fb.draw_scaled_region(
-                &self.checks,
-                src_x,
-                0,
-                dest_x,
-                dest_y,
-                CHECK_SPRITE_W,
-                CHECK_SPRITE_H,
-                SCALE,
-            );
-        }
+            Swap::identity()
+        };
+        fb.draw_sprite_full(
+            &self.checks,
+            src,
+            dest_x as isize,
+            dest_y as isize,
+            SCALE,
+            None,
+            palette,
+            Some(&swap),
+        );
     }
 
     fn save_current_section(&mut self) -> Result<(), Box<dyn Error>> {
@@ -525,21 +521,22 @@ impl Toodle {
         Ok(())
     }
 
-    fn draw_priority_icon(&self, fb: &mut Framebuffer) {
+    fn draw_priority_icon(&self, fb: &mut Framebuffer, palette: &Palette) {
         let Some(icon) = self.priority_icon() else {
             return;
         };
         let icon_x = ERASER_X + self.eraser.width + PRIORITY_ICON_GAP + PRIORITY_ICON_OFFSET_X;
         let icon_y = ERASER_Y + PRIORITY_ICON_OFFSET_Y;
-        fb.draw_image(
+        fb.draw_sprite(
             icon,
             (icon_x * SCALE) as isize,
             (icon_y * SCALE) as isize,
             SCALE,
+            palette,
         );
     }
 
-    fn priority_icon(&self) -> Option<&Image> {
+    fn priority_icon(&self) -> Option<&Sprite> {
         match section_color(self.current_page_ref().section) {
             PageColor::Pink => Some(&self.priority_urgent),
             PageColor::Yellow => None,
@@ -598,11 +595,12 @@ impl Toodle {
 
     fn draw_goldstar(&self, fb: &mut Framebuffer, palette: &Palette) {
         let star_x = PAGE_OFFSET_X + self.pages[0].width - self.goldstar.width;
-        fb.draw_image(
+        fb.draw_sprite(
             &self.goldstar,
             (star_x * SCALE) as isize,
             (GOLDSTAR_Y * SCALE) as isize,
             SCALE,
+            palette,
         );
 
         let count = self.done_counts[self.current_page_ref().section].to_string();
@@ -650,11 +648,11 @@ impl Toodle {
         }
     }
 
-    fn draw_pencil_cursor(&self, fb: &mut Framebuffer, x: usize, y: usize) {
+    fn draw_pencil_cursor(&self, fb: &mut Framebuffer, palette: &Palette, x: usize, y: usize) {
         let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X) * SCALE;
         let dest_y = y.saturating_sub(PENCIL_TIP_Y) * SCALE;
 
-        fb.draw_image(&self.pencil, dest_x as isize, dest_y as isize, SCALE);
+        fb.draw_sprite(&self.pencil, dest_x as isize, dest_y as isize, SCALE, palette);
     }
 
     fn draw_focused_pencil_shadow(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -674,12 +672,12 @@ impl Toodle {
         );
     }
 
-    fn draw_focused_pencil(&self, fb: &mut Framebuffer) {
+    fn draw_focused_pencil(&self, fb: &mut Framebuffer, palette: &Palette) {
         let Some((_, cursor_x, cursor_y, _)) = self.focused_pencil_position() else {
             return;
         };
 
-        self.draw_pencil_cursor(fb, cursor_x, cursor_y);
+        self.draw_pencil_cursor(fb, palette, cursor_x, cursor_y);
     }
 
     fn focused_pencil_position(&self) -> Option<(usize, usize, usize, bool)> {
@@ -720,7 +718,7 @@ impl Toodle {
         line: usize,
         x: usize,
         y: usize,
-        color: Rgba,
+        color: Rgb,
     ) {
         draw_wrapped_selection(
             fb,
@@ -980,48 +978,48 @@ impl TodoItem {
 
 fn draw_page_image(
     fb: &mut Framebuffer,
-    image: &Image,
+    image: &Sprite,
     page_color: PageColor,
     palette: &Palette,
     x: usize,
     y: usize,
 ) {
-    fb.draw_image_region_mapped(
+    fb.draw_sprite_swapped(
         image,
-        Rect::new(0, 0, image.width, image.height),
         (x * SCALE) as isize,
         (y * SCALE) as isize,
         SCALE,
-        None,
-        |color| Some(swap_page_color(color, page_color, palette)),
+        palette,
+        &page_swap(page_color, false),
     );
 }
 
 fn draw_pencil_shadow(
     fb: &mut Framebuffer,
-    image: &Image,
+    image: &Sprite,
     dest_x: usize,
     dest_y: usize,
     page_color: PageColor,
     palette: &Palette,
     pencil_on_second_line: bool,
 ) {
-    fb.draw_image_region_mapped(
+    fb.draw_sprite_swapped(
         image,
-        Rect::new(0, 0, image.width, image.height),
         dest_x as isize,
         dest_y as isize,
         SCALE,
-        None,
-        |color| {
-            Some(swap_pencil_shadow_color(
-                color,
-                page_color,
-                palette,
-                pencil_on_second_line,
-            ))
-        },
+        palette,
+        &page_swap(page_color, pencil_on_second_line),
     );
+}
+
+fn page_swap(page_color: PageColor, pencil_on_second_line: bool) -> Swap {
+    let remap = page_remap(page_color);
+    let mut indices = *remap;
+    if pencil_on_second_line {
+        indices[palette_color::LIME as usize] = remap[palette_color::ROSE as usize];
+    }
+    Swap::from_indices(&indices)
 }
 
 fn section_color(section: usize) -> PageColor {
@@ -1033,65 +1031,16 @@ fn section_color(section: usize) -> PageColor {
     }
 }
 
-fn swap_page_color(color: Rgba, page_color: PageColor, palette: &Palette) -> Rgba {
-    let Some(source_color) = source_palette_color(color) else {
-        return color;
-    };
-
-    palette.color(mapped_page_color(page_color, source_color))
-}
-
-fn swap_pencil_shadow_color(
-    color: Rgba,
-    page_color: PageColor,
-    palette: &Palette,
-    pencil_on_second_line: bool,
-) -> Rgba {
-    let Some(mut source_color) = source_palette_color(color) else {
-        return color;
-    };
-
-    if pencil_on_second_line && source_color == palette_color::LIME {
-        source_color = palette_color::ROSE;
-    }
-
-    palette.color(mapped_page_color(page_color, source_color))
-}
-
-fn source_palette_color(color: Rgba) -> Option<usize> {
-    match (color.r, color.g, color.b, color.a) {
-        (_, _, _, 0) => None,
-        (140, 143, 174, _) => Some(palette_color::LAVENDER),
-        (88, 69, 99, _) => Some(palette_color::GUNMETAL),
-        (62, 33, 55, _) => Some(palette_color::PLUM),
-        (154, 99, 72, _) => Some(palette_color::BROWN),
-        (215, 155, 125, _) => Some(palette_color::PEACH),
-        (245, 237, 186, _) => Some(palette_color::CREAM),
-        (192, 199, 65, _) => Some(palette_color::LIME),
-        (100, 125, 52, _) => Some(palette_color::GREEN),
-        (228, 148, 58, _) => Some(palette_color::ORANGE),
-        (157, 48, 59, _) => Some(palette_color::CRIMSON),
-        (210, 100, 113, _) => Some(palette_color::ROSE),
-        (112, 55, 127, _) => Some(palette_color::PURPLE),
-        (126, 196, 193, _) => Some(palette_color::CYAN),
-        (52, 133, 157, _) => Some(palette_color::BLUE),
-        (23, 67, 75, _) => Some(palette_color::PINE),
-        (31, 14, 28, _) => Some(palette_color::BLACK),
-        _ => None,
-    }
-}
-
-fn mapped_page_color(page_color: PageColor, source_color: usize) -> usize {
-    let remap = match page_color {
+fn page_remap(page_color: PageColor) -> &'static [Index; 16] {
+    match page_color {
         PageColor::Pink => &PINK_PAGE_REMAP,
         PageColor::Yellow => &YELLOW_PAGE_REMAP,
         PageColor::Green => &GREEN_PAGE_REMAP,
         PageColor::Blue => &BLUE_PAGE_REMAP,
-    };
-    remap.get(source_color).copied().unwrap_or(source_color)
+    }
 }
 
-const IDENTITY_PAGE_REMAP: [usize; 16] = [
+const IDENTITY_PAGE_REMAP: [Index; 16] = [
     palette_color::LAVENDER,
     palette_color::GUNMETAL,
     palette_color::PLUM,
@@ -1110,43 +1059,43 @@ const IDENTITY_PAGE_REMAP: [usize; 16] = [
     palette_color::BLACK,
 ];
 
-const PINK_PAGE_REMAP: [usize; 16] = {
+const PINK_PAGE_REMAP: [Index; 16] = {
     let mut remap = IDENTITY_PAGE_REMAP;
-    remap[palette_color::LIME] = palette_color::CRIMSON;
-    remap[palette_color::PINE] = palette_color::ROSE;
+    remap[palette_color::LIME as usize] = palette_color::CRIMSON;
+    remap[palette_color::PINE as usize] = palette_color::ROSE;
     remap
 };
 
-const YELLOW_PAGE_REMAP: [usize; 16] = {
+const YELLOW_PAGE_REMAP: [Index; 16] = {
     let mut remap = IDENTITY_PAGE_REMAP;
-    remap[palette_color::LAVENDER] = palette_color::CYAN;
-    remap[palette_color::PEACH] = palette_color::CREAM;
-    remap[palette_color::LIME] = palette_color::CRIMSON;
-    remap[palette_color::CRIMSON] = palette_color::BROWN;
-    remap[palette_color::ROSE] = palette_color::ORANGE;
-    remap[palette_color::PINE] = palette_color::ROSE;
+    remap[palette_color::LAVENDER as usize] = palette_color::CYAN;
+    remap[palette_color::PEACH as usize] = palette_color::CREAM;
+    remap[palette_color::LIME as usize] = palette_color::CRIMSON;
+    remap[palette_color::CRIMSON as usize] = palette_color::BROWN;
+    remap[palette_color::ROSE as usize] = palette_color::ORANGE;
+    remap[palette_color::PINE as usize] = palette_color::ROSE;
     remap
 };
 
-const GREEN_PAGE_REMAP: [usize; 16] = {
+const GREEN_PAGE_REMAP: [Index; 16] = {
     let mut remap = IDENTITY_PAGE_REMAP;
-    remap[palette_color::PEACH] = palette_color::LIME;
-    remap[palette_color::LIME] = palette_color::GUNMETAL;
-    remap[palette_color::ORANGE] = palette_color::GREEN;
-    remap[palette_color::CRIMSON] = palette_color::PINE;
-    remap[palette_color::ROSE] = palette_color::GREEN;
-    remap[palette_color::PINE] = palette_color::BROWN;
+    remap[palette_color::PEACH as usize] = palette_color::LIME;
+    remap[palette_color::LIME as usize] = palette_color::GUNMETAL;
+    remap[palette_color::ORANGE as usize] = palette_color::GREEN;
+    remap[palette_color::CRIMSON as usize] = palette_color::PINE;
+    remap[palette_color::ROSE as usize] = palette_color::GREEN;
+    remap[palette_color::PINE as usize] = palette_color::BROWN;
     remap
 };
 
-const BLUE_PAGE_REMAP: [usize; 16] = {
+const BLUE_PAGE_REMAP: [Index; 16] = {
     let mut remap = IDENTITY_PAGE_REMAP;
-    remap[palette_color::PEACH] = palette_color::CYAN;
-    remap[palette_color::LIME] = palette_color::BLUE;
-    remap[palette_color::ORANGE] = palette_color::PINE;
-    remap[palette_color::CRIMSON] = palette_color::PINE;
-    remap[palette_color::ROSE] = palette_color::BLUE;
-    remap[palette_color::PINE] = palette_color::GUNMETAL;
+    remap[palette_color::PEACH as usize] = palette_color::CYAN;
+    remap[palette_color::LIME as usize] = palette_color::BLUE;
+    remap[palette_color::ORANGE as usize] = palette_color::PINE;
+    remap[palette_color::CRIMSON as usize] = palette_color::PINE;
+    remap[palette_color::ROSE as usize] = palette_color::BLUE;
+    remap[palette_color::PINE as usize] = palette_color::GUNMETAL;
     remap
 };
 
@@ -1158,7 +1107,7 @@ fn draw_todo_text(
     x: usize,
     y: usize,
     scale: usize,
-    color: Rgba,
+    color: Rgb,
     chars_per_row: usize,
 ) {
     let max_width = chars_per_row * 6;
@@ -1265,7 +1214,7 @@ fn draw_wrapped_selection(
     y: usize,
     max_width: usize,
     scale: usize,
-    color: Rgba,
+    color: Rgb,
 ) {
     let Some((selection_start, selection_end)) = selection else {
         return;
