@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::bitmap_font::BitmapFont;
@@ -114,17 +114,17 @@ impl Wavey {
     }
 
     /// Reconnect to an mpv left running in the "wavey" abduco session by a
-    /// previous cozyui instance.
+    /// previous cozyui instance. The station index is stamped onto mpv via
+    /// --script-opts at launch, so the running player itself records which
+    /// station it is; querying any property doubles as the liveness check.
     fn resume_running_player(&mut self) {
-        let Some(path) = self.mpv_property("path").as_ref().and_then(json_string) else {
+        let Some(opts) = self.mpv_property("script-opts") else {
             return;
         };
 
         self.playing = true;
-        if let Some(station) = self
-            .stations
-            .iter()
-            .position(|station| station.mpv_args.contains(&path))
+        if let Some(station) =
+            station_from_script_opts(&opts).filter(|&station| station < self.stations.len())
         {
             self.station = station;
         }
@@ -320,30 +320,16 @@ impl Wavey {
             return;
         }
 
-        let ipc_path = mpv_ipc_path();
-        let _ = fs::remove_file(&ipc_path);
+        let _ = fs::remove_file(mpv_ipc_path());
         self.current_title.clear();
         let command_line = format!(
-            "exec mpv --input-terminal=no --input-ipc-server=\"$COZYUI_MPV_IPC\" {}",
-            station.mpv_args
+            "mpv --input-terminal=no --input-ipc-server=\"$COZYUI_MPV_IPC\" \
+             --script-opts=cozyui-wavey-station={} {}",
+            self.station, station.mpv_args
         );
-        // Detached abduco session: the player outlives cozyui restarts.
-        // The previous mpv quits asynchronously, so the "wavey" session can
-        // briefly linger; retry until abduco accepts the name again.
-        for _ in 0..10 {
-            let spawned = Command::new("abduco")
-                .args(["-n", "wavey", "sh", "-c", &command_line])
-                .env("COZYUI_MPV_IPC", &ipc_path)
-                .spawn();
-            let Ok(mut child) = spawned else {
-                return;
-            };
-            if child.wait().is_ok_and(|status| status.success()) {
-                self.playing = true;
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        ensure_player_session();
+        queue_player_command(&command_line);
+        self.playing = true;
     }
 
     fn current_mpv_title(&self) -> Option<String> {
@@ -438,9 +424,7 @@ impl Wavey {
     }
 
     fn stop_player(&mut self) {
-        if self.playing {
-            self.send_mpv_command(&["quit"]);
-        }
+        kill_player();
         let _ = fs::remove_file(mpv_ipc_path());
         self.playing = false;
         self.current_title.clear();
@@ -630,6 +614,68 @@ fn mpv_ipc_path() -> PathBuf {
     // Fixed path so a restarted cozyui can find the mpv left running in the
     // "wavey" abduco session.
     std::env::temp_dir().join("cozyui-mpv-wavey.sock")
+}
+
+/// SIGKILL the wavey mpv (matched by its unique IPC socket argument) so the
+/// session loop frees up immediately instead of waiting for a graceful quit.
+fn kill_player() {
+    let pattern = format!("mpv .*{}", mpv_ipc_path().display());
+    let _ = Command::new("pkill")
+        .args(["-9", "-f", &pattern])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn station_from_script_opts(opts: &serde_json::Value) -> Option<usize> {
+    opts.get("cozyui-wavey-station")?.as_str()?.parse().ok()
+}
+
+fn player_fifo_path() -> PathBuf {
+    std::env::temp_dir().join("cozyui-mpv-wavey.cmd")
+}
+
+/// One persistent "wavey" abduco session running a shell loop that reads mpv
+/// command lines from the FIFO and runs them. The loop outlives each mpv, so
+/// the session name never has to be recycled and `abduco -a wavey` works from
+/// any terminal whenever something is (or was) playing.
+fn ensure_player_session() {
+    let fifo = player_fifo_path();
+    let _ = Command::new("mkfifo")
+        .arg(&fifo)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    // Fails fast with "session exists" noise when already running; that is
+    // the expected steady state, so the output is discarded. -f reclaims the
+    // name from a dead session (e.g. a force-killed mpv from an older cozyui)
+    // that would otherwise block creation forever.
+    let runner = r#"while :; do cmd=$(cat "$COZYUI_MPV_FIFO") || exit; [ -n "$cmd" ] && eval "$cmd"; done"#;
+    let _ = Command::new("abduco")
+        .args(["-f", "-n", "wavey", "sh", "-c", runner])
+        .env("COZYUI_MPV_FIFO", &fifo)
+        .env("COZYUI_MPV_IPC", mpv_ipc_path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Writing to the FIFO blocks until the session loop is back at `cat` (i.e.
+/// the previous mpv has exited), so the write happens in a throwaway child
+/// that gets reaped off the UI thread.
+fn queue_player_command(command: &str) {
+    let spawned = Command::new("sh")
+        .args(["-c", r#"printf '%s\n' "$COZYUI_MPV_CMD" > "$COZYUI_MPV_FIFO""#])
+        .env("COZYUI_MPV_CMD", command)
+        .env("COZYUI_MPV_FIFO", player_fifo_path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Ok(mut child) = spawned {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 fn volume_angle(volume: u8) -> f32 {
@@ -993,4 +1039,21 @@ struct Tm {
 
 unsafe extern "C" {
     fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn station_from_script_opts_reads_stamped_index() {
+        let opts = serde_json::json!({"cozyui-wavey-station": "2", "other": "x"});
+
+        assert_eq!(station_from_script_opts(&opts), Some(2));
+        assert_eq!(station_from_script_opts(&serde_json::json!({})), None);
+        assert_eq!(
+            station_from_script_opts(&serde_json::json!({"cozyui-wavey-station": "nope"})),
+            None
+        );
+    }
 }
