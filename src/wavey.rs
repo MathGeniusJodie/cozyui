@@ -807,7 +807,7 @@ fn copy_clock_pixels(
             let px = dest_x + src.x + x - anchor.0;
             let py = dest_y + src.y + y - anchor.1;
             if let Some(color) = palette.resolve(index, px, py) {
-                fb.fill_rect(px, py, 1, 1, color);
+                fb.set_pixel(px, py, color);
             }
         }
     }
@@ -896,7 +896,7 @@ fn clear_knob_marker(image: &Sprite, fb: &mut Framebuffer, palette: &Palette) {
             if image.at(x, y) == palette_color::LAVENDER
                 && let Some(color) = palette.resolve(palette_color::PLUM, x, y)
             {
-                fb.fill_rect(x, y, 1, 1, color);
+                fb.set_pixel(x, y, color);
             }
         }
     }
@@ -931,7 +931,7 @@ fn copy_moved_knob_marker(
                 && dest_y >= 0
                 && let Some(color) = palette.resolve(index, dest_x as usize, dest_y as usize)
             {
-                fb.fill_rect(dest_x as usize, dest_y as usize, 1, 1, color);
+                fb.set_pixel(dest_x as usize, dest_y as usize, color);
             }
         }
     }

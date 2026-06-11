@@ -10,7 +10,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, Term, TermMode, point_to_viewport};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
@@ -290,30 +290,7 @@ impl Puter {
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         let term = self.terminal().term();
 
-        fb.clear_scaled(self.mode_images.for_settings(self.settings), BG_SCALE, palette);
-        fb.fill_rect(
-            art_x(CONTROL_CLEAR_X),
-            art_y(CONTROL_CLEAR_Y),
-            CONTROL_CLEAR_W * BG_SCALE,
-            CONTROL_CLEAR_H * BG_SCALE,
-            palette.color(palette_color::CREAM),
-        );
-        draw_mode_buttons(fb, &self.button_sprites, palette);
-        draw_lights(fb, self.settings, palette);
-        fb.draw_sprite(
-            &self.power_button,
-            art_x(POWER_BUTTON_X) as isize,
-            art_y(ICON_BUTTON_Y) as isize,
-            BG_SCALE,
-            palette,
-        );
-        fb.draw_sprite(
-            &self.lock_button,
-            art_x(LOCK_BUTTON_X) as isize,
-            art_y(ICON_BUTTON_Y) as isize,
-            BG_SCALE,
-            palette,
-        );
+        self.render_chrome(fb, palette);
 
         let cell_w = GLYPH_W * GLYPH_SCALE;
         let cell_h = GLYPH_H * GLYPH_SCALE;
@@ -337,66 +314,8 @@ impl Puter {
             if selected {
                 fb.fill_rect(x, y, cell_w, cell_h, palette.color(COLOR_SELECTION));
             }
-            let mut fg_color = cell.fg;
-            let mut fg = self.terminal_color(fg_color, palette);
-            let mut bg = self.terminal_background_color(cell.bg, palette);
-            let mut glow = Some(self.terminal_glow_color(fg_color, palette));
-            if cell.flags.contains(Flags::DIM) {
-                let dim_fg = dim_color(cell.fg);
-                fg_color = dim_fg;
-                fg = self.terminal_color(fg_color, palette);
-                glow = Some(self.terminal_glow_color(fg_color, palette));
-                bg = (cell.bg != Color::Named(NamedColor::Background))
-                    .then(|| self.terminal_color(dim_color(cell.bg), palette));
-            }
-            if cell.flags.contains(Flags::INVERSE) {
-                let inverse_bg = fg;
-                let inverse_fg = cell
-                    .bg
-                    .ne(&Color::Named(NamedColor::Background))
-                    .then_some(cell.bg)
-                    .unwrap_or(Color::Named(NamedColor::Foreground));
-                fg_color = inverse_fg;
-                fg = bg.unwrap_or_else(|| self.background_terminal_text_color(palette));
-                glow = Some(self.terminal_glow_color(fg_color, palette));
-                bg = Some(inverse_bg);
-            }
-            if selected {
-                fg = palette.color(palette_color::CREAM);
-                bg = Some(palette.color(COLOR_SELECTION));
-                glow = Some(palette.color(COLOR_SELECTION));
-            } else if self.settings.high_brightness {
-                let style = self.high_brightness_terminal_style(fg_color, palette);
-                fg = style.fg;
-                glow = style.glow;
-            }
-            if let Some(bg) = bg {
-                fb.fill_rect(x, y, cell_w, cell_h, bg);
-            }
-            if cell.c == ' ' {
-                continue;
-            }
-            if self.settings.high_brightness
-                && let Some(glow) = glow
-            {
-                draw_glyph(fb, &self.atlas, cell.c, x - 1, y, GLYPH_SCALE, glow);
-                draw_glyph(fb, &self.atlas, cell.c, x + 1, y, GLYPH_SCALE, glow);
-                draw_glyph(fb, &self.atlas, cell.c, x, y - 1, GLYPH_SCALE, glow);
-                draw_glyph(fb, &self.atlas, cell.c, x, y + 1, GLYPH_SCALE, glow);
-            }
-            draw_glyph(fb, &self.atlas, cell.c, x, y, GLYPH_SCALE, fg);
-            if cell.flags.contains(Flags::BOLD) {
-                draw_glyph(fb, &self.atlas, cell.c, x + 1, y, GLYPH_SCALE, fg);
-            }
-            if cell.flags.intersects(Flags::ALL_UNDERLINES) {
-                fb.fill_rect(x, y + cell_h - 1, cell_w, 1, fg);
-                if cell.flags.contains(Flags::DOUBLE_UNDERLINE) && cell_h > 2 {
-                    fb.fill_rect(x, y + cell_h - 3, cell_w, 1, fg);
-                }
-            }
-            if cell.flags.contains(Flags::STRIKEOUT) {
-                fb.fill_rect(x, y + cell_h / 2, cell_w, 1, fg);
-            }
+            let style = self.cell_style(cell, selected, palette);
+            self.draw_cell(fb, cell, style, x, y);
         }
 
         if let Some(cursor_point) = point_to_viewport(content.display_offset, content.cursor.point)
@@ -429,6 +348,116 @@ impl Puter {
                     palette,
                 );
             }
+        }
+    }
+
+    /// The static dressing around the screen: case art, control strip, mode
+    /// buttons, lights, and the power/lock buttons.
+    fn render_chrome(&self, fb: &mut Framebuffer, palette: &Palette) {
+        fb.clear_scaled(self.mode_images.for_settings(self.settings), BG_SCALE, palette);
+        fb.fill_rect(
+            art_x(CONTROL_CLEAR_X),
+            art_y(CONTROL_CLEAR_Y),
+            CONTROL_CLEAR_W * BG_SCALE,
+            CONTROL_CLEAR_H * BG_SCALE,
+            palette.color(palette_color::CREAM),
+        );
+        draw_mode_buttons(fb, &self.button_sprites, palette);
+        draw_lights(fb, self.settings, palette);
+        fb.draw_sprite(
+            &self.power_button,
+            art_x(POWER_BUTTON_X) as isize,
+            art_y(ICON_BUTTON_Y) as isize,
+            BG_SCALE,
+            palette,
+        );
+        fb.draw_sprite(
+            &self.lock_button,
+            art_x(LOCK_BUTTON_X) as isize,
+            art_y(ICON_BUTTON_Y) as isize,
+            BG_SCALE,
+            palette,
+        );
+    }
+
+    /// Resolve a cell's colors through the DIM, INVERSE, selection, and
+    /// high-brightness layers, in that order.
+    fn cell_style(&self, cell: &Cell, selected: bool, palette: &Palette) -> CellStyle {
+        let mut fg_color = cell.fg;
+        let mut fg = self.terminal_color(fg_color, palette);
+        let mut bg = self.terminal_background_color(cell.bg, palette);
+        let mut glow = Some(self.terminal_glow_color(fg_color, palette));
+        if cell.flags.contains(Flags::DIM) {
+            let dim_fg = dim_color(cell.fg);
+            fg_color = dim_fg;
+            fg = self.terminal_color(fg_color, palette);
+            glow = Some(self.terminal_glow_color(fg_color, palette));
+            bg = (cell.bg != Color::Named(NamedColor::Background))
+                .then(|| self.terminal_color(dim_color(cell.bg), palette));
+        }
+        if cell.flags.contains(Flags::INVERSE) {
+            let inverse_bg = fg;
+            let inverse_fg = cell
+                .bg
+                .ne(&Color::Named(NamedColor::Background))
+                .then_some(cell.bg)
+                .unwrap_or(Color::Named(NamedColor::Foreground));
+            fg_color = inverse_fg;
+            fg = bg.unwrap_or_else(|| self.background_terminal_text_color(palette));
+            glow = Some(self.terminal_glow_color(fg_color, palette));
+            bg = Some(inverse_bg);
+        }
+        if selected {
+            fg = palette.color(palette_color::CREAM);
+            bg = Some(palette.color(COLOR_SELECTION));
+            glow = Some(palette.color(COLOR_SELECTION));
+        } else if self.settings.high_brightness {
+            let style = self.high_brightness_terminal_style(fg_color, palette);
+            fg = style.fg;
+            glow = style.glow;
+        }
+        CellStyle { fg, bg, glow }
+    }
+
+    /// Paint one cell at framebuffer position (x, y): background, glow halo,
+    /// glyph, and the bold/underline/strikeout decorations.
+    fn draw_cell(
+        &self,
+        fb: &mut Framebuffer,
+        cell: &Cell,
+        style: CellStyle,
+        x: usize,
+        y: usize,
+    ) {
+        let cell_w = GLYPH_W * GLYPH_SCALE;
+        let cell_h = GLYPH_H * GLYPH_SCALE;
+        if let Some(bg) = style.bg {
+            fb.fill_rect(x, y, cell_w, cell_h, bg);
+        }
+        if cell.c == ' ' {
+            return;
+        }
+        if self.settings.high_brightness
+            && let Some(glow) = style.glow
+        {
+            draw_glyph(fb, &self.atlas, cell.c, x - 1, y, GLYPH_SCALE, glow);
+            draw_glyph(fb, &self.atlas, cell.c, x + 1, y, GLYPH_SCALE, glow);
+            draw_glyph(fb, &self.atlas, cell.c, x, y - 1, GLYPH_SCALE, glow);
+            draw_glyph(fb, &self.atlas, cell.c, x, y + 1, GLYPH_SCALE, glow);
+        }
+        let fg = style.fg;
+        draw_glyph(fb, &self.atlas, cell.c, x, y, GLYPH_SCALE, fg);
+        if cell.flags.contains(Flags::BOLD) {
+            draw_glyph(fb, &self.atlas, cell.c, x + 1, y, GLYPH_SCALE, fg);
+        }
+        if cell.flags.intersects(Flags::ALL_UNDERLINES) {
+            fb.fill_rect(x, y + cell_h - 1, cell_w, 1, fg);
+            if cell.flags.contains(Flags::DOUBLE_UNDERLINE) && cell_h > 2 {
+                fb.fill_rect(x, y + cell_h - 3, cell_w, 1, fg);
+            }
+        }
+        if cell.flags.contains(Flags::STRIKEOUT) {
+            fb.fill_rect(x, y + cell_h / 2, cell_w, 1, fg);
         }
     }
 
@@ -516,6 +545,13 @@ impl Puter {
 
 struct TerminalTextStyle {
     fg: PaletteRgb,
+    glow: Option<PaletteRgb>,
+}
+
+/// Final resolved colors for one terminal cell.
+struct CellStyle {
+    fg: PaletteRgb,
+    bg: Option<PaletteRgb>,
     glow: Option<PaletteRgb>,
 }
 

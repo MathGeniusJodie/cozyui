@@ -6,6 +6,8 @@ use x11rb::protocol::Event as XEvent;
 use x11rb::protocol::xproto::ButtonIndex;
 use xkbcommon::xkb::keysyms;
 
+#[cfg(test)]
+mod bench;
 mod bitmap_font;
 mod comicoro_font;
 mod day;
@@ -91,6 +93,14 @@ enum WidgetId {
     Day,
 }
 
+const WIDGET_COUNT: usize = 6;
+
+impl WidgetId {
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
 impl WidgetId {
     const ALL: [Self; 6] = [
         Self::Wavey,
@@ -131,18 +141,9 @@ struct App {
     wavey: wavey::Wavey,
     day: day::Day,
     desk: Sprite,
-    puter_fb: Framebuffer,
-    toodle_fb: Framebuffer,
-    fwends_fb: Framebuffer,
-    twirl_fb: Framebuffer,
-    wavey_fb: Framebuffer,
-    day_fb: Framebuffer,
-    puter_rect: Rect,
-    toodle_rect: Rect,
-    fwends_rect: Rect,
-    twirl_rect: Rect,
-    wavey_rect: Rect,
-    day_rect: Rect,
+    // Indexed by WidgetId::index().
+    fbs: [Framebuffer; WIDGET_COUNT],
+    rects: [Rect; WIDGET_COUNT],
     focus: WidgetId,
     puter_pressed: bool,
     text_drag: Option<WidgetId>,
@@ -157,49 +158,32 @@ impl App {
         let wavey = wavey::Wavey::load(palette)?;
         let day = day::Day::load(palette)?;
         let desk = Sprite::load_native(DESK_PATH, palette)?;
-        let layout = WidgetLayout::new(&puter, &toodle, &twirl, &wavey, &day);
-        let puter_rect = Rect {
-            x: layout.puter_x,
-            y: layout.puter_y,
-            w: puter.width(),
-            h: puter.height(),
-        };
-        let toodle_rect = Rect {
-            x: layout.toodle_x,
-            y: layout.toodle_y,
-            w: toodle.width(),
-            h: toodle.height(),
-        };
-        let fwends_rect = Rect {
-            x: layout.fwends_x,
-            y: layout.fwends_y,
-            w: fwends.width(),
-            h: fwends.height(),
-        };
-        let twirl_rect = Rect {
-            x: layout.twirl_x,
-            y: layout.twirl_y,
-            w: twirl.width(),
-            h: twirl.height(),
-        };
-        let wavey_rect = Rect {
-            x: layout.wavey_x,
-            y: layout.wavey_y,
-            w: wavey.width(),
-            h: wavey.height(),
-        };
-        let day_rect = Rect {
-            x: layout.day_x,
-            y: layout.day_y,
-            w: day.width(),
-            h: day.height(),
-        };
-        let puter_fb = Framebuffer::new(puter_rect.w, puter_rect.h, puter.fill_color(palette));
-        let toodle_fb = Framebuffer::new(toodle_rect.w, toodle_rect.h, toodle.fill_color(palette));
-        let fwends_fb = Framebuffer::new(fwends_rect.w, fwends_rect.h, fwends.fill_color(palette));
-        let twirl_fb = Framebuffer::new(twirl_rect.w, twirl_rect.h, twirl.fill_color(palette));
-        let wavey_fb = Framebuffer::new(wavey_rect.w, wavey_rect.h, wavey.fill_color(palette));
-        let day_fb = Framebuffer::new(day_rect.w, day_rect.h, day.fill_color(palette));
+        let positions = widget_positions(&puter, &toodle, &twirl, &wavey, &day);
+        let sizes: [(usize, usize); WIDGET_COUNT] = [
+            (puter.width(), puter.height()),
+            (toodle.width(), toodle.height()),
+            (fwends.width(), fwends.height()),
+            (twirl.width(), twirl.height()),
+            (wavey.width(), wavey.height()),
+            (day.width(), day.height()),
+        ];
+        let fills: [Rgba; WIDGET_COUNT] = [
+            puter.fill_color(palette),
+            toodle.fill_color(palette),
+            fwends.fill_color(palette),
+            twirl.fill_color(palette),
+            wavey.fill_color(palette),
+            day.fill_color(palette),
+        ];
+        let rects = std::array::from_fn(|i| {
+            let (x, y) = positions[i];
+            let (w, h) = sizes[i];
+            Rect { x, y, w, h }
+        });
+        let fbs = std::array::from_fn(|i| {
+            let (w, h) = sizes[i];
+            Framebuffer::new(w, h, fills[i])
+        });
 
         let mut app = Self {
             puter,
@@ -209,18 +193,8 @@ impl App {
             wavey,
             day,
             desk,
-            puter_fb,
-            toodle_fb,
-            fwends_fb,
-            twirl_fb,
-            wavey_fb,
-            day_fb,
-            puter_rect,
-            toodle_rect,
-            fwends_rect,
-            twirl_rect,
-            wavey_rect,
-            day_rect,
+            fbs,
+            rects,
             focus: WidgetId::Toodle,
             puter_pressed: false,
             text_drag: None,
@@ -230,16 +204,14 @@ impl App {
     }
 
     fn width(&self) -> usize {
-        let width = self
-            .toodle_rect
-            .x
-            .saturating_add(self.toodle_rect.w)
+        let rect = |widget: WidgetId| self.rect_for(widget);
+        let width = (rect(WidgetId::Toodle).x.saturating_add(rect(WidgetId::Toodle).w))
             .max(self.desk.width)
-            .max(self.twirl_rect.x + self.twirl_rect.w)
-            .max(self.wavey_rect.x + self.wavey_rect.w)
-            .max(self.day_rect.x + self.day_rect.w);
+            .max(rect(WidgetId::Twirl).x + rect(WidgetId::Twirl).w)
+            .max(rect(WidgetId::Wavey).x + rect(WidgetId::Wavey).w)
+            .max(rect(WidgetId::Day).x + rect(WidgetId::Day).w);
         if SHOW_FWENDS {
-            width.max(self.fwends_rect.x + self.fwends_rect.w)
+            width.max(rect(WidgetId::Fwends).x + rect(WidgetId::Fwends).w)
         } else {
             width
         }
@@ -248,22 +220,23 @@ impl App {
     fn height(&self) -> usize {
         let height = self.target_app_height();
         if SHOW_FWENDS {
-            height.max(self.fwends_rect.y + self.fwends_rect.h)
+            let fwends = self.rect_for(WidgetId::Fwends);
+            height.max(fwends.y + fwends.h)
         } else {
             height
         }
     }
 
     fn target_app_height(&self) -> usize {
-        let height = self
-            .puter_rect
+        let rect = |widget: WidgetId| self.rect_for(widget);
+        let height = rect(WidgetId::Puter)
             .h
             .max(self.desk.height)
-            .max(self.twirl_rect.y + self.twirl_rect.h)
-            .max(self.wavey_rect.y + self.wavey_rect.h)
-            .max(self.day_rect.y + self.day_rect.h);
+            .max(rect(WidgetId::Twirl).y + rect(WidgetId::Twirl).h)
+            .max(rect(WidgetId::Wavey).y + rect(WidgetId::Wavey).h)
+            .max(rect(WidgetId::Day).y + rect(WidgetId::Day).h);
         let height = if SHOW_FWENDS {
-            height.max(self.fwends_rect.y + self.fwends.min_height())
+            height.max(rect(WidgetId::Fwends).y + self.fwends.min_height())
         } else {
             height
         };
@@ -297,38 +270,35 @@ impl App {
     }
 
     fn render_widget(&mut self, fb: &mut Framebuffer, palette: &Palette, widget: WidgetId) {
+        let widget_fb = &mut self.fbs[widget.index()];
         match widget {
             WidgetId::Puter => {
-                self.puter_fb.clear(self.puter.fill_color(palette));
-                self.puter.render(&mut self.puter_fb, palette);
-                fb.blit_from(&self.puter_fb, self.puter_rect.x, self.puter_rect.y);
+                widget_fb.clear(self.puter.fill_color(palette));
+                self.puter.render(widget_fb, palette);
             }
             WidgetId::Toodle => {
-                self.toodle_fb.clear(self.toodle.fill_color(palette));
-                self.toodle.render(&mut self.toodle_fb, palette);
-                fb.blit_from(&self.toodle_fb, self.toodle_rect.x, self.toodle_rect.y);
+                widget_fb.clear(self.toodle.fill_color(palette));
+                self.toodle.render(widget_fb, palette);
             }
             WidgetId::Fwends => {
-                self.fwends_fb.clear(self.fwends.fill_color(palette));
-                self.fwends.render(&mut self.fwends_fb, palette);
-                fb.blit_from(&self.fwends_fb, self.fwends_rect.x, self.fwends_rect.y);
+                widget_fb.clear(self.fwends.fill_color(palette));
+                self.fwends.render(widget_fb, palette);
             }
             WidgetId::Twirl => {
-                self.twirl_fb.clear(self.twirl.fill_color(palette));
-                self.twirl.render(&mut self.twirl_fb, palette);
-                fb.blit_from(&self.twirl_fb, self.twirl_rect.x, self.twirl_rect.y);
+                widget_fb.clear(self.twirl.fill_color(palette));
+                self.twirl.render(widget_fb, palette);
             }
             WidgetId::Wavey => {
-                self.wavey_fb.clear(self.wavey.fill_color(palette));
-                self.wavey.render(&mut self.wavey_fb, palette);
-                fb.blit_from(&self.wavey_fb, self.wavey_rect.x, self.wavey_rect.y);
+                widget_fb.clear(self.wavey.fill_color(palette));
+                self.wavey.render(widget_fb, palette);
             }
             WidgetId::Day => {
-                self.day_fb.clear(self.day.fill_color(palette));
-                self.day.render(&mut self.day_fb, palette);
-                fb.blit_from(&self.day_fb, self.day_rect.x, self.day_rect.y);
+                widget_fb.clear(self.day.fill_color(palette));
+                self.day.render(widget_fb, palette);
             }
         }
+        let rect = self.rects[widget.index()];
+        fb.blit_from(&self.fbs[widget.index()], rect.x, rect.y);
     }
 
     fn render_focused_widget(&mut self, fb: &mut Framebuffer, palette: &Palette) {
@@ -364,26 +334,25 @@ impl App {
         let toodle_w = self.toodle.width();
         let toodle_h = self.toodle.height();
 
-        if self.toodle_rect.w != toodle_w || self.toodle_rect.h != toodle_h {
-            self.toodle_rect.w = toodle_w;
-            self.toodle_rect.h = toodle_h;
-            self.toodle_fb = Framebuffer::new(toodle_w, toodle_h, self.toodle.fill_color(palette));
+        let toodle = &mut self.rects[WidgetId::Toodle.index()];
+        if toodle.w != toodle_w || toodle.h != toodle_h {
+            toodle.w = toodle_w;
+            toodle.h = toodle_h;
+            self.fbs[WidgetId::Toodle.index()] =
+                Framebuffer::new(toodle_w, toodle_h, self.toodle.fill_color(palette));
             changed = true;
         }
 
-        let layout = WidgetLayout::new(
+        let positions = widget_positions(
             &self.puter,
             &self.toodle,
             &self.twirl,
             &self.wavey,
             &self.day,
         );
-        changed |= move_rect(&mut self.puter_rect, layout.puter_x, layout.puter_y);
-        changed |= move_rect(&mut self.toodle_rect, layout.toodle_x, layout.toodle_y);
-        changed |= move_rect(&mut self.fwends_rect, layout.fwends_x, layout.fwends_y);
-        changed |= move_rect(&mut self.twirl_rect, layout.twirl_x, layout.twirl_y);
-        changed |= move_rect(&mut self.wavey_rect, layout.wavey_x, layout.wavey_y);
-        changed |= move_rect(&mut self.day_rect, layout.day_x, layout.day_y);
+        for (rect, (x, y)) in self.rects.iter_mut().zip(positions) {
+            changed |= move_rect(rect, x, y);
+        }
         changed |= self.sync_fwends_height(palette);
 
         changed
@@ -391,14 +360,15 @@ impl App {
 
     fn sync_fwends_height(&mut self, palette: &Palette) -> bool {
         let height = self.target_app_height();
-        if !self.fwends.set_height(height) && self.fwends_rect.h == self.fwends.height() {
+        let fwends_rect = self.rects[WidgetId::Fwends.index()];
+        if !self.fwends.set_height(height) && fwends_rect.h == self.fwends.height() {
             return false;
         }
 
-        self.fwends_rect.h = self.fwends.height();
-        self.fwends_fb = Framebuffer::new(
-            self.fwends_rect.w,
-            self.fwends_rect.h,
+        self.rects[WidgetId::Fwends.index()].h = self.fwends.height();
+        self.fbs[WidgetId::Fwends.index()] = Framebuffer::new(
+            fwends_rect.w,
+            self.fwends.height(),
             self.fwends.fill_color(palette),
         );
         true
@@ -409,14 +379,7 @@ impl App {
     }
 
     fn rect_for(&self, widget: WidgetId) -> Rect {
-        match widget {
-            WidgetId::Puter => self.puter_rect,
-            WidgetId::Toodle => self.toodle_rect,
-            WidgetId::Fwends => self.fwends_rect,
-            WidgetId::Twirl => self.twirl_rect,
-            WidgetId::Wavey => self.wavey_rect,
-            WidgetId::Day => self.day_rect,
-        }
+        self.rects[widget.index()]
     }
 
     fn drain_events(&self) -> puter::TerminalEvents {
@@ -492,7 +455,7 @@ impl App {
         }
 
         if self.puter_pressed {
-            let (x, y) = self.puter_rect.local(x, y);
+            let (x, y) = self.rect_for(WidgetId::Puter).local(x, y);
             self.puter.release_button(x, y);
             self.puter_pressed = false;
             return Some(WidgetId::Puter);
@@ -505,11 +468,11 @@ impl App {
         if let Some(widget) = self.text_drag {
             let changed = match widget {
                 WidgetId::Toodle => {
-                    let (local_x, local_y) = self.toodle_rect.local(x, y);
+                    let (local_x, local_y) = self.rect_for(WidgetId::Toodle).local(x, y);
                     self.toodle.drag_text(local_x, local_y)
                 }
                 WidgetId::Fwends => {
-                    let (local_x, local_y) = self.fwends_rect.local(x, y);
+                    let (local_x, local_y) = self.rect_for(WidgetId::Fwends).local(x, y);
                     self.fwends.drag_text(local_x, local_y)
                 }
                 WidgetId::Puter | WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => false,
@@ -518,21 +481,21 @@ impl App {
         }
 
         if self.focus == WidgetId::Puter {
-            let (local_x, local_y) = self.puter_rect.local(x, y);
+            let (local_x, local_y) = self.rect_for(WidgetId::Puter).local(x, y);
             if self.puter.motion(local_x, local_y) {
                 return Some(WidgetId::Puter);
             }
         }
 
         if self.focus == WidgetId::Wavey {
-            let (local_x, local_y) = self.wavey_rect.local(x, y);
+            let (local_x, local_y) = self.rect_for(WidgetId::Wavey).local(x, y);
             if self.wavey.motion(local_x, local_y) {
                 return Some(WidgetId::Wavey);
             }
         }
 
-        if self.toodle_rect.contains(x, y) {
-            let (x, y) = self.toodle_rect.local(x, y);
+        if self.rect_for(WidgetId::Toodle).contains(x, y) {
+            let (x, y) = self.rect_for(WidgetId::Toodle).local(x, y);
             self.toodle.hover(x, y).then_some(WidgetId::Toodle)
         } else {
             self.toodle.hover(-1, -1).then_some(WidgetId::Toodle)
@@ -593,18 +556,6 @@ impl App {
         })
     }
 
-    fn update_twirl(&mut self) -> Result<bool, Box<dyn Error>> {
-        self.twirl.update()
-    }
-
-    fn update_wavey(&mut self) -> bool {
-        self.wavey.update()
-    }
-
-    fn update_day(&mut self) -> bool {
-        self.day.update()
-    }
-
     fn shutdown(&mut self) {
         self.wavey.shutdown();
         self.puter.shutdown_terminal();
@@ -613,68 +564,45 @@ impl App {
 
 const TOODLE_LEFT_OVERLAP: usize = 24;
 
-struct WidgetLayout {
-    puter_x: usize,
-    toodle_x: usize,
-    fwends_x: usize,
-    fwends_y: usize,
-    twirl_x: usize,
-    wavey_x: usize,
-    day_x: usize,
-    twirl_y: usize,
-    toodle_y: usize,
-    puter_y: usize,
-    day_y: usize,
-    wavey_y: usize,
-}
+/// Widget (x, y) positions, indexed by `WidgetId::index()`.
+fn widget_positions(
+    puter: &puter::Puter,
+    toodle: &toodle::Toodle,
+    twirl: &twirl::Twirl,
+    wavey: &wavey::Wavey,
+    day: &day::Day,
+) -> [(usize, usize); WIDGET_COUNT] {
+    let left_w = day.width().max(wavey.width());
+    let middle_x = left_w + WIDGET_GAP;
+    let middle_w = puter.width().max(toodle.width()).max(twirl.width());
+    let left_h = day.height() + WIDGET_GAP + wavey.height();
+    let middle_h = twirl.height() + WIDGET_GAP + toodle.height() + WIDGET_GAP + puter.height();
+    let layout_h = left_h.max(middle_h);
+    let wavey_y = layout_h - wavey.height();
+    let day_y = wavey_y - WIDGET_GAP - day.height() - 30;
+    let puter_y = layout_h - puter.height();
+    let toodle_y = puter_y - WIDGET_GAP - toodle.height();
+    let twirl_y = toodle_y - WIDGET_GAP - twirl.height();
 
-impl WidgetLayout {
-    fn new(
-        puter: &puter::Puter,
-        toodle: &toodle::Toodle,
-        twirl: &twirl::Twirl,
-        wavey: &wavey::Wavey,
-        day: &day::Day,
-    ) -> Self {
-        let left_w = day.width().max(wavey.width());
-        let middle_x = left_w + WIDGET_GAP;
-        let middle_w = puter.width().max(toodle.width()).max(twirl.width());
-        let left_h = day.height() + WIDGET_GAP + wavey.height();
-        let middle_h = twirl.height() + WIDGET_GAP + toodle.height() + WIDGET_GAP + puter.height();
-        let layout_h = left_h.max(middle_h);
-        let wavey_y = layout_h - wavey.height();
-        let day_y = wavey_y - WIDGET_GAP - day.height() - 30;
-        let puter_y = layout_h - puter.height();
-        let toodle_y = puter_y - WIDGET_GAP - toodle.height();
-        let twirl_y = toodle_y - WIDGET_GAP - twirl.height();
+    // Tweak widget positions here. These final coordinates are used both at startup and
+    // after dynamic redraws, so edits in this block won't get snapped back later.
+    let puter_x = middle_x + APP_LEFT_PADDING;
+    let toodle_x = middle_x.saturating_sub(day.width() + TOODLE_LEFT_OVERLAP) + APP_LEFT_PADDING;
+    let twirl_x = middle_x.saturating_sub(day.width()) + APP_LEFT_PADDING;
+    let wavey_x = APP_LEFT_PADDING + 32;
+    let wavey_y = wavey_y + 14;
+    let day_x = wavey.width().saturating_sub(day.width()) + APP_LEFT_PADDING;
+    let fwends_x = middle_x + middle_w + WIDGET_GAP + APP_LEFT_PADDING - FWENDS_LEFT_APRON;
+    let fwends_y = 0;
 
-        // Tweak widget positions here. These final coordinates are used both at startup and
-        // after dynamic redraws, so edits in this block won't get snapped back later.
-        let puter_x = middle_x + APP_LEFT_PADDING;
-        let toodle_x =
-            middle_x.saturating_sub(day.width() + TOODLE_LEFT_OVERLAP) + APP_LEFT_PADDING;
-        let twirl_x = middle_x.saturating_sub(day.width()) + APP_LEFT_PADDING;
-        let wavey_x = APP_LEFT_PADDING + 32;
-        let wavey_y = wavey_y + 14;
-        let day_x = wavey.width().saturating_sub(day.width()) + APP_LEFT_PADDING;
-        let fwends_x = middle_x + middle_w + WIDGET_GAP + APP_LEFT_PADDING - FWENDS_LEFT_APRON;
-        let fwends_y = 0;
-
-        Self {
-            puter_x,
-            toodle_x,
-            fwends_x,
-            fwends_y,
-            twirl_x,
-            wavey_x,
-            day_x,
-            twirl_y,
-            toodle_y,
-            puter_y,
-            day_y,
-            wavey_y,
-        }
-    }
+    [
+        (puter_x, puter_y),
+        (toodle_x, toodle_y),
+        (fwends_x, fwends_y),
+        (twirl_x, twirl_y),
+        (wavey_x, wavey_y),
+        (day_x, day_y),
+    ]
 }
 
 fn move_rect(rect: &mut Rect, x: usize, y: usize) -> bool {
@@ -709,13 +637,15 @@ fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Pal
         return;
     }
 
+    let source_x: Vec<usize> = (x0..x1)
+        .map(|x| stretched_desk_source_x(x, fb.width, desk.width))
+        .collect();
     for y in y0..y1 {
         let source_y = y - desk_y;
         for x in x0..x1 {
-            let source_x = stretched_desk_source_x(x, fb.width, desk.width);
-            let index = desk_background_index(desk.at(source_x, source_y));
+            let index = desk_background_index(desk.at(source_x[x - x0], source_y));
             if let Some(color) = palette.resolve(index, x, y) {
-                fb.fill_rect(x, y, 1, 1, color);
+                fb.set_pixel(x, y, color);
             }
         }
     }
@@ -782,7 +712,7 @@ pub(crate) fn draw_filled_ellipse(
         for x in center_x - dx..=center_x + dx {
             let y = center_y + dy;
             if x >= 0 && y >= 0 {
-                fb.fill_rect(x as usize, y as usize, 1, 1, color);
+                fb.set_pixel(x as usize, y as usize, color);
             }
         }
     }
@@ -820,17 +750,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
-        if app.update_twirl()? {
+        if app.twirl.update()? {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Twirl)?;
             drew_frame = true;
         }
 
-        if app.update_wavey() {
+        if app.wavey.update() {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Wavey)?;
             drew_frame = true;
         }
 
-        if app.update_day() {
+        if app.day.update() {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Day)?;
             drew_frame = true;
         }
@@ -854,13 +784,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if let Some(copy_text) = app.handle_key_press(&input, paste_text.as_deref())? {
                         xwin.set_clipboard_text(copy_text)?;
                     }
-                    if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
-                        app.render(&mut fb, &palette);
-                        xwin.draw(&fb)?;
-                    } else {
-                        app.render_focused_widget(&mut fb, &palette);
-                        xwin.draw_rect(&fb, app.focused_rect())?;
-                    }
+                    redraw_after_input(&mut app, &mut fb, &mut xwin, &palette)?;
                     drew_frame = true;
                 }
                 XEvent::KeyRelease(event) => {
@@ -885,13 +809,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         {
                             xwin.set_clipboard_text(copy_text)?;
                         }
-                        if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
-                            app.render(&mut fb, &palette);
-                            xwin.draw(&fb)?;
-                        } else {
-                            app.render_focused_widget(&mut fb, &palette);
-                            xwin.draw_rect(&fb, app.focused_rect())?;
-                        }
+                        redraw_after_input(&mut app, &mut fb, &mut xwin, &palette)?;
                         drew_frame = true;
                     }
                     _ => {}
@@ -926,6 +844,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     app.shutdown();
+    Ok(())
+}
+
+/// After a key or click: if the layout changed, resize and redraw everything;
+/// otherwise repaint just the focused widget.
+fn redraw_after_input(
+    app: &mut App,
+    fb: &mut Framebuffer,
+    xwin: &mut XWindow,
+    palette: &Palette,
+) -> Result<(), Box<dyn Error>> {
+    if sync_window_layout(app, fb, xwin, palette)? {
+        app.render(fb, palette);
+        xwin.draw(fb)?;
+    } else {
+        app.render_focused_widget(fb, palette);
+        xwin.draw_rect(fb, app.focused_rect())?;
+    }
     Ok(())
 }
 

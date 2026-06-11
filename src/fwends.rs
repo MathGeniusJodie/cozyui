@@ -399,7 +399,11 @@ impl Fwends {
         let layouts = self.message_layouts();
         let viewport_top = CHAT_Y;
         let viewport_bottom = CHAT_Y + self.chat_h();
-        let bottom_offset = self.chat_h().saturating_sub(self.content_height());
+        let content_height = layouts
+            .last()
+            .map(|layout| layout.y + layout.h)
+            .unwrap_or(0);
+        let bottom_offset = self.chat_h().saturating_sub(content_height);
 
         for layout in layouts {
             let y = CHAT_Y as isize + bottom_offset as isize + layout.y as isize
@@ -865,7 +869,7 @@ fn draw_lamp_masked_ellipse(
             let Some(color) = lamp_shadow_color(lamp, lamp_x, lamp_y, x, y, palette) else {
                 continue;
             };
-            fb.fill_rect(x, y, 1, 1, color);
+            fb.set_pixel(x, y, color);
         }
     }
 }
@@ -1476,6 +1480,37 @@ fn stretch_source_coord(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn bench_message_layouts() {
+        use std::time::Instant;
+
+        let palette = crate::Palette::load(concat!(env!("CARGO_MANIFEST_DIR"), "/na16-1x.png"))
+            .unwrap();
+        let mut fwends = Fwends::load(&palette).unwrap();
+        for i in 0..60 {
+            fwends.messages.push(Message::user(format!(
+                "message number {i} with enough words to need wrapping across lines"
+            )));
+            fwends.messages.push(Message::assistant(format!(
+                "reply number {i}, also long enough that the wrapper has to break it up"
+            )));
+        }
+
+        let iterations = 200;
+        let start = Instant::now();
+        for _ in 0..iterations {
+            // What one draw_messages + content_height + max_scroll costs.
+            std::hint::black_box(fwends.message_layouts());
+            std::hint::black_box(fwends.content_height());
+            std::hint::black_box(fwends.max_scroll());
+        }
+        println!(
+            "fwends render-layout work: {:?} per frame ({iterations} iterations)",
+            start.elapsed() / iterations
+        );
+    }
 
     #[test]
     fn extracts_assistant_message_content() {

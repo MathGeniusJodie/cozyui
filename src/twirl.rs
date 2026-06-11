@@ -103,7 +103,7 @@ impl Twirl {
                     other => other,
                 };
                 if let Some(color) = palette.resolve(index, x, y) {
-                    fb.fill_rect(x, y, 1, 1, color);
+                    fb.set_pixel(x, y, color);
                 }
             }
         }

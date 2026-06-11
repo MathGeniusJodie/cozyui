@@ -164,7 +164,13 @@ impl Palette {
     }
 
     pub(crate) fn color(&self, index: Index) -> Rgb {
-        self.colors[index as usize % self.colors.len()]
+        self.colors[Self::wrap(index as usize, self.colors.len())]
+    }
+
+    /// Like `index % len` but branch-only for in-range indices; `%` is an
+    /// integer division and this runs per pixel in the raster loops.
+    fn wrap(index: usize, len: usize) -> usize {
+        if index < len { index } else { index % len }
     }
 
     /// Global theme layer: every slot can become another color or checker.
@@ -181,7 +187,7 @@ impl Palette {
         if index == TRANSPARENT {
             return None;
         }
-        let paint = self.remap[index as usize % self.colors.len()];
+        let paint = self.remap[Self::wrap(index as usize, self.colors.len())];
         paint.pick(cell_x, cell_y).map(|index| self.color(index))
     }
 
@@ -424,17 +430,13 @@ impl Framebuffer {
     const ALPHA_OFFSET: usize = 3;
 
     pub(crate) fn new(width: usize, height: usize, fill: impl Into<Rgba>) -> Self {
-        let fill = fill.into();
-        let mut pixels = vec![0; width * height * Self::BYTES_PER_PIXEL];
-        let color = Self::color_bytes(fill);
-        for pixel in pixels.chunks_exact_mut(Self::BYTES_PER_PIXEL) {
-            pixel.copy_from_slice(&color);
-        }
-        Self {
+        let mut fb = Self {
             width,
             height,
-            pixels,
-        }
+            pixels: vec![0; width * height * Self::BYTES_PER_PIXEL],
+        };
+        fb.clear(fill);
+        fb
     }
 
     fn color_bytes(color: Rgba) -> [u8; Self::BYTES_PER_PIXEL] {
@@ -463,22 +465,63 @@ impl Framebuffer {
 
     pub(crate) fn clear(&mut self, color: impl Into<Rgba>) {
         let color = Self::color_bytes(color.into());
-        for pixel in self.pixels.chunks_exact_mut(Self::BYTES_PER_PIXEL) {
-            pixel.copy_from_slice(&color);
-        }
+        fill_pattern(&mut self.pixels, &color);
     }
 
     pub(crate) fn clear_scaled(&mut self, sprite: &Sprite, scale: usize, palette: &Palette) {
-        for y in 0..self.height {
+        // Resolve each source row once into a byte row, write it, and copy it
+        // to the remaining rows of the scaled band. Transparent pixels keep
+        // the framebuffer's existing content, which rules out the row copy.
+        let mut row = vec![0u8; self.width * Self::BYTES_PER_PIXEL];
+        let sx_map: Vec<usize> = (0..self.width)
+            .map(|x| (x / scale).min(sprite.width - 1))
+            .collect();
+        for band in 0..self.height.div_ceil(scale) {
+            let sy = band.min(sprite.height - 1);
+            let mut opaque_row = true;
             for x in 0..self.width {
-                let sx = (x / scale).min(sprite.width - 1);
-                let sy = (y / scale).min(sprite.height - 1);
-                let Some(color) = palette.resolve(sprite.at(sx, sy), x / scale, y / scale) else {
-                    continue;
-                };
-                self.fill_rect(x, y, 1, 1, color);
+                let sx = sx_map[x];
+                match palette.resolve(sprite.at(sx, sy), sx, sy) {
+                    Some(color) => {
+                        let offset = x * Self::BYTES_PER_PIXEL;
+                        row[offset..offset + Self::BYTES_PER_PIXEL]
+                            .copy_from_slice(&Self::color_bytes(color.into()));
+                    }
+                    None => opaque_row = false,
+                }
+            }
+            let y0 = band * scale;
+            let band_end = (y0 + scale).min(self.height);
+            if opaque_row {
+                self.row_bytes_mut(y0, 0, self.width).copy_from_slice(&row);
+                let first_row = self.pixel_offset(0, y0);
+                let row_len = self.width * Self::BYTES_PER_PIXEL;
+                for y in y0 + 1..band_end {
+                    let dest = self.pixel_offset(0, y);
+                    self.pixels.copy_within(first_row..first_row + row_len, dest);
+                }
+            } else {
+                for y in y0..band_end {
+                    for x in 0..self.width {
+                        let sx = sx_map[x];
+                        if let Some(color) = palette.resolve(sprite.at(sx, sy), sx, sy) {
+                            self.set_pixel(x, y, color);
+                        }
+                    }
+                }
             }
         }
+    }
+
+    /// Write a single pixel (bounds-checked). Cheaper than a 1x1 fill_rect in
+    /// per-pixel loops.
+    pub(crate) fn set_pixel(&mut self, x: usize, y: usize, color: impl Into<Rgba>) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let offset = self.pixel_offset(x, y);
+        self.pixels[offset..offset + Self::BYTES_PER_PIXEL]
+            .copy_from_slice(&Self::color_bytes(color.into()));
     }
 
     pub(crate) fn fill_rect(
@@ -496,13 +539,12 @@ impl Framebuffer {
         let width = w.min(self.width - x);
         let height = h.min(self.height - y);
         let color = Self::color_bytes(color.into());
-        for py in y..y + height {
-            for pixel in self
-                .row_bytes_mut(py, x, width)
-                .chunks_exact_mut(Self::BYTES_PER_PIXEL)
-            {
-                pixel.copy_from_slice(&color);
-            }
+        fill_pattern(self.row_bytes_mut(y, x, width), &color);
+        let row_len = width * Self::BYTES_PER_PIXEL;
+        let first_row = self.pixel_offset(x, y);
+        for py in y + 1..y + height {
+            let dest = self.pixel_offset(x, py);
+            self.pixels.copy_within(first_row..first_row + row_len, dest);
         }
     }
 
@@ -586,6 +628,33 @@ impl Framebuffer {
     ) {
         let width = src.w.min(sprite.width.saturating_sub(src.x));
         let height = src.h.min(sprite.height.saturating_sub(src.y));
+
+        // Unscaled, unswapped, unclipped draws write rows directly instead of
+        // going through fill_rect per pixel — the common case for full-size
+        // sprite blits.
+        if scale == 1 && swap.is_none() && clip.is_none() && dest_x >= 0 && dest_y >= 0 {
+            let dest_x = dest_x as usize;
+            let dest_y = dest_y as usize;
+            if dest_x >= self.width || dest_y >= self.height {
+                return;
+            }
+            let copy_w = width.min(self.width - dest_x);
+            let copy_h = height.min(self.height - dest_y);
+            for y in 0..copy_h {
+                let row = self.row_bytes_mut(dest_y + y, dest_x, copy_w);
+                for x in 0..copy_w {
+                    let index = sprite.at(src.x + x, src.y + y);
+                    let Some(color) = palette.resolve(index, dest_x + x, dest_y + y) else {
+                        continue;
+                    };
+                    let offset = x * Self::BYTES_PER_PIXEL;
+                    row[offset..offset + Self::BYTES_PER_PIXEL]
+                        .copy_from_slice(&Self::color_bytes(color.into()));
+                }
+            }
+            return;
+        }
+
         for y in 0..height {
             for x in 0..width {
                 let index = sprite.at(src.x + x, src.y + y);
@@ -634,6 +703,22 @@ impl Framebuffer {
                 }
             }
         }
+    }
+}
+
+/// Fill `bytes` with a repeating 4-byte pattern by doubling copies: O(log n)
+/// `copy_within` calls instead of one slice write per pixel.
+fn fill_pattern(bytes: &mut [u8], pattern: &[u8; Framebuffer::BYTES_PER_PIXEL]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let len = bytes.len().min(pattern.len());
+    bytes[..len].copy_from_slice(&pattern[..len]);
+    let mut filled = len;
+    while filled < bytes.len() {
+        let copy = filled.min(bytes.len() - filled);
+        bytes.copy_within(..copy, filled);
+        filled += copy;
     }
 }
 
