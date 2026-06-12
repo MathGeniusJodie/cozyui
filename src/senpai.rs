@@ -152,9 +152,66 @@ fn truncate(s: &str, n: usize) -> String {
 
 // -------------------------------------------------------------------- tools
 
+// Model-emitted code runs inside a bubblewrap sandbox: read-only /usr, /opt
+// and /etc, throwaway tmpfs for /tmp and the home directory, no network
+// (web access goes through web_qa/fetch_url instead), PID/IPC/etc.
+// namespaces unshared. Wolfram is the reason for the home-dir binds: the
+// kernel refuses to run without its license/config dirs (fine read-only)
+// and a writable ~/.cache/Wolfram. Everything else in the real home stays
+// invisible. Fails closed: without bwrap the tools error out rather than
+// run unsandboxed.
+fn sandboxed(program: &str, args: &[&str]) -> Command {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let mut cmd = Command::new("bwrap");
+    cmd.args([
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind",
+        "/opt",
+        "/opt",
+        "--ro-bind",
+        "/etc",
+        "/etc",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib",
+        "/lib64",
+        "--symlink",
+        "usr/bin",
+        "/bin",
+        "--symlink",
+        "usr/bin",
+        "/sbin",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--tmpfs",
+        &home,
+    ]);
+    for dir in [".WolframEngine", ".Wolfram", ".config/Wolfram"] {
+        let path = format!("{home}/{dir}");
+        if std::path::Path::new(&path).exists() {
+            cmd.args(["--ro-bind", &path, &path]);
+        }
+    }
+    let cache = format!("{home}/.cache/Wolfram");
+    if std::path::Path::new(&cache).exists() {
+        cmd.args(["--bind", &cache, &cache]);
+    }
+    cmd.args(["--setenv", "HOME", &home]);
+    cmd.args(["--unshare-all", "--die-with-parent", "--", program]);
+    cmd.args(args);
+    cmd
+}
+
 fn run_python(code: &str) -> String {
-    let out = Command::new("python3")
-        .args(["-c", code])
+    let out = sandboxed("python3", &["-c", code])
         .output()
         .map(|o| {
             format!(
@@ -168,8 +225,7 @@ fn run_python(code: &str) -> String {
 }
 
 fn run_wolframscript(code: &str) -> String {
-    let out = Command::new("wolframscript")
-        .args(["-code", code])
+    let out = sandboxed("wolframscript", &["-code", code])
         .output()
         .map(|o| {
             format!(
@@ -868,5 +924,28 @@ pub fn cli_main() {
             continue;
         }
         cli_turn(&config, &mut chat, line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Touches the real bwrap/python/wolframscript installs; run manually:
+    // cargo test sandbox -- --ignored
+    #[test]
+    #[ignore]
+    fn sandbox_runs_tools_and_blocks_escapes() {
+        assert_eq!(
+            run_python("print(2**100)").trim(),
+            "1267650600228229401496703205376"
+        );
+        assert_eq!(run_wolframscript("2^10").trim(), "1024");
+        // Writes to home land in tmpfs; the file must not exist afterwards.
+        let home = std::env::var("HOME").unwrap();
+        run_python(&format!(
+            "open('{home}/sandbox_escape_test','w').write('x')"
+        ));
+        assert!(!std::path::Path::new(&format!("{home}/sandbox_escape_test")).exists());
     }
 }
