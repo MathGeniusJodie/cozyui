@@ -26,8 +26,10 @@
 // (src/senpai_main.rs calls `cli_main`). Each crate uses a different half,
 // so dead-code lints are suppressed file-wide.
 //
-// Run: OPENROUTER_API_KEY=... cargo run --bin senpai -- "one-shot message"
-//      OPENROUTER_API_KEY=... cargo run --bin senpai  (interactive chat)
+// Run: OPENROUTER_API_KEY=... BRAVE_ANSWERS_KEY=... \
+//      cargo run --bin senpai -- "one-shot message"
+//      OPENROUTER_API_KEY=... BRAVE_ANSWERS_KEY=... \
+//      cargo run --bin senpai  (interactive chat)
 #![allow(dead_code)]
 
 use serde_json::{Value, json};
@@ -35,6 +37,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 const API: &str = "https://openrouter.ai/api/v1/chat/completions";
+const BRAVE_ANSWERS_API: &str = "https://api.search.brave.com/res/v1/chat/completions";
 const DEFAULT_SENPAI: &str = "anthropic/claude-opus-4.5";
 // Note: OpenRouter rejects presets whose fallback list has more than 3
 // models ("'models' array must have 3 items or fewer").
@@ -92,9 +95,7 @@ fn curl_post(body: &Value) -> Result<Value, String> {
             c.wait_with_output()
         })
         .map_err(|e| format!("curl failed: {e}"))?;
-    Ok(serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
-        json!({"error": {"message": String::from_utf8_lossy(&out.stdout).to_string()}})
-    }))
+    Ok(parse_json_body(&out.stdout))
 }
 
 fn choice(resp: &Value) -> &Value {
@@ -109,7 +110,14 @@ fn choice(resp: &Value) -> &Value {
 }
 
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else { format!("{}…[truncated]", &s[..n]) }
+    if s.len() <= n {
+        return s.to_string();
+    }
+    let mut end = n;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[truncated]", &s[..end])
 }
 
 // -------------------------------------------------------------------- tools
@@ -144,51 +152,138 @@ fn run_wolfram(code: &str) -> String {
     truncate(&out, 2000)
 }
 
-// Web Q&A: one-shot web-search-enabled sub-call using OpenRouter's
-// server-side tools (the old web plugin and ":online" suffix are deprecated).
-// Those tools currently 500 on @preset/ models, so this sub-call pins a
-// direct model id. Short answer + epistemic status, or honest miss.
-const WEB_QA_MODEL: &str = "deepseek/deepseek-v4-flash";
+// Web Q&A: one Brave Answers call, capped and configured for a tiny
+// search-backed answer. Failures surface as an honest NOT FOUND.
+const BRAVE_ANSWER_MODEL: &str = "brave";
 
 fn web_qa(question: &str) -> String {
+    brave_answer_qa(question)
+        .unwrap_or_else(|err| format!("A: NOT FOUND\nEPISTEMIC: web call failed ({err})"))
+}
+
+fn brave_answer_qa(question: &str) -> Result<String, String> {
     let body = json!({
-        "model": WEB_QA_MODEL,
-        "tools": [
-            {"type": "openrouter:web_search"},
-            {"type": "openrouter:web_fetch"}
-        ],
-        // No max_tokens: server-side tool rounds and (minimal) reasoning
-        // spend from the same budget, and a clipped budget surfaced as empty
-        // answers. The system prompt bounds the answer length instead.
-        "reasoning": {"effort": "minimal", "exclude": true},
+        "model": BRAVE_ANSWER_MODEL,
+        "stream": false,
+        "max_completion_tokens": 140,
+        "web_search_options": {
+            "country": "US",
+            "language": "en",
+            "safesearch": "moderate",
+            "enable_entities": false,
+            "enable_citations": true,
+            "enable_research": false
+        },
+        // Brave Answers allows exactly one message, and derives its search
+        // query from it — so the question leads and the instructions trail
+        // in parentheses (instructions-first polluted the search query and
+        // produced NOT FOUND on easy questions).
         "messages": [
-            {"role": "system", "content":
-                "Answer from web search results only. Format:\n\
+            {"role": "user", "content": format!(
+                "{}\n\n\
+                 (Answer from current Brave web results only. Format exactly:\n\
                  A: <answer, <=2 lines>\n\
-                 EPISTEMIC: <confident|likely|uncertain> — <1-line basis, e.g. '3 sources agree' or 'single blog post'>\n\
+                 EPISTEMIC: <confident|likely|uncertain> - <1-line source basis>\n\
                  If the results don't contain the answer, output exactly:\n\
                  A: NOT FOUND\nEPISTEMIC: searched, no reliable source\n\
-                 No preamble. Never answer from memory."},
-            {"role": "user", "content": question}
+                 No preamble. Do not include markdown. Never answer from memory.)",
+                brave_query(question)
+            )}
         ]
     });
-    let resp = match curl_post(&body) {
-        Ok(resp) => resp,
-        Err(err) => return format!("A: NOT FOUND\nEPISTEMIC: web call failed ({err})"),
-    };
-    let ch = choice(&resp);
+    let resp = curl_post_brave_answers(&body)?;
+    if resp["choices"][0].is_null() {
+        return Err(api_error_message(&resp));
+    }
+    let ch = &resp["choices"][0];
     let mut text = content_text(&ch["message"]["content"]);
     if text.trim().is_empty() {
-        return format!(
-            "A: NOT FOUND\nEPISTEMIC: web call failed (finish_reason: {})",
+        return Err(format!(
+            "empty Brave Answers response (finish_reason: {})",
             ch["finish_reason"].as_str().unwrap_or("none")
-        );
+        ));
     }
-    // A clipped answer is still an answer; mark it rather than discard it.
     if ch["finish_reason"] == "length" {
         text.push_str("\n(answer truncated)");
     }
-    text
+    Ok(truncate(&text, 1200))
+}
+
+fn curl_post_brave_answers(body: &Value) -> Result<Value, String> {
+    let key =
+        std::env::var("BRAVE_ANSWERS_KEY").map_err(|_| "BRAVE_ANSWERS_KEY not set".to_string())?;
+    let out = Command::new("curl")
+        .args([
+            "-sS",
+            "--compressed",
+            BRAVE_ANSWERS_API,
+            "-H",
+            "Accept: application/json",
+            "-H",
+            "Accept-Encoding: gzip",
+            "-H",
+            "Content-Type: application/json",
+        ])
+        .arg("-H")
+        .arg(format!("x-subscription-token: {key}"))
+        .args(["--data-binary", "@-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin
+                .take()
+                .unwrap()
+                .write_all(body.to_string().as_bytes())?;
+            c.wait_with_output()
+        })
+        .map_err(|e| format!("Brave Answers curl failed: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("Brave Answers curl failed: {stderr}"));
+    }
+    Ok(parse_json_body(&out.stdout))
+}
+
+/// Parse a response body as JSON; on failure wrap the raw text in an
+/// error-shaped Value so api_error_message can surface it.
+fn parse_json_body(stdout: &[u8]) -> Value {
+    serde_json::from_slice(stdout).unwrap_or_else(
+        |_| json!({"error": {"message": String::from_utf8_lossy(stdout).to_string()}}),
+    )
+}
+
+fn brave_query(question: &str) -> String {
+    compact_text(
+        &question
+            .split_whitespace()
+            .take(50)
+            .collect::<Vec<_>>()
+            .join(" "),
+        400,
+    )
+}
+
+fn compact_text(text: &str, max_bytes: usize) -> String {
+    let text = html_to_text(text);
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", text[..end].trim_end())
+}
+
+fn api_error_message(resp: &Value) -> String {
+    resp["error"]["message"]
+        .as_str()
+        .or_else(|| resp["error"]["detail"].as_str())
+        .or_else(|| resp["error"].as_str())
+        .unwrap_or("unknown API error")
+        .to_string()
 }
 
 // Raw page fetch: curl + crude HTML-to-text, no LLM tokens spent. For when
@@ -471,7 +566,7 @@ Good Example:
 
 Good Example:
     message: ugh, my deploy broke at 2am again lol
-    you: venting, not a request. no tools. commiserate first, maybe one light question; don't lecture.
+    you: venting, not a request. no tools. commiserate first, maybe one light question.
 
 Bad (never do):
     you: 'Looking at this message, the first thing to consider...'
@@ -549,7 +644,10 @@ are only for when the answer actually needs them. Older conversation arrives
 as one-line summaries labeled [block N]; read_block(id) retrieves a block's
 full text when the user refers to something only summarized. Use fetch_url
 when you already know the page you need; web_qa when you need an answer
-found. A smart and wise senpai has read the message; their private briefing
+found. Your training data has a knowledge cutoff in the past: for anything
+current, trust web_qa/fetch_url results over what you remember, and never
+dismiss a dated web result as \"future\" or implausible just because it
+postdates your training. A smart and wise senpai has read the message; their private briefing
 is attached to it. Follow it unless evidence contradicts it; never mention
 the briefing or senpai to the user. Work step by step when the message calls
 for it, then reply to the user directly, concisely, and in a tone that
@@ -574,10 +672,23 @@ const STUDENT_TOOLS_JSON: &str = r#"[
 ]"#;
 
 fn student_system(config: &SenpaiConfig) -> String {
-    match &config.persona {
-        Some(persona) => format!("{STUDENT_SYSTEM}\n\nPERSONA (speak as this):\n{persona}"),
-        None => STUDENT_SYSTEM.to_string(),
+    // Day granularity only: this string carries a cache breakpoint, so a
+    // finer-grained timestamp would break the cached prefix on every call.
+    let mut system = format!("{STUDENT_SYSTEM}\nToday's date is {}.", today());
+    if let Some(persona) = &config.persona {
+        system.push_str(&format!("\n\nPERSONA (speak as this):\n{persona}"));
     }
+    system
+}
+
+fn today() -> String {
+    Command::new("date")
+        .arg("+%Y-%m-%d")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 // One conversation turn. `chat` holds the cleaned transcript of earlier
