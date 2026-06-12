@@ -167,7 +167,7 @@ fn brave_answer_qa(question: &str) -> Result<String, String> {
         "stream": false,
         "max_completion_tokens": 140,
         "web_search_options": {
-            "country": "US",
+            "country": "CA",
             "language": "en",
             "safesearch": "moderate",
             "enable_entities": false,
@@ -186,7 +186,7 @@ fn brave_answer_qa(question: &str) -> Result<String, String> {
                  EPISTEMIC: <confident|likely|uncertain> - <1-line source basis>\n\
                  If the results don't contain the answer, output exactly:\n\
                  A: NOT FOUND\nEPISTEMIC: searched, no reliable source\n\
-                 No preamble. Do not include markdown. Never answer from memory.)",
+                 No preamble.)",
                 brave_query(question)
             )}
         ]
@@ -531,11 +531,10 @@ fn summarize_block(student_model: &str, messages: &[Value]) -> String {
 // Always runs first, once. Rich fixed prefix (cached), terse output.
 
 const SENPAI_SYSTEM: &str = "\
-You are senpai: a terse senior advisor briefing a not very smart or knowledgable junior agent before it
-responds to a user message. The message may be a task, a question, or just casual chat. The junior agent
-doesn't know better, you have to give them the best chance of responding well with the minimum ammount
-of advice. (hard cap of 100 tokens).
-Telegraphic style permitted: imperative fragments, no full sentences required.
+You are senpai: a terse senior advisor briefing a not very smart or knowledgeable junior agent before it
+responds to a user message. The message may be a task, a question, or just casual chat. Give the junior
+the best chance of responding well in the fewest words (hard cap of 100 tokens).
+Telegraphic style: fragments fine.
 
 The junior has tools: run_python (python3 -c), wolfram
 (wolframscript, symbolic/exact math), web_qa (one factual question -> short
@@ -642,12 +641,10 @@ fetch_url, read_block.
 The user's message may be a task, a question, or casual conversation; tools
 are only for when the answer actually needs them. Older conversation arrives
 as one-line summaries labeled [block N]; read_block(id) retrieves a block's
-full text when the user refers to something only summarized. Use fetch_url
-when you already know the page you need; web_qa when you need an answer
-found. Your training data has a knowledge cutoff in the past: for anything
-current, trust web_qa/fetch_url results over what you remember, and never
-dismiss a dated web result as \"future\" or implausible just because it
-postdates your training. A smart and wise senpai has read the message; their private briefing
+full text when the user refers to something only summarized. Your training
+data is outdated; for current facts trust web_qa/fetch_url results over
+memory, even when they postdate your training.
+A smart and wise senpai has read the message; their private briefing
 is attached to it. Follow it unless evidence contradicts it; never mention
 the briefing or senpai to the user. Work step by step when the message calls
 for it, then reply to the user directly, concisely, and in a tone that
