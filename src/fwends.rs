@@ -49,7 +49,6 @@ const BUBBLE_GAP: usize = 5;
 const BUBBLE_MIN_W: usize = 38;
 const BUBBLE_MAX_W: usize = 142;
 const STICKY_MIN_W: usize = 141;
-const STICKY_MIN_H: usize = 0;
 const BUBBLE_LEFT_CAP: usize = 21;
 const BUBBLE_RIGHT_CAP: usize = 21;
 const BUBBLE_TOP_CAP: usize = 17;
@@ -61,6 +60,8 @@ const STICKY_BOTTOM_CAP: usize = 20;
 const SCROLL_STEP: usize = 24;
 const LINE_H: usize = 16;
 const MAX_INPUT_CHARS: usize = 96;
+const INPUT_MAX_LINES: usize = 5;
+const HISTORY_LIMIT: usize = 8;
 const SYSTEM_PROMPT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fwends_system_prompt.txt");
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_FALLBACK_MODEL: &str = "@preset/free";
@@ -91,24 +92,28 @@ const MODELS: [Model; 4] = [
         id: "anthropic/claude-haiku-4.5",
         thinking_id: "anthropic/claude-opus-4.5",
         name: "Claude",
+        icon_index: 2,
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/claw.png"),
     },
     Model {
         id: "deepseek/deepseek-v4-flash",
         thinking_id: "deepseek/deepseek-v4-pro",
         name: "Deepseek",
+        icon_index: 1,
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/deep.png"),
     },
     Model {
         id: "qwen/qwen3.6-35b-a3b",
         thinking_id: "qwen/qwen3.7-plus",
         name: "Qwen",
+        icon_index: 0,
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/qwen.png"),
     },
     Model {
         id: "moonshotai/kimi-k2.6",
         thinking_id: "moonshotai/kimi-k2.6",
         name: "Kimi",
+        icon_index: 3,
         asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/kimi.png"),
     },
 ];
@@ -137,6 +142,10 @@ pub(crate) struct Fwends {
     model_slot_h: usize,
     pending: Option<Receiver<Result<String, String>>>,
     system_prompt: String,
+    // Total laid-out chat height; message_layouts() wraps every message
+    // through the font engine, so it is cached here and refreshed via
+    // messages_changed() instead of recomputed on every scroll and frame.
+    content_height: usize,
 }
 
 impl Fwends {
@@ -155,7 +164,7 @@ impl Fwends {
             .unwrap_or(1);
         let selected_model = 0;
 
-        Ok(Self {
+        let mut fwends = Self {
             avatars,
             bubble: Sprite::load_native(
                 concat!(env!("CARGO_MANIFEST_DIR"), "/assets/bubble.png"),
@@ -184,7 +193,10 @@ impl Fwends {
             system_prompt: fs::read_to_string(SYSTEM_PROMPT_PATH).unwrap_or_else(|_| {
                 "You are a warm, concise chat companion. Answer directly and never reveal hidden reasoning.".to_string()
             }),
-        })
+            content_height: 0,
+        };
+        fwends.content_height = fwends.compute_content_height();
+        Ok(fwends)
     }
 
     pub(crate) fn width(&self) -> usize {
@@ -316,8 +328,12 @@ impl Fwends {
             return false;
         };
 
-        let Ok(reply) = rx.try_recv() else {
-            return false;
+        let reply = match rx.try_recv() {
+            Ok(reply) => reply,
+            Err(mpsc::TryRecvError::Empty) => return false,
+            // The worker thread died without sending (e.g. panicked); surface
+            // it instead of waiting forever with the input locked.
+            Err(mpsc::TryRecvError::Disconnected) => Err("reply thread died".to_string()),
         };
 
         self.pending = None;
@@ -333,11 +349,10 @@ impl Fwends {
                 None => text,
             };
             message.kind = MessageKind::Normal;
-            self.scroll_to_bottom();
-            return true;
+        } else {
+            self.messages.push(Message::assistant(text));
         }
-        self.messages.push(Message::assistant(text));
-        self.scroll_to_bottom();
+        self.messages_changed();
         true
     }
 
@@ -369,15 +384,19 @@ impl Fwends {
         self.input_edit.set_cursor(0, &self.input);
         self.messages
             .retain(|message| message.kind != MessageKind::Intro);
-        self.messages.push(Message::user(text.clone()));
-        let selected_model = self.selected_model;
         let thinking = self.lamp_on;
-        let model = MODELS[selected_model.min(MODELS.len() - 1)];
-        self.messages.push(Message::pending(model.name));
-        self.scroll_to_bottom();
+        let model = MODELS[self.selected_model];
 
+        // Build the history before pushing the new message: both request
+        // paths send the latest user message separately, so it must not also
+        // appear at the end of the history.
         let system_prompt = fwend_system_prompt(&self.system_prompt, model.name);
         let history = request_history(&self.messages, model.name);
+
+        self.messages.push(Message::user(text.clone()));
+        self.messages.push(Message::pending(model.name));
+        self.messages_changed();
+
         let text = format!("{USER_NAME}: {text}");
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
@@ -404,6 +423,11 @@ impl Fwends {
     fn erase_chat_history(&mut self) {
         self.pending = None;
         self.messages = vec![intro_message()];
+        self.messages_changed();
+    }
+
+    fn messages_changed(&mut self) {
+        self.content_height = self.compute_content_height();
         self.scroll_to_bottom();
     }
 
@@ -411,11 +435,7 @@ impl Fwends {
         let layouts = self.message_layouts();
         let viewport_top = CHAT_Y;
         let viewport_bottom = CHAT_Y + self.chat_h();
-        let content_height = layouts
-            .last()
-            .map(|layout| layout.y + layout.h)
-            .unwrap_or(0);
-        let bottom_offset = self.chat_h().saturating_sub(content_height);
+        let bottom_offset = self.chat_h().saturating_sub(self.content_height);
 
         for layout in layouts {
             let y = CHAT_Y as isize + bottom_offset as isize + layout.y as isize
@@ -511,8 +531,7 @@ impl Fwends {
                 .unwrap_or(0);
             let w = (text_w + style.pad_left + style.pad_right).clamp(style.min_w, BUBBLE_MAX_W);
             let h = (lines.len() * LINE_H + style.pad_top + style.pad_bottom)
-                .max(style.top_cap + style.bottom_cap + 1)
-                .max(style.min_h);
+                .max(style.top_cap + style.bottom_cap + 1);
             let x = if style.align_right {
                 CONTENT_W - PAD - w
             } else {
@@ -536,7 +555,7 @@ impl Fwends {
         self.input_sticky_x()
     }
 
-    fn content_height(&self) -> usize {
+    fn compute_content_height(&self) -> usize {
         self.message_layouts()
             .last()
             .map(|layout| layout.y + layout.h)
@@ -544,7 +563,7 @@ impl Fwends {
     }
 
     fn max_scroll(&self) -> usize {
-        self.content_height().saturating_sub(self.chat_h())
+        self.content_height.saturating_sub(self.chat_h())
     }
 
     fn scroll_to_bottom(&mut self) {
@@ -651,7 +670,7 @@ impl Fwends {
                 palette.color(palette_color::LAVENDER),
             );
         }
-        for (index, line) in lines.into_iter().take(5).enumerate() {
+        for (index, line) in lines.into_iter().take(INPUT_MAX_LINES).enumerate() {
             self.font.draw_text(
                 fb,
                 &line,
@@ -665,7 +684,7 @@ impl Fwends {
     }
 
     fn draw_selected_fwend(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let avatar = &self.avatars[self.selected_model.min(self.avatars.len() - 1)];
+        let avatar = &self.avatars[self.selected_model];
         let rect = self.selected_fwend_rect();
         let avatar_x = rect.x + rect.w.saturating_sub(avatar.width) / 2;
         let avatar_y = rect.y + rect.h.saturating_sub(avatar.height);
@@ -736,7 +755,7 @@ impl Fwends {
                     .font
                     .text_width(prefix_chars(line, self.input_edit.cursor() - line_start))
                     .min(max_width),
-            text_y + line_index * LINE_H,
+            text_y + line_index.min(INPUT_MAX_LINES - 1) * LINE_H,
         )
     }
 
@@ -820,7 +839,7 @@ fn draw_selection(
     };
     let lines = font.wrap_lines(text, max_width);
     let mut line_start = 0;
-    for (line_index, line) in lines.iter().enumerate().take(5) {
+    for (line_index, line) in lines.iter().enumerate().take(INPUT_MAX_LINES) {
         let line_len = line.chars().count();
         let line_end = line_start + line_len;
         let start = selection_start.max(line_start);
@@ -966,24 +985,15 @@ fn draw_yellow_pencil_shadow(
 
 const PALETTE_COLOR_COUNT: usize = 16;
 
-const IDENTITY_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = [
-    palette_color::LAVENDER,
-    palette_color::GUNMETAL,
-    palette_color::PLUM,
-    palette_color::BROWN,
-    palette_color::PEACH,
-    palette_color::CREAM,
-    palette_color::LIME,
-    palette_color::GREEN,
-    palette_color::ORANGE,
-    palette_color::CRIMSON,
-    palette_color::ROSE,
-    palette_color::PURPLE,
-    palette_color::CYAN,
-    palette_color::BLUE,
-    palette_color::PINE,
-    palette_color::BLACK,
-];
+const IDENTITY_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = {
+    let mut remap = [0; PALETTE_COLOR_COUNT];
+    let mut i = 0;
+    while i < PALETTE_COLOR_COUNT {
+        remap[i] = i as Index;
+        i += 1;
+    }
+    remap
+};
 
 const YELLOW_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = {
     let mut remap = IDENTITY_PAGE_REMAP;
@@ -1046,6 +1056,7 @@ struct Model {
     thinking_id: &'static str,
     name: &'static str,
     asset_path: &'static str,
+    icon_index: usize,
 }
 
 #[derive(Clone)]
@@ -1113,13 +1124,7 @@ fn intro_message() -> Message {
 }
 
 fn smol_icon_rect(name: &str) -> Option<Rect> {
-    let index = match name {
-        "Qwen" => 0,
-        "Deepseek" => 1,
-        "Claude" => 2,
-        "Kimi" => 3,
-        _ => return None,
-    };
+    let index = MODELS.iter().find(|model| model.name == name)?.icon_index;
     Some(Rect::new(
         (index % 2) * SMOL_ICON_SIZE,
         (index / 2) * SMOL_ICON_SIZE,
@@ -1153,7 +1158,6 @@ struct MessageStyle {
     top_cap: usize,
     bottom_cap: usize,
     min_w: usize,
-    min_h: usize,
     align_right: bool,
 }
 
@@ -1174,7 +1178,6 @@ const ASSISTANT_MESSAGE_STYLE: MessageStyle = MessageStyle {
     top_cap: BUBBLE_TOP_CAP,
     bottom_cap: BUBBLE_BOTTOM_CAP,
     min_w: BUBBLE_MIN_W,
-    min_h: 0,
     align_right: false,
 };
 
@@ -1189,26 +1192,23 @@ const USER_MESSAGE_STYLE: MessageStyle = MessageStyle {
     top_cap: STICKY_TOP_CAP,
     bottom_cap: STICKY_BOTTOM_CAP,
     min_w: STICKY_MIN_W,
-    min_h: STICKY_MIN_H,
     align_right: true,
 };
 
 fn request_history(messages: &[Message], current_name: &str) -> Vec<Message> {
-    messages
+    let recent: Vec<&Message> = messages
         .iter()
         .filter(|message| message.kind == MessageKind::Normal)
-        .rev()
-        .take(8)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
+        .collect();
+    let start = recent.len().saturating_sub(HISTORY_LIMIT);
+    recent[start..]
+        .iter()
         .map(|message| match (message.role, message.author) {
             (Role::User, _) => Message::user(format!("{USER_NAME}: {}", message.text)),
             (Role::Assistant, Some(author)) if author != current_name => {
                 Message::user(format!("{author}: {}", message.text))
             }
-            (Role::Assistant, _) => message,
+            (Role::Assistant, _) => (*message).clone(),
         })
         .collect()
 }
@@ -1280,7 +1280,13 @@ fn send_openrouter_request(
 }
 
 fn curl_config_escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
+    // Control chars (esp. newlines) could smuggle extra config lines past the
+    // quoting, so drop them entirely.
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect()
 }
 
 struct CurlBodyFile {
@@ -1360,12 +1366,10 @@ fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text:
             "content": message.text,
         }));
     }
-    if history.last().map(|message| message.text.as_str()) != Some(latest_text) {
-        messages.push(json!({
-            "role": "user",
-            "content": latest_text,
-        }));
-    }
+    messages.push(json!({
+        "role": "user",
+        "content": latest_text,
+    }));
 
     json!({
         "model": model,
@@ -1429,8 +1433,8 @@ fn normalize_display_text(text: &str) -> String {
 }
 
 fn compact_error(response: &str) -> String {
-    let mut text = response.replace('\n', " ");
-    text.truncate(120);
+    // Truncate by chars: String::truncate panics on a non-boundary byte.
+    let text: String = response.replace('\n', " ").chars().take(120).collect();
     if text.is_empty() {
         "empty OpenRouter response".to_string()
     } else {
@@ -1495,7 +1499,7 @@ mod tests {
         for _ in 0..iterations {
             // What one draw_messages + content_height + max_scroll costs.
             std::hint::black_box(fwends.message_layouts());
-            std::hint::black_box(fwends.content_height());
+            std::hint::black_box(fwends.compute_content_height());
             std::hint::black_box(fwends.max_scroll());
         }
         println!(
