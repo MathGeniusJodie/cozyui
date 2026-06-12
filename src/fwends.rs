@@ -376,7 +376,7 @@ impl Fwends {
         self.messages.push(Message::pending(model.name));
         self.scroll_to_bottom();
 
-        let system_prompt = fwend_system_prompt(&self.system_prompt, model.name, thinking);
+        let system_prompt = fwend_system_prompt(&self.system_prompt, model.name);
         let history = request_history(&self.messages, model.name);
         let text = format!("{USER_NAME}: {text}");
         let (tx, rx) = mpsc::channel();
@@ -1223,7 +1223,7 @@ fn strip_self_prefix(text: &str, name: &str) -> String {
     trimmed.to_string()
 }
 
-fn fwend_system_prompt(template: &str, name: &str, thinking: bool) -> String {
+fn fwend_system_prompt(template: &str, name: &str) -> String {
     let mut prompt = template.replace("[[FREND_NAME]]", name);
     prompt.push_str(&format!(
         "\n\nThis is a group chat: messages from {USER_NAME} and from other fwends arrive labeled like \"{USER_NAME}: ...\" or \"Qwen: ...\". Your own earlier replies are unlabeled. Never start your reply with \"{name}:\" — just speak."
@@ -1532,7 +1532,7 @@ mod tests {
 
     #[test]
     fn fwend_system_prompt_replaces_name_placeholder() {
-        let prompt = fwend_system_prompt("you are [[FREND_NAME]]!", "Qwen", false);
+        let prompt = fwend_system_prompt("you are [[FREND_NAME]]!", "Qwen");
 
         assert!(prompt.starts_with("you are Qwen!"));
         assert!(prompt.contains("Never start your reply with \"Qwen:\""));
