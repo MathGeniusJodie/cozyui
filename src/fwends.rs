@@ -1228,13 +1228,7 @@ fn fwend_system_prompt(template: &str, name: &str, thinking: bool) -> String {
     prompt.push_str(&format!(
         "\n\nThis is a group chat: messages from {USER_NAME} and from other fwends arrive labeled like \"{USER_NAME}: ...\" or \"Qwen: ...\". Your own earlier replies are unlabeled. Never start your reply with \"{name}:\" — just speak."
     ));
-    if thinking {
-        format!(
-            "{prompt}\n\nThe lamp is on: think carefully through hard requests before answering, but keep hidden reasoning out of the visible response."
-        )
-    } else {
-        prompt
-    }
+    prompt
 }
 
 fn send_openrouter_request(
