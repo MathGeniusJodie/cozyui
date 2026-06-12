@@ -7,7 +7,7 @@
 //      Aggressively capped output; telegraphic style, so truncation degrades
 //      gracefully.
 //   2. student (config.student_model) responds, with tools (run_python,
-//      wolfram, web_qa) available and the briefing in context.
+//      wolframscript, web_qa) available and the briefing in context.
 //
 // Cost notes: senpai's system prompt carries cache_control (cached input is
 // ~1/50th the price of output tokens, so the fixed prefix is deliberately
@@ -140,7 +140,7 @@ fn run_python(code: &str) -> String {
     truncate(&out, 4000)
 }
 
-fn run_wolfram(code: &str) -> String {
+fn run_wolframscript(code: &str) -> String {
     let out = Command::new("wolframscript")
         .args(["-code", code])
         .output()
@@ -542,32 +542,23 @@ fn summarize_block(student_model: &str, messages: &[Value]) -> String {
 // Always runs first, once. Rich fixed prefix (cached), terse output.
 
 const SENPAI_SYSTEM: &str = "\
-You are senpai: a terse senior advisor briefing a not very smart or knowledgeable junior agent before it
-responds to a user message. The message may be a task, a question, or just casual chat. Give the junior
-the best chance of responding well in the fewest words (hard cap of 100 tokens).
-Telegraphic style: fragments fine.
+Advise a very weak junior agent before it answers the user.
+Junior has tools: run_python, wolframscript, web_qa (use for ALL factual/current claims)
+Pareto optimal of compact and idiot-proof. imperative fragments. 50 word hard cap.
 
-The junior has tools: run_python, wolfram
-(wolframscript, symbolic/exact math), and web_qa (one factual question -> short
-answer grounded by web search)
-For casual conversation tools are usually wrong: say so, and point out anything
-the junior might miss (tone, subtext, what the user actually wants to hear).
+Examples:
+  user: good morning!
+  you: just answer
+  
+  user: integral of x^2 sin x, plus current marathon WR
+  you: wolframscript Integrate[x^2 Sin[x],x], web_qa 'marathon world record'
 
-You see the conversation so far; the final user message is the one being
-responded to now.
-
-Example:
-  message: integral of x^2 sin x, plus current marathon WR
-  you: wolfram Integrate[x^2 Sin[x],x], web_qa marathon WR, WR likely stands for world record
-  (name exact tool inputs; never just 'use the tools')
-
-Example:
-    message: How do I divide 4 oranges among 4 children if I have only one knife?
-    you: the knife is a red herring, 4 oranges, 4 children, give each child one orange.
-
-Example:
-    message: ugh, my deploy broke at 2am again lol
-    you: venting, not a request. no tools. commiserate first, maybe one light question.";
+  user: How do I divide 4 oranges among 4 children if I have only one knife?
+  you: knife is a red herring, one orange per child.
+  
+  user: ugh, my deploy broke at 2am again lol
+  you: venting, not a request. commiserate first, maybe one light question.
+  (tone/subtext)";
 
 // Appended to SENPAI_SYSTEM only once compaction has produced archive
 // blocks; until then read_block has nothing to return and the whole topic
@@ -658,16 +649,12 @@ fn senpai_briefing(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> St
 // ------------------------------------------------------------------ student
 
 const STUDENT_SYSTEM: &str = "\
-You are a helpful assistant with tools: run_python, wolfram, web_qa,
-fetch_url, read_block.
-The user's message may be a task, a question, or casual conversation; tools
-are only for when the answer actually needs them. Older conversation arrives
-as one-line summaries labeled [block N]; read_block(id) retrieves a block's
-full text when the user refers to something only summarized. Your training
-data is outdated; for current facts trust web_qa/fetch_url results over
-memory, even when they postdate your training.
+Tools are only for when the answer actually needs them.
+Older conversation arrives as one-line summaries labeled [block N];
+read_block(id) retrieves a block's full text when the user refers to something
+only summarized.
 A smart and wise senpai has read the message; their private briefing
-is attached to it. Follow it unless evidence contradicts it; never mention
+is attached to it. Follow it unless evidence from tools contradicts it; never mention
 the briefing or senpai to the user. Work step by step when the message calls
 for it, then reply to the user directly, concisely, and in a tone that
 matches theirs.";
@@ -676,11 +663,11 @@ const STUDENT_TOOLS_JSON: &str = r#"[
  {"type":"function","function":{"name":"run_python",
   "description":"Run python3 -c <code>. stdout+stderr returned.",
   "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}}},
- {"type":"function","function":{"name":"wolfram",
-  "description":"Run wolframscript -code <code> for symbolic/exact math.",
+ {"type":"function","function":{"name":"wolframscript",
+  "description":"Run wolframscript -code <code> for symbolic/exact math. ALWAYS use for math, unless python is the better tool, but don't do math by hand ever.",
   "parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}}},
  {"type":"function","function":{"name":"web_qa",
-  "description":"Ask a web-search-backed sub-agent one factual question. Returns short answer + epistemic status, or NOT FOUND.",
+  "description":"Ask a web-search-backed sub-agent one factual question. Returns short answer + epistemic status, or NOT FOUND. ALWAYS use this for factual/current claims",
   "parameters":{"type":"object","properties":{"question":{"type":"string"}},"required":["question"]}}},
  {"type":"function","function":{"name":"fetch_url",
   "description":"Fetch a URL and return its readable text (truncated). Use when the exact page is already known.",
@@ -753,7 +740,7 @@ fn run_turn(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> Result<St
 
                 let result = match name {
                     "run_python" => run_python(args["code"].as_str().unwrap_or("")),
-                    "wolfram" => run_wolfram(args["code"].as_str().unwrap_or("")),
+                    "wolframscript" => run_wolframscript(args["code"].as_str().unwrap_or("")),
                     "web_qa" => web_qa(args["question"].as_str().unwrap_or("")),
                     "fetch_url" => fetch_url(args["url"].as_str().unwrap_or("")),
                     "read_block" => {
