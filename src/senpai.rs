@@ -2,12 +2,12 @@
 // student does all the actual work and gives the final answer.
 //
 // Flow (always, no escalation tool):
-//   1. senpai (anthropic/claude-opus-4.5) reads the user's message (a task,
+//   1. senpai (config.senpai_model) reads the user's message (a task,
 //      a question, or casual chat), emits a terse free-form briefing.
 //      Aggressively capped output; telegraphic style, so truncation degrades
 //      gracefully.
-//   2. student (@preset/fast) responds, with tools (run_python, wolfram,
-//      web_qa) available and the briefing in context.
+//   2. student (config.student_model) responds, with tools (run_python,
+//      wolfram, web_qa) available and the briefing in context.
 //
 // Cost notes: senpai's system prompt carries cache_control (cached input is
 // ~1/50th the price of output tokens, so the fixed prefix is deliberately
@@ -21,23 +21,64 @@
 // the cheap student model) shown in context. Senpai alone can pull a block's
 // full text back via the read_block tool.
 //
-// Run: OPENROUTER_API_KEY=... cargo run -- "one-shot message"
-//      OPENROUTER_API_KEY=... cargo run            (interactive chat)
+// This file is both a module of cozyui (fwends' thinking mode calls
+// `respond`) and the root-adjacent guts of the standalone `senpai` binary
+// (src/senpai_main.rs calls `cli_main`). Each crate uses a different half,
+// so dead-code lints are suppressed file-wide.
+//
+// Run: OPENROUTER_API_KEY=... cargo run --bin senpai -- "one-shot message"
+//      OPENROUTER_API_KEY=... cargo run --bin senpai  (interactive chat)
+#![allow(dead_code)]
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 const API: &str = "https://openrouter.ai/api/v1/chat/completions";
-const SENPAI: &str = "anthropic/claude-opus-4.5";
+const DEFAULT_SENPAI: &str = "anthropic/claude-opus-4.5";
 // Note: OpenRouter rejects presets whose fallback list has more than 3
 // models ("'models' array must have 3 items or fewer").
-const STUDENT: &str = "@preset/fast";
+const DEFAULT_STUDENT: &str = "@preset/fast";
+
+/// Which models play which role, plus an optional persona appended to the
+/// student's system prompt (so a host app can keep its own voice while
+/// borrowing the senpai/student machinery).
+pub struct SenpaiConfig {
+    pub senpai_model: String,
+    pub student_model: String,
+    pub persona: Option<String>,
+}
+
+impl Default for SenpaiConfig {
+    fn default() -> Self {
+        Self {
+            senpai_model: DEFAULT_SENPAI.to_string(),
+            student_model: DEFAULT_STUDENT.to_string(),
+            persona: None,
+        }
+    }
+}
+
+/// One-shot turn for embedding: `history` is prior raw chat messages as
+/// OpenAI-style {"role", "content"} values (no compaction is applied — the
+/// caller curates its own history). Returns the student's reply.
+pub fn respond(
+    config: &SenpaiConfig,
+    history: &[Value],
+    user_message: &str,
+) -> Result<String, String> {
+    let chat = Chat {
+        archive: Vec::new(),
+        recent: history.to_vec(),
+    };
+    run_turn(config, &chat, user_message)
+}
 
 // ---------------------------------------------------------------- transport
 
-fn curl_post(body: &Value) -> Value {
-    let key = std::env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY not set");
+fn curl_post(body: &Value) -> Result<Value, String> {
+    let key = std::env::var("OPENROUTER_API_KEY")
+        .map_err(|_| "OPENROUTER_API_KEY not set".to_string())?;
     let out = Command::new("curl")
         .args(["-s", API, "-H", "Content-Type: application/json"])
         .arg("-H")
@@ -50,10 +91,10 @@ fn curl_post(body: &Value) -> Value {
             c.stdin.take().unwrap().write_all(body.to_string().as_bytes())?;
             c.wait_with_output()
         })
-        .expect("curl failed");
-    serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
-        json!({"error": String::from_utf8_lossy(&out.stdout).to_string()})
-    })
+        .map_err(|e| format!("curl failed: {e}"))?;
+    Ok(serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+        json!({"error": {"message": String::from_utf8_lossy(&out.stdout).to_string()}})
+    }))
 }
 
 fn choice(resp: &Value) -> &Value {
@@ -131,7 +172,10 @@ fn web_qa(question: &str) -> String {
             {"role": "user", "content": question}
         ]
     });
-    let resp = curl_post(&body);
+    let resp = match curl_post(&body) {
+        Ok(resp) => resp,
+        Err(err) => return format!("A: NOT FOUND\nEPISTEMIC: web call failed ({err})"),
+    };
     let ch = choice(&resp);
     let mut text = content_text(&ch["message"]["content"]);
     if text.trim().is_empty() {
@@ -244,13 +288,13 @@ impl Chat {
     /// has built up beyond the verbatim tail. Blocks follow topic boundaries
     /// (found by the cheap model), so each summary covers one coherent
     /// subject instead of an arbitrary slice.
-    fn compact(&mut self) {
+    fn compact(&mut self, student_model: &str) {
         while self.recent.len() >= RECENT_KEEP + COMPACT_TRIGGER {
             let region = self.recent.len() - RECENT_KEEP;
-            let cut = topic_boundary(&self.recent[..region])
+            let cut = topic_boundary(student_model, &self.recent[..region])
                 .clamp(MIN_BLOCK, region.min(MAX_BLOCK));
             let messages: Vec<Value> = self.recent.drain(..cut).collect();
-            let summary = summarize_block(&messages);
+            let summary = summarize_block(student_model, &messages);
             eprintln!(
                 "[archived block {} ({} messages): {summary}]",
                 self.archive.len(),
@@ -323,7 +367,7 @@ count of messages. Nothing but the number.";
 /// Where the first topic ends in `messages`: index of the first message that
 /// starts a new topic, i.e. the size of the leading block. Falls back to a
 /// fixed cut if the model's answer doesn't parse.
-fn topic_boundary(messages: &[Value]) -> usize {
+fn topic_boundary(student_model: &str, messages: &[Value]) -> usize {
     let numbered: String = messages
         .iter()
         .enumerate()
@@ -337,18 +381,19 @@ fn topic_boundary(messages: &[Value]) -> usize {
         .collect();
     let resp = curl_post(&json!({
         // Budget covers minimal reasoning too; the answer is a bare number.
-        "model": STUDENT, "max_tokens": 600,
+        "model": student_model, "max_tokens": 600,
         "reasoning": {"effort": "minimal", "exclude": true},
         "messages": [
             {"role": "system", "content": BOUNDARY_SYSTEM},
             {"role": "user", "content": numbered},
         ],
     }));
-    choice(&resp)["message"]["content"]
-        .as_str()
-        .and_then(|text| {
-            let digits: String = text.chars().filter(char::is_ascii_digit).collect();
-            digits.parse().ok()
+    resp.ok()
+        .and_then(|resp| {
+            choice(&resp)["message"]["content"].as_str().and_then(|text| {
+                let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+                digits.parse().ok()
+            })
         })
         .unwrap_or(8)
 }
@@ -361,20 +406,29 @@ the summary is the only way anyone can know to look for them later.
 Telegraphic, no preamble.
 Example: discussion about baking bread; user's cat is called Bingus.";
 
-fn summarize_block(messages: &[Value]) -> String {
+fn summarize_block(student_model: &str, messages: &[Value]) -> String {
     let resp = curl_post(&json!({
-        "model": STUDENT, "max_tokens": 80,
+        "model": student_model, "max_tokens": 80,
         "reasoning": {"enabled": false, "exclude": true},
         "messages": [
             {"role": "system", "content": SUMMARIZER_SYSTEM},
             {"role": "user", "content": block_transcript(messages)},
         ],
     }));
-    let text = choice(&resp)["message"]["content"].as_str().unwrap_or("");
-    if text.trim().is_empty() {
+    let text = resp
+        .as_ref()
+        .map(|resp| {
+            choice(resp)["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default();
+    if text.is_empty() {
         "(summary unavailable)".to_string()
     } else {
-        text.trim().to_string()
+        text
     }
 }
 
@@ -434,7 +488,7 @@ const SENPAI_TOOLS_JSON: &str = r#"[
 // [current message (bp)]. The current message is sent raw — next turn it sits
 // in `recent` byte-identical, extending the cached prefix instead of breaking
 // it. Only compaction (summaries change, recent head drained) takes a miss.
-fn senpai_briefing(chat: &Chat, user_message: &str) -> String {
+fn senpai_briefing(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> String {
     let tools: Value = serde_json::from_str(SENPAI_TOOLS_JSON).unwrap();
     let mut messages = vec![cached_text_message("system", SENPAI_SYSTEM)];
     if let Some(summaries) = chat.summaries_message() {
@@ -445,10 +499,17 @@ fn senpai_briefing(chat: &Chat, user_message: &str) -> String {
 
     // Small tool loop: senpai may pull a few archive blocks before briefing.
     for _ in 0..4 {
-        let resp = curl_post(&json!({
-            "model": SENPAI, "max_tokens": 150, "messages": messages, "tools": tools,
+        let resp = match curl_post(&json!({
+            "model": config.senpai_model, "max_tokens": 150,
+            "messages": messages, "tools": tools,
             "reasoning": {"enabled": false, "exclude": true},
-        }));
+        })) {
+            Ok(resp) => resp,
+            Err(err) => {
+                eprintln!("[senpai call failed: {err}]");
+                break;
+            }
+        };
         let ch = choice(&resp);
         let msg = ch["message"].clone();
 
@@ -512,21 +573,29 @@ const STUDENT_TOOLS_JSON: &str = r#"[
   "parameters":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}}
 ]"#;
 
+fn student_system(config: &SenpaiConfig) -> String {
+    match &config.persona {
+        Some(persona) => format!("{STUDENT_SYSTEM}\n\nPERSONA (speak as this):\n{persona}"),
+        None => STUDENT_SYSTEM.to_string(),
+    }
+}
+
 // One conversation turn. `chat` holds the cleaned transcript of earlier
 // turns: raw user/assistant messages only, with the oldest folded into
 // summarized archive blocks. The chat API is stateless, so curation is ours —
 // briefings and tool traffic exist only in this turn's working transcript and
-// are never carried forward. Appends this turn's raw exchange to the chat.
-fn run_turn(chat: &mut Chat, user_message: &str) {
+// are never carried forward. Returns the student's reply; the caller decides
+// what to commit to history.
+fn run_turn(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> Result<String, String> {
     // 1. senpai briefs (summaries + recent messages; may pull blocks).
-    let briefing = senpai_briefing(chat, user_message);
+    let briefing = senpai_briefing(config, chat, user_message);
     eprintln!("--- senpai ---\n{briefing}\n--------------");
 
     // 2. student responds (same compacted view, no retrieval tool). Same
     // cache-friendly layout; the briefing-wrapped final message is the only
     // per-turn divergence.
     let tools: Value = serde_json::from_str(STUDENT_TOOLS_JSON).unwrap();
-    let mut messages = vec![cached_text_message("system", STUDENT_SYSTEM)];
+    let mut messages = vec![cached_text_message("system", &student_system(config))];
     if let Some(summaries) = chat.summaries_message() {
         messages.push(summaries);
     }
@@ -536,10 +605,10 @@ fn run_turn(chat: &mut Chat, user_message: &str) {
 
     for _step in 0..20 {
         let resp = curl_post(&json!({
-            "model": STUDENT, "max_tokens": 1500,
+            "model": config.student_model, "max_tokens": 1500,
             "reasoning": {"enabled": false, "exclude": true},
             "messages": messages, "tools": tools,
-        }));
+        }))?;
         let ch = choice(&resp);
         let msg = ch["message"].clone();
 
@@ -571,26 +640,34 @@ fn run_turn(chat: &mut Chat, user_message: &str) {
 
         // 3. student replies to the user; only the raw exchange is kept.
         let text = content_text(&msg["content"]);
-        let reply = if text.trim().is_empty() { "(no content)" } else { &text };
-        println!("{reply}");
-        commit_turn(chat, user_message, reply);
-        return;
+        if text.trim().is_empty() {
+            let reason = ch["finish_reason"].as_str().unwrap_or("none").to_string();
+            return Err(format!("empty reply (finish_reason: {reason})"));
+        }
+        return Ok(text);
     }
-    eprintln!("step limit reached");
-    commit_turn(chat, user_message, "(I ran out of steps before finishing.)");
+    Err("step limit reached".to_string())
 }
 
-fn commit_turn(chat: &mut Chat, user_message: &str, reply: &str) {
+// ---------------------------------------------------------------------- cli
+
+fn cli_turn(config: &SenpaiConfig, chat: &mut Chat, user_message: &str) {
+    let reply = match run_turn(config, chat, user_message) {
+        Ok(reply) => reply,
+        Err(err) => format!("({err})"),
+    };
+    println!("{reply}");
     chat.recent.push(json!({"role": "user", "content": user_message}));
     chat.recent.push(json!({"role": "assistant", "content": reply}));
-    chat.compact();
+    chat.compact(&config.student_model);
 }
 
-fn main() {
+pub fn cli_main() {
+    let config = SenpaiConfig::default();
     let message = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     let mut chat = Chat::default();
     if !message.is_empty() {
-        run_turn(&mut chat, &message);
+        cli_turn(&config, &mut chat, &message);
         return;
     }
 
@@ -607,6 +684,6 @@ fn main() {
         if line.is_empty() {
             continue;
         }
-        run_turn(&mut chat, line);
+        cli_turn(&config, &mut chat, line);
     }
 }

@@ -26,6 +26,7 @@ mod poco_font;
 mod puter;
 #[allow(dead_code)]
 mod rozha_one_48_font;
+mod senpai;
 mod text_edit;
 mod text_input;
 mod text_wrap;
@@ -79,7 +80,7 @@ const WHEEL_DOWN: u8 = 5;
 
 const WIDGET_GAP: usize = 16;
 const APP_LEFT_PADDING: usize = 54;
-const APP_BOTTOM_PADDING: usize = 54;
+const APP_BOTTOM_PADDING: usize = 74;
 const SHOW_FWENDS: bool = true;
 const FWENDS_LEFT_APRON: usize = 60;
 
@@ -593,7 +594,7 @@ fn widget_positions(
     let toodle_x = middle_x.saturating_sub(day.width() + TOODLE_LEFT_OVERLAP) + APP_LEFT_PADDING;
     let twirl_x = middle_x.saturating_sub(day.width()) + APP_LEFT_PADDING;
     let wavey_x = APP_LEFT_PADDING + 32;
-    let wavey_y = wavey_y + 14;
+    let wavey_y = wavey_y.saturating_sub(6);
     let day_x = wavey.width().saturating_sub(day.width()) + APP_LEFT_PADDING;
     let fwends_x = middle_x + middle_w + WIDGET_GAP + APP_LEFT_PADDING - FWENDS_LEFT_APRON;
     let fwends_y = 0;

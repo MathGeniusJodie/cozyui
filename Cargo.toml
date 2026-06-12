@@ -5,7 +5,7 @@ edition = "2024"
 
 [[bin]]
 name = "senpai"
-path = "src/senpai.rs"
+path = "src/senpai_main.rs"
 
 [dependencies]
 alacritty_terminal = "0.26.0"

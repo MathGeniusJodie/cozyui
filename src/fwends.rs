@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
+use crate::senpai;
 use crate::text_edit::{TextEdit, TextEditOutcome, char_len};
 use crate::text_input::{EditKey, KeyInput, edit_key};
 use crate::{Framebuffer, Index, Palette, Rect, Rgb, Rgba, Sprite, Swap, TRANSPARENT};
@@ -375,7 +376,6 @@ impl Fwends {
         self.messages.push(Message::pending(model.name));
         self.scroll_to_bottom();
 
-        let model_id = model.id(thinking).to_string();
         let system_prompt = fwend_system_prompt(&self.system_prompt, model.name, thinking);
         let history = request_history(&self.messages, model.name);
         let text = format!("{USER_NAME}: {text}");
@@ -383,8 +383,20 @@ impl Fwends {
         self.pending = Some(rx);
 
         thread::spawn(move || {
-            let result =
-                send_openrouter_request(&model_id, &system_prompt, &history, &text, thinking);
+            // Lamp on: the fwend's thinking model plays senpai, briefing the
+            // regular model before it answers (with tools). Lamp off: plain
+            // single-model request.
+            let result = if thinking {
+                let config = senpai::SenpaiConfig {
+                    senpai_model: model.thinking_id.to_string(),
+                    student_model: model.id.to_string(),
+                    persona: Some(system_prompt),
+                };
+                senpai::respond(&config, &history_values(&history), &text)
+                    .map(|reply| normalize_display_text(&reply))
+            } else {
+                send_openrouter_request(model.id, &system_prompt, &history, &text)
+            };
             let _ = tx.send(result);
         });
     }
@@ -1036,12 +1048,6 @@ struct Model {
     asset_path: &'static str,
 }
 
-impl Model {
-    fn id(self, thinking: bool) -> &'static str {
-        if thinking { self.thinking_id } else { self.id }
-    }
-}
-
 #[derive(Clone)]
 struct Message {
     role: Role,
@@ -1236,11 +1242,10 @@ fn send_openrouter_request(
     system_prompt: &str,
     history: &[Message],
     latest_text: &str,
-    thinking: bool,
 ) -> Result<String, String> {
     let api_key =
         env::var("OPENROUTER_API_KEY").map_err(|_| "OPENROUTER_API_KEY is not set".to_string())?;
-    let body = chat_body(model, system_prompt, history, latest_text, thinking);
+    let body = chat_body(model, system_prompt, history, latest_text);
     let body_file = CurlBodyFile::new(body.as_bytes())?;
     let mut child = Command::new("curl")
         .args(["-sS", "--max-time", REQUEST_TIMEOUT_SECS, "--config", "-"])
@@ -1330,13 +1335,24 @@ fn unique_temp_path() -> PathBuf {
     path
 }
 
-fn chat_body(
-    model: &str,
-    system_prompt: &str,
-    history: &[Message],
-    latest_text: &str,
-    thinking: bool,
-) -> String {
+/// History as plain {"role", "content"} messages for the senpai pipeline,
+/// same role/text mapping as chat_body.
+fn history_values(history: &[Message]) -> Vec<Value> {
+    history
+        .iter()
+        .map(|message| {
+            json!({
+                "role": match message.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                },
+                "content": message.text,
+            })
+        })
+        .collect()
+}
+
+fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text: &str) -> String {
     let mut messages = vec![json!({
         "role": "system",
         "content": system_prompt.trim(),
@@ -1357,32 +1373,14 @@ fn chat_body(
         }));
     }
 
-    let reasoning = if thinking {
-        json!({
-            "effort": "low",
-            "exclude": true,
-        })
-    } else {
-        json!({
-            "exclude": true,
-        })
-    };
-
-    let mut body = json!({
+    json!({
         "model": model,
         "models": [OPENROUTER_FALLBACK_MODEL],
         "messages": messages,
-        "reasoning": reasoning,
+        "reasoning": {"exclude": true},
         "include_reasoning": false,
-    });
-    if thinking {
-        body["tools"] = json!([
-            {
-                "type": "openrouter:web_fetch",
-            }
-        ]);
-    }
-    body.to_string()
+    })
+    .to_string()
 }
 
 fn extract_content(response: &str) -> Result<String, &'static str> {
@@ -1521,7 +1519,7 @@ mod tests {
 
     #[test]
     fn chat_body_preserves_unicode_and_escapes_json() {
-        let body = chat_body("model", "system", &[], "hi \"there\" 🩷", false);
+        let body = chat_body("model", "system", &[], "hi \"there\" 🩷");
         let parsed: Value = serde_json::from_str(&body).unwrap();
 
         assert_eq!(parsed["model"], "model");
@@ -1530,20 +1528,11 @@ mod tests {
     }
 
     #[test]
-    fn chat_body_enables_low_effort_reasoning_and_web_fetch_when_thinking() {
-        let body = chat_body("model", "system", &[], "hi", true);
+    fn chat_body_excludes_reasoning_and_omits_tools() {
+        let body = chat_body("model", "system", &[], "hi");
         let parsed: Value = serde_json::from_str(&body).unwrap();
 
-        assert_eq!(parsed["reasoning"]["effort"], "low");
         assert_eq!(parsed["reasoning"]["exclude"], true);
-        assert_eq!(parsed["tools"][0]["type"], "openrouter:web_fetch");
-    }
-
-    #[test]
-    fn chat_body_omits_web_fetch_when_not_thinking() {
-        let body = chat_body("model", "system", &[], "hi", false);
-        let parsed: Value = serde_json::from_str(&body).unwrap();
-
         assert!(parsed.get("tools").is_none());
     }
 
