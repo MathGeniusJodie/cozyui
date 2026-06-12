@@ -16,9 +16,7 @@ const SHADOW_X_OFFSET: isize = 1;
 const SHADOW_Y_OFFSET: isize = 4;
 
 const SEGMENT_COUNT: usize = 6;
-const SEGMENT_NUMBERS: [&str; SEGMENT_COUNT] = [
-    "1", "2", "4", "8", "16", "100"
-];
+const SEGMENT_NUMBERS: [&str; SEGMENT_COUNT] = ["1", "2", "4", "8", "16", "100"];
 
 const SEGMENT_LIGHT_COLORS: [Index; SEGMENT_COUNT] = [
     palette_color::CYAN,

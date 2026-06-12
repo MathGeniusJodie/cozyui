@@ -206,11 +206,13 @@ impl App {
 
     fn width(&self) -> usize {
         let rect = |widget: WidgetId| self.rect_for(widget);
-        let width = (rect(WidgetId::Toodle).x.saturating_add(rect(WidgetId::Toodle).w))
-            .max(self.desk.width)
-            .max(rect(WidgetId::Twirl).x + rect(WidgetId::Twirl).w)
-            .max(rect(WidgetId::Wavey).x + rect(WidgetId::Wavey).w)
-            .max(rect(WidgetId::Day).x + rect(WidgetId::Day).w);
+        let width = (rect(WidgetId::Toodle)
+            .x
+            .saturating_add(rect(WidgetId::Toodle).w))
+        .max(self.desk.width)
+        .max(rect(WidgetId::Twirl).x + rect(WidgetId::Twirl).w)
+        .max(rect(WidgetId::Wavey).x + rect(WidgetId::Wavey).w)
+        .max(rect(WidgetId::Day).x + rect(WidgetId::Day).w);
         if SHOW_FWENDS {
             width.max(rect(WidgetId::Fwends).x + rect(WidgetId::Fwends).w)
         } else {

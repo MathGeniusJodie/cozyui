@@ -18,7 +18,9 @@ use xkbcommon::xkb::keysyms;
 
 use crate::palette_color;
 use crate::text_input::KeyInput;
-use crate::{Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Rgba, Sprite, decode_png_with_size};
+use crate::{
+    Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Rgba, Sprite, decode_png_with_size,
+};
 
 const BG_SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
@@ -354,7 +356,11 @@ impl Puter {
     /// The static dressing around the screen: case art, control strip, mode
     /// buttons, lights, and the power/lock buttons.
     fn render_chrome(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.clear_scaled(self.mode_images.for_settings(self.settings), BG_SCALE, palette);
+        fb.clear_scaled(
+            self.mode_images.for_settings(self.settings),
+            BG_SCALE,
+            palette,
+        );
         fb.fill_rect(
             art_x(CONTROL_CLEAR_X),
             art_y(CONTROL_CLEAR_Y),
@@ -421,14 +427,7 @@ impl Puter {
 
     /// Paint one cell at framebuffer position (x, y): background, glow halo,
     /// glyph, and the bold/underline/strikeout decorations.
-    fn draw_cell(
-        &self,
-        fb: &mut Framebuffer,
-        cell: &Cell,
-        style: CellStyle,
-        x: usize,
-        y: usize,
-    ) {
+    fn draw_cell(&self, fb: &mut Framebuffer, cell: &Cell, style: CellStyle, x: usize, y: usize) {
         let cell_w = GLYPH_W * GLYPH_SCALE;
         let cell_h = GLYPH_H * GLYPH_SCALE;
         if let Some(bg) = style.bg {
@@ -1216,7 +1215,14 @@ const SOURCE_PALETTE_RGB: [(u8, u8, u8); 16] = [
     (31, 14, 28),
 ];
 
-fn fill_source_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize, color: PaletteRgb) {
+fn fill_source_rect(
+    fb: &mut Framebuffer,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: PaletteRgb,
+) {
     fb.fill_rect(
         x * BG_SCALE,
         y * BG_SCALE,

@@ -113,8 +113,7 @@ impl Swap {
         let slot = index as usize;
         if self.paints.len() <= slot {
             let len = self.paints.len() as Index;
-            self.paints
-                .extend((len..=index).map(Paint::Solid));
+            self.paints.extend((len..=index).map(Paint::Solid));
         }
         self.paints[slot] = paint;
         self
@@ -192,12 +191,7 @@ impl Palette {
     }
 
     /// Resolve a per-draw paint, then the global remap.
-    pub(crate) fn resolve_paint(
-        &self,
-        paint: Paint,
-        cell_x: usize,
-        cell_y: usize,
-    ) -> Option<Rgb> {
+    pub(crate) fn resolve_paint(&self, paint: Paint, cell_x: usize, cell_y: usize) -> Option<Rgb> {
         let index = paint.pick(cell_x, cell_y)?;
         self.resolve(index, cell_x, cell_y)
     }
@@ -501,7 +495,8 @@ impl Framebuffer {
                 let row_len = self.width * Self::BYTES_PER_PIXEL;
                 for y in y0 + 1..band_end {
                     let dest = self.pixel_offset(0, y);
-                    self.pixels.copy_within(first_row..first_row + row_len, dest);
+                    self.pixels
+                        .copy_within(first_row..first_row + row_len, dest);
                 }
             } else {
                 for y in y0..band_end {
@@ -547,7 +542,8 @@ impl Framebuffer {
         let first_row = self.pixel_offset(x, y);
         for py in y + 1..y + height {
             let dest = self.pixel_offset(x, py);
-            self.pixels.copy_within(first_row..first_row + row_len, dest);
+            self.pixels
+                .copy_within(first_row..first_row + row_len, dest);
         }
     }
 
@@ -602,7 +598,14 @@ impl Framebuffer {
         palette: &Palette,
         paint: Paint,
     ) {
-        self.draw_sprite_swapped(sprite, dest_x, dest_y, scale, palette, &Swap::uniform(paint));
+        self.draw_sprite_swapped(
+            sprite,
+            dest_x,
+            dest_y,
+            scale,
+            palette,
+            &Swap::uniform(paint),
+        );
     }
 
     pub(crate) fn draw_sprite_region(

@@ -91,7 +91,10 @@ fn curl_post(body: &Value) -> Result<Value, String> {
         .stdout(Stdio::piped())
         .spawn()
         .and_then(|mut c| {
-            c.stdin.take().unwrap().write_all(body.to_string().as_bytes())?;
+            c.stdin
+                .take()
+                .unwrap()
+                .write_all(body.to_string().as_bytes())?;
             c.wait_with_output()
         })
         .map_err(|e| format!("curl failed: {e}"))?;
@@ -491,10 +494,12 @@ fn topic_boundary(student_model: &str, messages: &[Value]) -> usize {
     }));
     resp.ok()
         .and_then(|resp| {
-            choice(&resp)["message"]["content"].as_str().and_then(|text| {
-                let digits: String = text.chars().filter(char::is_ascii_digit).collect();
-                digits.parse().ok()
-            })
+            choice(&resp)["message"]["content"]
+                .as_str()
+                .and_then(|text| {
+                    let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+                    digits.parse().ok()
+                })
         })
         .unwrap_or(8)
 }
@@ -627,9 +632,9 @@ fn senpai_briefing(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> St
         if ch["finish_reason"] == "tool_calls" {
             messages.push(msg.clone());
             for tc in msg["tool_calls"].as_array().cloned().unwrap_or_default() {
-                let args: Value = serde_json::from_str(
-                    tc["function"]["arguments"].as_str().unwrap_or("{}"),
-                ).unwrap_or(json!({}));
+                let args: Value =
+                    serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}"))
+                        .unwrap_or(json!({}));
                 let id = args["id"].as_u64().unwrap_or(u64::MAX) as usize;
                 eprintln!("[senpai read block {id}]");
                 messages.push(json!({
@@ -742,9 +747,9 @@ fn run_turn(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> Result<St
             messages.push(msg.clone());
             for tc in msg["tool_calls"].as_array().cloned().unwrap_or_default() {
                 let name = tc["function"]["name"].as_str().unwrap_or("");
-                let args: Value = serde_json::from_str(
-                    tc["function"]["arguments"].as_str().unwrap_or("{}"),
-                ).unwrap_or(json!({}));
+                let args: Value =
+                    serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}"))
+                        .unwrap_or(json!({}));
 
                 let result = match name {
                     "run_python" => run_python(args["code"].as_str().unwrap_or("")),
@@ -783,8 +788,10 @@ fn cli_turn(config: &SenpaiConfig, chat: &mut Chat, user_message: &str) {
         Err(err) => format!("({err})"),
     };
     println!("{reply}");
-    chat.recent.push(json!({"role": "user", "content": user_message}));
-    chat.recent.push(json!({"role": "assistant", "content": reply}));
+    chat.recent
+        .push(json!({"role": "user", "content": user_message}));
+    chat.recent
+        .push(json!({"role": "assistant", "content": reply}));
     chat.compact(&config.student_model);
 }
 

@@ -253,8 +253,7 @@ impl Wavey {
         !self.current_title.is_empty()
             && (TITLE_X.saturating_sub(TITLE_BOX_PAD)..TITLE_X + TITLE_W + TITLE_BOX_PAD)
                 .contains(&x)
-            && (TITLE_Y.saturating_sub(TITLE_BOX_PAD)
-                ..TITLE_Y + self.font.cell_h() + TITLE_BOX_PAD)
+            && (TITLE_Y.saturating_sub(TITLE_BOX_PAD)..TITLE_Y + self.font.cell_h() + TITLE_BOX_PAD)
                 .contains(&y)
     }
 
@@ -711,7 +710,8 @@ fn ensure_player_session() {
     // the expected steady state, so the output is discarded. -f reclaims the
     // name from a dead session (e.g. a force-killed mpv from an older cozyui)
     // that would otherwise block creation forever.
-    let runner = r#"while :; do cmd=$(cat "$COZYUI_MPV_FIFO") || exit; [ -n "$cmd" ] && eval "$cmd"; done"#;
+    let runner =
+        r#"while :; do cmd=$(cat "$COZYUI_MPV_FIFO") || exit; [ -n "$cmd" ] && eval "$cmd"; done"#;
     let _ = Command::new("abduco")
         .args(["-f", "-n", "wavey", "sh", "-c", runner])
         .env("COZYUI_MPV_FIFO", &fifo)
@@ -726,7 +726,10 @@ fn ensure_player_session() {
 /// that gets reaped off the UI thread.
 fn queue_player_command(command: &str) {
     let spawned = Command::new("sh")
-        .args(["-c", r#"printf '%s\n' "$COZYUI_MPV_CMD" > "$COZYUI_MPV_FIFO""#])
+        .args([
+            "-c",
+            r#"printf '%s\n' "$COZYUI_MPV_CMD" > "$COZYUI_MPV_FIFO""#,
+        ])
         .env("COZYUI_MPV_CMD", command)
         .env("COZYUI_MPV_FIFO", player_fifo_path())
         .stdout(Stdio::null())

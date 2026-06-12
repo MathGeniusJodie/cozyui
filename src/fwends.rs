@@ -428,9 +428,9 @@ impl Fwends {
             if let Some(src) = layout.author.and_then(smol_icon_rect) {
                 let clip = Rect::new(0, viewport_top * SCALE, self.width(), self.chat_h() * SCALE);
                 let icon_x = (layout.x + layout.w + SMOL_ICON_GAP) * SCALE;
-                let icon_y =
-                    (y + layout.h as isize - (SMOL_ICON_SIZE + SMOL_ICON_Y_OFFSET) as isize)
-                        * SCALE as isize;
+                let icon_y = (y + layout.h as isize
+                    - (SMOL_ICON_SIZE + SMOL_ICON_Y_OFFSET) as isize)
+                    * SCALE as isize;
                 fb.draw_sprite_full(
                     &self.smol_icons,
                     src,
@@ -1478,8 +1478,8 @@ mod tests {
     fn bench_message_layouts() {
         use std::time::Instant;
 
-        let palette = crate::Palette::load(concat!(env!("CARGO_MANIFEST_DIR"), "/na16-1x.png"))
-            .unwrap();
+        let palette =
+            crate::Palette::load(concat!(env!("CARGO_MANIFEST_DIR"), "/na16-1x.png")).unwrap();
         let mut fwends = Fwends::load(&palette).unwrap();
         for i in 0..60 {
             fwends.messages.push(Message::user(format!(

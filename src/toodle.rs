@@ -686,7 +686,13 @@ impl Toodle {
         let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X) * SCALE;
         let dest_y = y.saturating_sub(PENCIL_TIP_Y) * SCALE;
 
-        fb.draw_sprite(&self.pencil, dest_x as isize, dest_y as isize, SCALE, palette);
+        fb.draw_sprite(
+            &self.pencil,
+            dest_x as isize,
+            dest_y as isize,
+            SCALE,
+            palette,
+        );
     }
 
     fn draw_focused_pencil_shadow(&self, fb: &mut Framebuffer, palette: &Palette) {
