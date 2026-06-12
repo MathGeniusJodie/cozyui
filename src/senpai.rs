@@ -42,6 +42,9 @@ const DEFAULT_SENPAI: &str = "anthropic/claude-opus-4.5";
 // Note: OpenRouter rejects presets whose fallback list has more than 3
 // models ("'models' array must have 3 items or fewer").
 const DEFAULT_STUDENT: &str = "@preset/fast";
+// Appended to every request's routing list so the chat degrades to a free
+// model instead of dying when the requested one errors or credits run out.
+const FALLBACK_MODEL: &str = "@preset/free";
 
 /// Which models play which role, plus an optional persona appended to the
 /// student's system prompt (so a host app can keep its own voice while
@@ -80,6 +83,27 @@ pub fn respond(
 // ---------------------------------------------------------------- transport
 
 fn curl_post(body: &Value) -> Result<Value, String> {
+    let requested = body["model"].as_str().unwrap_or("");
+
+    // OpenRouter ignores "model" when a "models" routing list is present, so
+    // the requested model leads the list and the free preset is the fallback.
+    let mut body = body.clone();
+    if requested != FALLBACK_MODEL {
+        body["models"] = json!([requested, FALLBACK_MODEL]);
+    }
+    let resp = curl_post_once(&body)?;
+
+    // The response names the model that actually served the request; presets
+    // resolve to arbitrary concrete models, so only a non-preset mismatch
+    // proves the fallback kicked in.
+    let served = resp["model"].as_str().unwrap_or("");
+    if !requested.starts_with('@') && !served.is_empty() && served != requested {
+        println!("[{requested} unavailable; {FALLBACK_MODEL} served {served}]");
+    }
+    Ok(resp)
+}
+
+fn curl_post_once(body: &Value) -> Result<Value, String> {
     let key = std::env::var("OPENROUTER_API_KEY")
         .map_err(|_| "OPENROUTER_API_KEY not set".to_string())?;
     let out = Command::new("curl")

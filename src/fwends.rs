@@ -1340,9 +1340,11 @@ fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text:
         "content": latest_text,
     }));
 
+    // OpenRouter ignores "model" when a "models" routing list is present, so
+    // the requested model must lead the list with the preset as fallback.
     json!({
         "model": model,
-        "models": [OPENROUTER_FALLBACK_MODEL],
+        "models": [model, OPENROUTER_FALLBACK_MODEL],
         "messages": messages,
         "reasoning": {"exclude": true},
         "include_reasoning": false,
@@ -1520,7 +1522,8 @@ mod tests {
         let parsed: Value = serde_json::from_str(&body).unwrap();
 
         assert_eq!(parsed["model"], "model");
-        assert_eq!(parsed["models"][0], "@preset/free");
+        assert_eq!(parsed["models"][0], "model");
+        assert_eq!(parsed["models"][1], "@preset/free");
         assert_eq!(parsed["messages"][1]["content"], "hi \"there\" 🩷");
     }
 
