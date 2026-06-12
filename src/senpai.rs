@@ -412,12 +412,13 @@ impl Chat {
             .enumerate()
             .map(|(id, block)| format!("[block {id}] {}", block.summary))
             .collect();
-        Some(cached_text_message(
+        Some(text_message(
             "user",
             &format!(
                 "(older conversation, summarized into blocks)\n{}",
                 lines.join("\n")
             ),
+            true,
         ))
     }
 
@@ -429,10 +430,15 @@ impl Chat {
     }
 }
 
-/// A text message carrying an Anthropic prompt-cache breakpoint: everything
-/// up to and including it becomes a reusable cached prefix (cache reads are
-/// ~1/10th input price). Ignored harmlessly by providers without caching.
-fn cached_text_message(role: &str, text: &str) -> Value {
+/// A text message, optionally carrying an Anthropic prompt-cache breakpoint:
+/// everything up to and including it becomes a reusable cached prefix (cache
+/// reads are ~1/10th input price, but writes cost +25% — so `cached` should
+/// be false for one-off calls whose prefix will never be reused). Ignored
+/// harmlessly by providers without caching.
+fn text_message(role: &str, text: &str, cached: bool) -> Value {
+    if !cached {
+        return json!({"role": role, "content": text});
+    }
     json!({"role": role, "content": [{
         "type": "text", "text": text,
         "cache_control": {"type": "ephemeral"}
@@ -536,40 +542,38 @@ responds to a user message. The message may be a task, a question, or just casua
 the best chance of responding well in the fewest words (hard cap of 100 tokens).
 Telegraphic style: fragments fine.
 
-The junior has tools: run_python (python3 -c), wolfram
-(wolframscript, symbolic/exact math), web_qa (one factual question -> short
-web-sourced answer with epistemic status, or NOT FOUND), fetch_url (raw page
-text), and read_block (same as yours) — you can tell it which block to read.
+The junior has tools: run_python, wolfram
+(wolframscript, symbolic/exact math), and web_qa (one factual question -> short
+answer grounded by web search)
 For casual conversation tools are usually wrong: say so, and point out anything
 the junior might miss (tone, subtext, what the user actually wants to hear).
 
 You see the conversation so far; the final user message is the one being
-responded to now. In long conversations the oldest messages arrive as
-one-line summaries labeled [block N]; only the latest messages are verbatim.
-You have one tool, read_block(id), returning a block's full text. Use it only
-when that block plausibly matters for THIS reply (e.g. the user references
-something old); reading costs money, most replies need no blocks.
+responded to now.
 
-Bad Example:
-  message: integral of x^2 sin x, plus current marathon WR
-  you: 'use the wolfram and web_qa tool'
-  reason: you could be more idiot-proof.
-
-Good Example:
+Example:
   message: integral of x^2 sin x, plus current marathon WR
   you: wolfram Integrate[x^2 Sin[x],x], web_qa marathon WR, WR likely stands for world record
+  (name exact tool inputs; never just 'use the tools')
 
-Good Example:
+Example:
     message: How do I divide 4 oranges among 4 children if I have only one knife?
     you: the knife is a red herring, 4 oranges, 4 children, give each child one orange.
 
-Good Example:
+Example:
     message: ugh, my deploy broke at 2am again lol
-    you: venting, not a request. no tools. commiserate first, maybe one light question.
+    you: venting, not a request. no tools. commiserate first, maybe one light question.";
 
-Bad (never do):
-    you: 'Looking at this message, the first thing to consider...'
-    reason: lots of wasted tokens.";
+// Appended to SENPAI_SYSTEM only once compaction has produced archive
+// blocks; until then read_block has nothing to return and the whole topic
+// is dead weight in the prompt.
+const SENPAI_ARCHIVE_SECTION: &str = "\
+\n\nThe junior also has read_block (same as yours) — you can tell it which
+block to read. The oldest messages arrive as one-line summaries labeled
+[block N]; only the latest messages are verbatim. You have one tool,
+read_block(id), returning a block's full text. Use it only when that block
+plausibly matters for THIS reply (e.g. the user references something old);
+reading costs money, most replies need no blocks.";
 
 const SENPAI_TOOLS_JSON: &str = r#"[
  {"type":"function","function":{"name":"read_block",
@@ -583,21 +587,34 @@ const SENPAI_TOOLS_JSON: &str = r#"[
 // in `recent` byte-identical, extending the cached prefix instead of breaking
 // it. Only compaction (summaries change, recent head drained) takes a miss.
 fn senpai_briefing(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> String {
-    let tools: Value = serde_json::from_str(SENPAI_TOOLS_JSON).unwrap();
-    let mut messages = vec![cached_text_message("system", SENPAI_SYSTEM)];
+    // No archive blocks => no read_block: skip the tool schema and the
+    // archive section of the prompt. Cache breakpoints only pay when a
+    // prefix will be reused, i.e. when there is prior conversation.
+    let has_archive = !chat.archive.is_empty();
+    let cached = has_archive || !chat.recent.is_empty();
+    let system = if has_archive {
+        format!("{SENPAI_SYSTEM}{SENPAI_ARCHIVE_SECTION}")
+    } else {
+        SENPAI_SYSTEM.to_string()
+    };
+    let mut messages = vec![text_message("system", &system, cached)];
     if let Some(summaries) = chat.summaries_message() {
         messages.push(summaries);
     }
     messages.extend(chat.recent.iter().cloned());
-    messages.push(cached_text_message("user", user_message));
+    messages.push(text_message("user", user_message, cached));
 
     // Small tool loop: senpai may pull a few archive blocks before briefing.
     for _ in 0..4 {
-        let resp = match curl_post(&json!({
+        let mut body = json!({
             "model": config.senpai_model, "max_tokens": 150,
-            "messages": messages, "tools": tools,
+            "messages": messages,
             "reasoning": {"enabled": false, "exclude": true},
-        })) {
+        });
+        if has_archive {
+            body["tools"] = serde_json::from_str(SENPAI_TOOLS_JSON).unwrap();
+        }
+        let resp = match curl_post(&body) {
             Ok(resp) => resp,
             Err(err) => {
                 eprintln!("[senpai call failed: {err}]");
@@ -703,7 +720,8 @@ fn run_turn(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> Result<St
     // cache-friendly layout; the briefing-wrapped final message is the only
     // per-turn divergence.
     let tools: Value = serde_json::from_str(STUDENT_TOOLS_JSON).unwrap();
-    let mut messages = vec![cached_text_message("system", &student_system(config))];
+    let cached = !chat.archive.is_empty() || !chat.recent.is_empty();
+    let mut messages = vec![text_message("system", &student_system(config), cached)];
     if let Some(summaries) = chat.summaries_message() {
         messages.push(summaries);
     }
