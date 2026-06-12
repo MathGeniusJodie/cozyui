@@ -18,8 +18,6 @@ use crate::text_input::{EditKey, KeyInput, edit_key};
 use crate::{Framebuffer, Index, Palette, Rect, Rgb, Rgba, Sprite, Swap, TRANSPARENT};
 use serde_json::{Value, json};
 
-const SCALE: usize = 1;
-const GLYPH_SCALE: usize = 1;
 const CONTENT_W: usize = 348;
 const W: usize = CONTENT_W + ERASER_W - ERASER_CONTENT_OVERLAP;
 const H: usize = 318;
@@ -140,12 +138,17 @@ pub(crate) struct Fwends {
     scroll_y: usize,
     model_slot_w: usize,
     model_slot_h: usize,
-    pending: Option<Receiver<Result<String, String>>>,
+    pending: Option<PendingReply>,
     system_prompt: String,
-    // Total laid-out chat height; message_layouts() wraps every message
-    // through the font engine, so it is cached here and refreshed via
-    // messages_changed() instead of recomputed on every scroll and frame.
-    content_height: usize,
+    // message_layouts() wraps every message through the font engine, so the
+    // result is cached here and refreshed via messages_changed() instead of
+    // recomputed on every scroll and frame.
+    layouts: Vec<MessageLayout>,
+}
+
+struct PendingReply {
+    rx: Receiver<Result<String, String>>,
+    author: &'static str,
 }
 
 impl Fwends {
@@ -185,7 +188,7 @@ impl Fwends {
             selected_model,
             lamp_on: false,
             focused: false,
-            height: H * SCALE,
+            height: H,
             scroll_y: 0,
             model_slot_w,
             model_slot_h,
@@ -193,14 +196,14 @@ impl Fwends {
             system_prompt: fs::read_to_string(SYSTEM_PROMPT_PATH).unwrap_or_else(|_| {
                 "You are a warm, concise chat companion. Answer directly and never reveal hidden reasoning.".to_string()
             }),
-            content_height: 0,
+            layouts: Vec::new(),
         };
-        fwends.content_height = fwends.compute_content_height();
+        fwends.messages_changed();
         Ok(fwends)
     }
 
     pub(crate) fn width(&self) -> usize {
-        W * SCALE
+        W
     }
 
     pub(crate) fn height(&self) -> usize {
@@ -208,7 +211,7 @@ impl Fwends {
     }
 
     pub(crate) fn min_height(&self) -> usize {
-        H * SCALE
+        H
     }
 
     pub(crate) fn set_height(&mut self, height: usize) -> bool {
@@ -243,8 +246,8 @@ impl Fwends {
             return;
         }
 
-        let x = x as usize / SCALE;
-        let y = y as usize / SCALE;
+        let x = x as usize;
+        let y = y as usize;
         if self.eraser_contains(x, y) {
             self.erase_chat_history();
             return;
@@ -257,12 +260,15 @@ impl Fwends {
 
         let fwend_rect = self.selected_fwend_rect();
         if fwend_rect.contains_point(x, y) {
-            self.selected_model = (self.selected_model + 1) % MODELS.len();
+            self.select_next_model();
             return;
         }
 
+        // While a reply is pending the sticky shows "wait a sec..." instead
+        // of the input text, so clicks would select against invisible text.
         let input_x = self.input_sticky_x();
-        if x >= input_x
+        if self.pending.is_none()
+            && x >= input_x
             && x < input_x + self.input_sticky_w()
             && y >= self.input_y()
             && y < self.input_y() + self.input_sticky_h()
@@ -277,8 +283,8 @@ impl Fwends {
         if !self.input_edit.is_dragging() {
             return false;
         }
-        let x = x.max(0) as usize / SCALE;
-        let y = y.max(0) as usize / SCALE;
+        let x = x.max(0) as usize;
+        let y = y.max(0) as usize;
         let cursor = self.input_index_at(x, y);
         self.input_edit.drag_to(cursor, &self.input)
     }
@@ -295,40 +301,46 @@ impl Fwends {
         &mut self,
         input: &KeyInput,
         clipboard_text: Option<&str>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
-        if self.focused {
+    ) -> Option<String> {
+        if self.focused && self.pending.is_none() {
+            let max_width = self.input_text_width();
+            let font = &self.font;
             let outcome =
                 self.input_edit
                     .handle_key(input, &mut self.input, clipboard_text, |candidate| {
                         char_len(candidate) <= MAX_INPUT_CHARS
+                            && font.wrap_lines(candidate, max_width).len() <= INPUT_MAX_LINES
                     });
             if let TextEditOutcome::Handled { changed: _, copy } = outcome {
-                return Ok(copy);
+                return copy;
             }
         }
 
         match edit_key(input) {
             EditKey::Enter if self.focused => self.send(),
             EditKey::Escape => self.focused = false,
-            EditKey::Tab => self.selected_model = (self.selected_model + 1) % MODELS.len(),
+            EditKey::Tab | EditKey::Right => self.select_next_model(),
             EditKey::Left => {
                 self.selected_model = self
                     .selected_model
                     .checked_sub(1)
                     .unwrap_or(MODELS.len() - 1);
             }
-            EditKey::Right => self.selected_model = (self.selected_model + 1) % MODELS.len(),
             _ => {}
         }
-        Ok(None)
+        None
+    }
+
+    fn select_next_model(&mut self) {
+        self.selected_model = (self.selected_model + 1) % MODELS.len();
     }
 
     pub(crate) fn drain_reply(&mut self) -> bool {
-        let Some(rx) = &self.pending else {
+        let Some(pending) = &self.pending else {
             return false;
         };
 
-        let reply = match rx.try_recv() {
+        let reply = match pending.rx.try_recv() {
             Ok(reply) => reply,
             Err(mpsc::TryRecvError::Empty) => return false,
             // The worker thread died without sending (e.g. panicked); surface
@@ -336,21 +348,21 @@ impl Fwends {
             Err(mpsc::TryRecvError::Disconnected) => Err("reply thread died".to_string()),
         };
 
+        let author = pending.author;
         self.pending = None;
         let text = match reply {
-            Ok(text) => text,
+            Ok(text) => strip_self_prefix(&text, author),
             Err(err) => format!("oops: {err}"),
         };
         if let Some(message) = self.messages.last_mut()
             && message.kind == MessageKind::Pending
         {
-            message.text = match message.author {
-                Some(name) => strip_self_prefix(&text, name),
-                None => text,
-            };
+            message.text = text;
             message.kind = MessageKind::Normal;
         } else {
-            self.messages.push(Message::assistant(text));
+            let mut message = Message::assistant(text);
+            message.author = Some(author);
+            self.messages.push(message);
         }
         self.messages_changed();
         true
@@ -399,7 +411,10 @@ impl Fwends {
 
         let text = format!("{USER_NAME}: {text}");
         let (tx, rx) = mpsc::channel();
-        self.pending = Some(rx);
+        self.pending = Some(PendingReply {
+            rx,
+            author: model.name,
+        });
 
         thread::spawn(move || {
             // Lamp on: the fwend's thinking model plays senpai, briefing the
@@ -427,17 +442,16 @@ impl Fwends {
     }
 
     fn messages_changed(&mut self) {
-        self.content_height = self.compute_content_height();
+        self.layouts = self.message_layouts();
         self.scroll_to_bottom();
     }
 
     fn draw_messages(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let layouts = self.message_layouts();
         let viewport_top = CHAT_Y;
         let viewport_bottom = CHAT_Y + self.chat_h();
-        let bottom_offset = self.chat_h().saturating_sub(self.content_height);
+        let bottom_offset = self.chat_h().saturating_sub(self.content_height());
 
-        for layout in layouts {
+        for layout in &self.layouts {
             let y = CHAT_Y as isize + bottom_offset as isize + layout.y as isize
                 - self.scroll_y as isize;
             if y >= viewport_bottom as isize || y + layout.h as isize <= viewport_top as isize {
@@ -446,17 +460,15 @@ impl Fwends {
 
             self.draw_bubble(fb, palette, layout.x, y, layout.w, layout.h, layout.style);
             if let Some(src) = layout.author.and_then(smol_icon_rect) {
-                let clip = Rect::new(0, viewport_top * SCALE, self.width(), self.chat_h() * SCALE);
-                let icon_x = (layout.x + layout.w + SMOL_ICON_GAP) * SCALE;
-                let icon_y = (y + layout.h as isize
-                    - (SMOL_ICON_SIZE + SMOL_ICON_Y_OFFSET) as isize)
-                    * SCALE as isize;
+                let clip = Rect::new(0, viewport_top, self.width(), self.chat_h());
+                let icon_x = layout.x + layout.w + SMOL_ICON_GAP;
+                let icon_y = y + layout.h as isize - (SMOL_ICON_SIZE + SMOL_ICON_Y_OFFSET) as isize;
                 fb.draw_sprite_full(
                     &self.smol_icons,
                     src,
                     icon_x as isize,
                     icon_y,
-                    SCALE,
+                    1,
                     Some(clip),
                     palette,
                     None,
@@ -464,16 +476,16 @@ impl Fwends {
             }
             let text_x = layout.x + layout.style.pad_left;
             let mut text_y = y + layout.style.pad_top as isize;
-            for line in layout.lines {
+            for line in &layout.lines {
                 if text_y >= viewport_top as isize
                     && text_y + self.font.cell_h() as isize <= viewport_bottom as isize
                 {
                     self.font.draw_text(
                         fb,
-                        &line,
-                        text_x * SCALE,
-                        text_y as usize * SCALE,
-                        GLYPH_SCALE,
+                        line,
+                        text_x,
+                        text_y as usize,
+                        1,
                         palette.color(palette_color::BLACK),
                     );
                 }
@@ -512,7 +524,7 @@ impl Fwends {
                 let Some(color) = palette.resolve(image.at(sx, sy), px, py as usize) else {
                     continue;
                 };
-                fb.fill_rect(px * SCALE, py as usize * SCALE, SCALE, SCALE, color);
+                fb.set_pixel(px, py as usize, color);
             }
         }
     }
@@ -555,15 +567,15 @@ impl Fwends {
         self.input_sticky_x()
     }
 
-    fn compute_content_height(&self) -> usize {
-        self.message_layouts()
+    fn content_height(&self) -> usize {
+        self.layouts
             .last()
             .map(|layout| layout.y + layout.h)
             .unwrap_or(0)
     }
 
     fn max_scroll(&self) -> usize {
-        self.content_height.saturating_sub(self.chat_h())
+        self.content_height().saturating_sub(self.chat_h())
     }
 
     fn scroll_to_bottom(&mut self) {
@@ -573,12 +585,12 @@ impl Fwends {
     fn draw_lamp(&self, fb: &mut Framebuffer, palette: &Palette) {
         let image = self.lamp_image();
         let (x, y) = self.lamp_position();
-        fb.draw_sprite(image, x as isize, y as isize, SCALE, palette);
+        fb.draw_sprite(image, x as isize, y as isize, 1, palette);
     }
 
     fn draw_eraser(&self, fb: &mut Framebuffer, palette: &Palette) {
         let (x, y) = self.eraser_position();
-        fb.draw_sprite(&self.eraser, x as isize, y as isize, SCALE, palette);
+        fb.draw_sprite(&self.eraser, x as isize, y as isize, 1, palette);
     }
 
     fn eraser_contains(&self, x: usize, y: usize) -> bool {
@@ -597,7 +609,7 @@ impl Fwends {
     fn eraser_position(&self) -> (usize, usize) {
         (
             W.saturating_sub(self.eraser.width + ERASER_RIGHT_PAD),
-            (self.height / SCALE).saturating_sub(self.eraser.height),
+            self.height.saturating_sub(self.eraser.height),
         )
     }
 
@@ -628,7 +640,7 @@ impl Fwends {
         let image = self.lamp_image();
         (
             CONTENT_W.saturating_sub(image.width + LAMP_RIGHT_PAD),
-            (self.height / SCALE).saturating_sub(image.height + LAMP_Y_OFFSET),
+            self.height.saturating_sub(image.height + LAMP_Y_OFFSET),
         )
     }
 
@@ -652,35 +664,57 @@ impl Fwends {
         } else {
             &self.input
         };
-        let text_y = (self.input_y() + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
+        let text_y = self.input_text_y();
         let text_x = self.input_text_x();
         let max_width = self.input_text_width();
         let lines = self.font.wrap_lines(label, max_width);
         if self.pending.is_none() {
-            draw_selection(
-                fb,
-                &self.font,
-                &self.input,
-                self.input_edit.selection_range(),
-                text_x * SCALE,
-                text_y * SCALE,
-                max_width,
-                LINE_H * SCALE,
-                GLYPH_SCALE,
-                palette.color(palette_color::LAVENDER),
-            );
+            self.draw_input_selection(fb, palette.color(palette_color::LAVENDER));
         }
-        for (index, line) in lines.into_iter().take(INPUT_MAX_LINES).enumerate() {
+        for (index, line) in lines.into_iter().enumerate() {
             self.font.draw_text(
                 fb,
                 &line,
-                text_x * SCALE,
-                (text_y + index * LINE_H) * SCALE,
-                GLYPH_SCALE,
+                text_x,
+                text_y + index * LINE_H,
+                1,
                 palette.color(palette_color::BLACK),
             );
         }
         self.draw_focused_pencil(fb, palette);
+    }
+
+    fn draw_input_selection(&self, fb: &mut Framebuffer, color: Rgb) {
+        let Some((selection_start, selection_end)) = self.input_edit.selection_range() else {
+            return;
+        };
+        let x = self.input_text_x();
+        let y = self.input_text_y();
+        let lines = self.font.wrap_lines(&self.input, self.input_text_width());
+        let mut line_start = 0;
+        for (line_index, line) in lines.iter().enumerate() {
+            let line_len = line.chars().count();
+            let line_end = line_start + line_len;
+            let start = selection_start.max(line_start);
+            let end = selection_end.min(line_end);
+            if start < end {
+                let prefix = prefix_chars(line, start - line_start);
+                let selected = prefix_chars(line, end - line_start);
+                let sel_x = x + self.font.text_width(prefix);
+                let sel_w = self
+                    .font
+                    .text_width(selected)
+                    .saturating_sub(self.font.text_width(prefix));
+                fb.fill_rect(
+                    sel_x,
+                    y + line_index * LINE_H,
+                    sel_w.max(1),
+                    self.font.cell_h(),
+                    color,
+                );
+            }
+            line_start = line_end;
+        }
     }
 
     fn draw_selected_fwend(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -700,13 +734,7 @@ impl Fwends {
             lamp_x,
             lamp_y,
         );
-        fb.draw_sprite(
-            avatar,
-            (avatar_x * SCALE) as isize,
-            (avatar_y * SCALE) as isize,
-            SCALE,
-            palette,
-        );
+        fb.draw_sprite(avatar, avatar_x as isize, avatar_y as isize, 1, palette);
     }
 
     fn selected_fwend_rect(&self) -> FwendRect {
@@ -719,7 +747,7 @@ impl Fwends {
     }
 
     fn draw_focused_pencil(&self, fb: &mut Framebuffer, palette: &Palette) {
-        if !self.focused {
+        if !self.focused || self.pending.is_some() {
             return;
         }
 
@@ -729,17 +757,11 @@ impl Fwends {
         draw_yellow_pencil_shadow(
             fb,
             &self.pencil_shadow,
-            (dest_x * SCALE) as isize,
-            (dest_y * SCALE) as isize,
+            dest_x as isize,
+            dest_y as isize,
             palette,
         );
-        fb.draw_sprite(
-            &self.pencil,
-            (dest_x * SCALE) as isize,
-            (dest_y * SCALE) as isize,
-            SCALE,
-            palette,
-        );
+        fb.draw_sprite(&self.pencil, dest_x as isize, dest_y as isize, 1, palette);
     }
 
     fn input_cursor_position(&self) -> (usize, usize) {
@@ -748,28 +770,33 @@ impl Fwends {
         let lines = self.font.wrap_lines(&self.input, max_width);
         let (line_index, line_start, line) =
             line_for_char_index(&lines, self.input_edit.cursor()).unwrap_or((0, 0, ""));
-        let text_y = (self.input_y() + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
         (
             text_x
                 + self
                     .font
                     .text_width(prefix_chars(line, self.input_edit.cursor() - line_start))
                     .min(max_width),
-            text_y + line_index.min(INPUT_MAX_LINES - 1) * LINE_H,
+            self.input_text_y() + line_index * LINE_H,
         )
     }
 
     fn input_index_at(&self, x: usize, y: usize) -> usize {
-        let text_x = self.input_text_x();
-        let max_width = self.input_text_width();
-        let text_y = (self.input_y() + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET);
-        let line_index = y.saturating_sub(text_y) / LINE_H;
-        let lines = self.font.wrap_lines(&self.input, max_width);
-        text_index_at(&self.font, &lines, line_index, x.saturating_sub(text_x))
+        let line_index = y.saturating_sub(self.input_text_y()) / LINE_H;
+        let lines = self.font.wrap_lines(&self.input, self.input_text_width());
+        text_index_at(
+            &self.font,
+            &lines,
+            line_index,
+            x.saturating_sub(self.input_text_x()),
+        )
     }
 
     fn input_text_x(&self) -> usize {
         self.input_sticky_x() + TEXT_PAD
+    }
+
+    fn input_text_y(&self) -> usize {
+        (self.input_y() + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET)
     }
 
     fn input_text_width(&self) -> usize {
@@ -791,7 +818,7 @@ impl Fwends {
     }
 
     fn input_y(&self) -> usize {
-        (self.height / SCALE).saturating_sub(INPUT_BOTTOM_PAD + INPUT_EXTRA_H)
+        self.height.saturating_sub(INPUT_BOTTOM_PAD + INPUT_EXTRA_H)
     }
 
     fn chat_h(&self) -> usize {
@@ -802,8 +829,8 @@ impl Fwends {
         if x < 0 || y < 0 {
             return false;
         }
-        let x = x as usize / SCALE;
-        let y = y as usize / SCALE;
+        let x = x as usize;
+        let y = y as usize;
         (PAD..CONTENT_W - PAD).contains(&x) && (CHAT_Y..CHAT_Y + self.chat_h()).contains(&y)
     }
 }
@@ -819,48 +846,6 @@ struct FwendRect {
 impl FwendRect {
     fn contains_point(self, x: usize, y: usize) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
-    }
-}
-
-fn draw_selection(
-    fb: &mut Framebuffer,
-    font: &BitmapFont,
-    text: &str,
-    selection: Option<(usize, usize)>,
-    x: usize,
-    y: usize,
-    max_width: usize,
-    line_h: usize,
-    scale: usize,
-    color: Rgb,
-) {
-    let Some((selection_start, selection_end)) = selection else {
-        return;
-    };
-    let lines = font.wrap_lines(text, max_width);
-    let mut line_start = 0;
-    for (line_index, line) in lines.iter().enumerate().take(INPUT_MAX_LINES) {
-        let line_len = line.chars().count();
-        let line_end = line_start + line_len;
-        let start = selection_start.max(line_start);
-        let end = selection_end.min(line_end);
-        if start < end {
-            let prefix = prefix_chars(line, start - line_start);
-            let selected = prefix_chars(line, end - line_start);
-            let sel_x = x + font.text_width(prefix) * scale;
-            let sel_w = font
-                .text_width(selected)
-                .saturating_sub(font.text_width(prefix))
-                * scale;
-            fb.fill_rect(
-                sel_x,
-                y + line_index * line_h,
-                sel_w.max(1),
-                font.cell_h() * scale,
-                color,
-            );
-        }
-        line_start = line_end;
     }
 }
 
@@ -894,25 +879,12 @@ fn draw_lamp_masked_ellipse(
             }
             let x = x as usize;
             let y = y as usize;
-            if !lamp_masks_pixel(lamp, lamp_x, lamp_y, x, y) {
-                continue;
-            }
             let Some(color) = lamp_shadow_color(lamp, lamp_x, lamp_y, x, y, palette) else {
                 continue;
             };
             fb.set_pixel(x, y, color);
         }
     }
-}
-
-fn lamp_masks_pixel(lamp: &Sprite, lamp_x: usize, lamp_y: usize, x: usize, y: usize) -> bool {
-    let Some(local_x) = x.checked_sub(lamp_x) else {
-        return false;
-    };
-    let Some(local_y) = y.checked_sub(lamp_y) else {
-        return false;
-    };
-    local_x < lamp.width && local_y < lamp.height && lamp.is_opaque(local_x, local_y)
 }
 
 fn lamp_shadow_color(
@@ -961,7 +933,7 @@ fn draw_resized_image(
             let Some(color) = palette.resolve(image.at(sx, sy), x + dx, y + dy) else {
                 continue;
             };
-            fb.fill_rect((x + dx) * SCALE, (y + dy) * SCALE, SCALE, SCALE, color);
+            fb.set_pixel(x + dx, y + dy, color);
         }
     }
 }
@@ -977,7 +949,7 @@ fn draw_yellow_pencil_shadow(
         image,
         dest_x,
         dest_y,
-        SCALE,
+        1,
         palette,
         &Swap::from_indices(&YELLOW_PAGE_REMAP),
     );
@@ -985,23 +957,22 @@ fn draw_yellow_pencil_shadow(
 
 const PALETTE_COLOR_COUNT: usize = 16;
 
-const IDENTITY_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = {
+const YELLOW_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = {
     let mut remap = [0; PALETTE_COLOR_COUNT];
     let mut i = 0;
     while i < PALETTE_COLOR_COUNT {
         remap[i] = i as Index;
         i += 1;
     }
-    remap
-};
-
-const YELLOW_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = {
-    let mut remap = IDENTITY_PAGE_REMAP;
     remap[palette_color::LIME as usize] = palette_color::PEACH;
     remap[palette_color::ROSE as usize] = palette_color::PEACH;
     remap
 };
 
+// The index accounting here and in text_index_at assumes the wrapped lines
+// concatenate back to the source text. wrap_lines drops '\n' characters at
+// paragraph splits, so this only holds because TextEdit filters newlines out
+// of the input buffer.
 fn line_for_char_index(lines: &[String], index: usize) -> Option<(usize, usize, &str)> {
     let mut line_start = 0;
     for (line_index, line) in lines.iter().enumerate() {
@@ -1327,10 +1298,8 @@ fn unique_temp_path() -> PathBuf {
         .unwrap_or(0);
     let mut path = env::temp_dir();
     path.push(format!(
-        "cozyui-openrouter-{}-{}-{:?}.json",
-        std::process::id(),
-        nanos,
-        thread::current().id()
+        "cozyui-openrouter-{}-{nanos}.json",
+        std::process::id()
     ));
     path
 }
@@ -1449,14 +1418,21 @@ fn stretch_source_coord(
     start_cap: usize,
     end_cap: usize,
 ) -> usize {
+    debug_assert!(src_len > 0, "stretching an empty sprite");
+    debug_assert!(
+        src_len >= start_cap + end_cap,
+        "9-slice caps larger than the sprite"
+    );
+
     if dest_len <= start_cap + end_cap {
         let src_middle = src_len.saturating_sub(start_cap + end_cap).max(1);
         let dest_middle = dest_len.saturating_sub(start_cap + end_cap).max(1);
+        let last = src_len.saturating_sub(1);
         if dest < start_cap.min(dest_len) {
-            return dest.min(src_len - 1);
+            return dest.min(last);
         }
         if dest >= dest_len.saturating_sub(end_cap) {
-            return src_len.saturating_sub(dest_len - dest).min(src_len - 1);
+            return src_len.saturating_sub(dest_len - dest).min(last);
         }
         return start_cap + (dest - start_cap) * src_middle / dest_middle;
     }
@@ -1497,15 +1473,38 @@ mod tests {
         let iterations = 200;
         let start = Instant::now();
         for _ in 0..iterations {
-            // What one draw_messages + content_height + max_scroll costs.
+            // What one messages_changed (full layout rebuild) costs.
             std::hint::black_box(fwends.message_layouts());
-            std::hint::black_box(fwends.compute_content_height());
             std::hint::black_box(fwends.max_scroll());
         }
         println!(
-            "fwends render-layout work: {:?} per frame ({iterations} iterations)",
+            "fwends layout rebuild: {:?} ({iterations} iterations)",
             start.elapsed() / iterations
         );
+    }
+
+    #[test]
+    fn stretch_is_identity_when_sizes_match() {
+        for dest in 0..30 {
+            assert_eq!(stretch_source_coord(dest, 30, 30, 10, 10), dest);
+        }
+    }
+
+    #[test]
+    fn stretch_preserves_caps_and_stays_in_bounds() {
+        for (dest_len, src_len) in [(60, 30), (30, 30), (12, 30), (3, 30)] {
+            for dest in 0..dest_len {
+                let src = stretch_source_coord(dest, dest_len, src_len, 10, 10);
+                assert!(src < src_len, "dest {dest}/{dest_len} mapped to {src}");
+            }
+            if dest_len > 20 {
+                assert_eq!(stretch_source_coord(0, dest_len, src_len, 10, 10), 0);
+                assert_eq!(
+                    stretch_source_coord(dest_len - 1, dest_len, src_len, 10, 10),
+                    src_len - 1
+                );
+            }
+        }
     }
 
     #[test]

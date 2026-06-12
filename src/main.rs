@@ -401,7 +401,9 @@ impl App {
         match self.focus {
             WidgetId::Puter => Ok(self.puter.handle_key_press(input, clipboard_text)),
             WidgetId::Toodle => self.toodle.handle_key_press(input, clipboard_text),
-            WidgetId::Fwends if SHOW_FWENDS => self.fwends.handle_key_press(input, clipboard_text),
+            WidgetId::Fwends if SHOW_FWENDS => {
+                Ok(self.fwends.handle_key_press(input, clipboard_text))
+            }
             WidgetId::Fwends => Ok(None),
             WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => Ok(None),
         }
