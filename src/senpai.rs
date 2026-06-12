@@ -2,16 +2,19 @@
 // student does all the actual work and gives the final answer.
 //
 // Flow (always, no escalation tool):
-//   1. senpai (config.senpai_model) reads the user's message (a task,
-//      a question, or casual chat), emits a terse free-form briefing.
+//   1. student model (cheap) scans the conversation history (with the
+//      read_block tool) and extracts a tiny RELEVANT CONTEXT note for the
+//      user's message — omitted entirely when nothing earlier matters.
+//   2. senpai (config.senpai_model) reads only the user's message plus that
+//      note (no history, no tools), emits a terse free-form briefing.
 //      Aggressively capped output; telegraphic style, so truncation degrades
 //      gracefully.
-//   2. student (config.student_model) responds, with tools (run_python,
+//   3. student (config.student_model) responds, with tools (run_python,
 //      wolframscript, web_qa) available and the briefing in context.
 //
-// Cost notes: senpai's system prompt carries cache_control (cached input is
-// ~1/50th the price of output tokens, so the fixed prefix is deliberately
-// rich). senpai's output is the expensive part => terse style + low
+// Cost notes: only the cheap model ever sees the full history; senpai's
+// input is a small one-off (message + context note), so it carries no cache
+// breakpoints. senpai's output is the expensive part => terse style + low
 // max_tokens.
 //
 // History across turns is curated by us (the chat API is stateless): only
@@ -582,63 +585,92 @@ Examples:
   
   user: ugh, my deploy broke at 2am again lol
   you: venting, not a request. commiserate first, maybe one light question.
-  (tone/subtext)";
+  (tone/subtext)
 
-// Appended to SENPAI_SYSTEM only once compaction has produced archive
-// blocks; until then read_block has nothing to return and the whole topic
-// is dead weight in the prompt.
-const SENPAI_ARCHIVE_SECTION: &str = "\
-\n\nThe junior also has read_block (same as yours) — you can tell it which
-block to read. The oldest messages arrive as one-line summaries labeled
-[block N]; only the latest messages are verbatim. You have one tool,
-read_block(id), returning a block's full text. Use it only when that block
-plausibly matters for THIS reply (e.g. the user references something old);
-reading costs money, most replies need no blocks.";
+A RELEVANT CONTEXT note extracted from the earlier conversation may be
+attached to the message; weave it into your advice where it matters.";
 
-const SENPAI_TOOLS_JSON: &str = r#"[
+// Senpai never sees the conversation: just the user message and, when the
+// context pass found something, a tiny note. One small uncached call.
+fn senpai_briefing(config: &SenpaiConfig, user_message: &str, context: Option<&str>) -> String {
+    let mut user = user_message.to_string();
+    if let Some(context) = context {
+        user.push_str(&format!(
+            "\n\nRELEVANT CONTEXT (from earlier conversation):\n{context}"
+        ));
+    }
+    let body = json!({
+        "model": config.senpai_model, "max_tokens": 150,
+        "messages": [
+            text_message("system", SENPAI_SYSTEM, false),
+            text_message("user", &user, false),
+        ],
+        "reasoning": {"enabled": false, "exclude": true},
+    });
+    match curl_post(&body) {
+        Ok(resp) => {
+            let text = content_text(&choice(&resp)["message"]["content"]);
+            let text = text.trim();
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+        Err(err) => eprintln!("[senpai call failed: {err}]"),
+    }
+    "(senpai unavailable; proceed with your own judgement)".into()
+}
+
+// ----------------------------------------------------------- context pass
+
+const CONTEXT_SYSTEM: &str = "\
+You scan a conversation and extract only what matters for answering the
+final user message. Output a tiny note (<=40 words, telegraphic fragments):
+facts, names, decisions, or earlier results the reply must respect.
+The oldest messages arrive as one-line summaries labeled [block N]; you have
+one tool, read_block(id), returning a block's full text. Use it only when
+that block plausibly matters for THIS message; most messages need no blocks.
+If nothing earlier is relevant, output exactly NONE.";
+
+const CONTEXT_TOOLS_JSON: &str = r#"[
  {"type":"function","function":{"name":"read_block",
   "description":"Retrieve the full text of a summarized conversation block by its id.",
   "parameters":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}}}
 ]"#;
 
-// Prompt layout is append-only between compactions so Anthropic's prefix
+// Prompt layout is append-only between compactions so the provider's prefix
 // cache pays off every turn: [system (bp)] [summaries (bp)] [recent, plain]
 // [current message (bp)]. The current message is sent raw — next turn it sits
 // in `recent` byte-identical, extending the cached prefix instead of breaking
 // it. Only compaction (summaries change, recent head drained) takes a miss.
-fn senpai_briefing(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> String {
-    // No archive blocks => no read_block: skip the tool schema and the
-    // archive section of the prompt. Cache breakpoints only pay when a
-    // prefix will be reused, i.e. when there is prior conversation.
+fn relevant_context(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> Option<String> {
     let has_archive = !chat.archive.is_empty();
-    let cached = has_archive || !chat.recent.is_empty();
-    let system = if has_archive {
-        format!("{SENPAI_SYSTEM}{SENPAI_ARCHIVE_SECTION}")
-    } else {
-        SENPAI_SYSTEM.to_string()
-    };
-    let mut messages = vec![text_message("system", &system, cached)];
+    if !has_archive && chat.recent.is_empty() {
+        return None;
+    }
+
+    let mut messages = vec![text_message("system", CONTEXT_SYSTEM, true)];
     if let Some(summaries) = chat.summaries_message() {
         messages.push(summaries);
     }
     messages.extend(chat.recent.iter().cloned());
-    messages.push(text_message("user", user_message, cached));
+    messages.push(text_message("user", user_message, true));
 
-    // Small tool loop: senpai may pull a few archive blocks before briefing.
+    // Small tool loop: the extractor may pull a few archive blocks first.
+    // No archive blocks => no read_block: skip the tool schema.
     for _ in 0..4 {
         let mut body = json!({
-            "model": config.senpai_model, "max_tokens": 150,
+            "model": config.student_model, "max_tokens": 100,
             "messages": messages,
             "reasoning": {"enabled": false, "exclude": true},
         });
         if has_archive {
-            body["tools"] = serde_json::from_str(SENPAI_TOOLS_JSON).unwrap();
+            body["tools"] = serde_json::from_str(CONTEXT_TOOLS_JSON).unwrap();
         }
         let resp = match curl_post(&body) {
             Ok(resp) => resp,
             Err(err) => {
-                eprintln!("[senpai call failed: {err}]");
-                break;
+                eprintln!("[context pass failed: {err}]");
+                return None;
             }
         };
         let ch = choice(&resp);
@@ -651,7 +683,7 @@ fn senpai_briefing(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> St
                     serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}"))
                         .unwrap_or(json!({}));
                 let id = args["id"].as_u64().unwrap_or(u64::MAX) as usize;
-                eprintln!("[senpai read block {id}]");
+                eprintln!("[context pass read block {id}]");
                 messages.push(json!({
                     "role": "tool", "tool_call_id": tc["id"],
                     "content": chat.read_block(id)
@@ -662,12 +694,12 @@ fn senpai_briefing(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> St
 
         let text = content_text(&msg["content"]);
         let text = text.trim();
-        if !text.is_empty() {
-            return text.to_string();
+        if text.is_empty() || text == "NONE" {
+            return None;
         }
-        break;
+        return Some(text.to_string());
     }
-    "(senpai unavailable; proceed with your own judgement)".into()
+    None
 }
 
 // ------------------------------------------------------------------ student
@@ -728,11 +760,18 @@ fn today() -> String {
 // are never carried forward. Returns the student's reply; the caller decides
 // what to commit to history.
 fn run_turn(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> Result<String, String> {
-    // 1. senpai briefs (summaries + recent messages; may pull blocks).
-    let briefing = senpai_briefing(config, chat, user_message);
+    // 1. the cheap model distills the history into a note for senpai
+    //    (it alone sees summaries + recent messages; may pull blocks).
+    let context = relevant_context(config, chat, user_message);
+    if let Some(context) = &context {
+        eprintln!("--- context ---\n{context}\n---------------");
+    }
+
+    // 2. senpai briefs from the message + note alone.
+    let briefing = senpai_briefing(config, user_message, context.as_deref());
     eprintln!("--- senpai ---\n{briefing}\n--------------");
 
-    // 2. student responds (same compacted view, no retrieval tool). Same
+    // 3. student responds with its own compacted view of the history. Same
     // cache-friendly layout; the briefing-wrapped final message is the only
     // per-turn divergence.
     let tools: Value = serde_json::from_str(STUDENT_TOOLS_JSON).unwrap();
@@ -780,7 +819,7 @@ fn run_turn(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> Result<St
             continue;
         }
 
-        // 3. student replies to the user; only the raw exchange is kept.
+        // 4. student replies to the user; only the raw exchange is kept.
         let text = content_text(&msg["content"]);
         if text.trim().is_empty() {
             let reason = ch["finish_reason"].as_str().unwrap_or("none").to_string();
