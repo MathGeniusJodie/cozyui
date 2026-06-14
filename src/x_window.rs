@@ -18,7 +18,8 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
 
 use crate::text_input;
-use crate::{Framebuffer, Rect};
+use crate::graphics::PresentLut;
+use crate::{Framebuffer, Palette, Rect};
 
 pub struct XWindow {
     pub(crate) conn: XCBConnection,
@@ -30,6 +31,8 @@ pub struct XWindow {
     shm_image: Option<ShmImage>,
     clipboard_atoms: ClipboardAtoms,
     clipboard_text: Option<String>,
+    /// Index -> BGRA table applied when presenting; refreshed via `set_palette`.
+    lut: Box<PresentLut>,
 }
 
 struct ShmImage {
@@ -109,7 +112,13 @@ impl XWindow {
             shm_image,
             clipboard_atoms,
             clipboard_text: None,
+            lut: Box::new([[0, 0, 0, 0xFF]; 256]),
         })
+    }
+
+    /// Refresh the index->BGRA present table from the active palette.
+    pub(crate) fn set_palette(&mut self, palette: &Palette) {
+        self.lut = palette.present_lut();
     }
 
     #[cfg(unix)]
@@ -142,8 +151,9 @@ impl XWindow {
     }
 
     pub(crate) fn draw(&mut self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
+        let frame_len = fb.width * fb.height * Framebuffer::BYTES_PER_PIXEL;
         if let Some(shm_image) = &mut self.shm_image {
-            shm_image.mmap[..fb.ximage_bytes().len()].copy_from_slice(fb.ximage_bytes());
+            fb.present_into(&mut shm_image.mmap[..frame_len], &self.lut);
             self.conn.shm_put_image(
                 self.window,
                 self.gc,
@@ -165,6 +175,8 @@ impl XWindow {
             return Ok(());
         }
 
+        self.upload_buffer.resize(frame_len, 0);
+        fb.present_into(&mut self.upload_buffer, &self.lut);
         self.conn.put_image(
             ImageFormat::Z_PIXMAP,
             self.window,
@@ -175,7 +187,7 @@ impl XWindow {
             0,
             0,
             self.depth,
-            fb.ximage_bytes(),
+            &self.upload_buffer,
         )?;
         self.conn.flush()?;
         Ok(())
@@ -204,15 +216,7 @@ impl XWindow {
 
         let byte_len = rect.w * rect.h * Framebuffer::BYTES_PER_PIXEL;
         if let Some(shm_image) = &mut self.shm_image {
-            for y in 0..rect.h {
-                let dst_start = y * rect.w * Framebuffer::BYTES_PER_PIXEL;
-                let dst_end = dst_start + rect.w * Framebuffer::BYTES_PER_PIXEL;
-                shm_image.mmap[dst_start..dst_end].copy_from_slice(fb.row_bytes(
-                    rect.y + y,
-                    rect.x,
-                    rect.w,
-                ));
-            }
+            fb.present_rect_into(rect, &mut shm_image.mmap[..byte_len], &self.lut);
             self.conn.shm_put_image(
                 self.window,
                 self.gc,
@@ -235,16 +239,7 @@ impl XWindow {
         }
 
         self.upload_buffer.resize(byte_len, 0);
-        for y in 0..rect.h {
-            let dst_start = y * rect.w * Framebuffer::BYTES_PER_PIXEL;
-            let dst_end = dst_start + rect.w * Framebuffer::BYTES_PER_PIXEL;
-            self.upload_buffer[dst_start..dst_end].copy_from_slice(fb.row_bytes(
-                rect.y + y,
-                rect.x,
-                rect.w,
-            ));
-        }
-
+        fb.present_rect_into(rect, &mut self.upload_buffer, &self.lut);
         self.conn.put_image(
             ImageFormat::Z_PIXMAP,
             self.window,

@@ -16,7 +16,7 @@ use crate::palette_color;
 use crate::senpai;
 use crate::text_edit::{TextEdit, TextEditOutcome, char_len};
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Index, Palette, Rect, Rgb, Rgba, Sprite, Swap, TRANSPARENT};
+use crate::{Framebuffer, Index, Palette, Rect, Sprite, Swap, TRANSPARENT};
 use serde_json::{Value, json};
 
 const CONTENT_W: usize = 348;
@@ -229,8 +229,8 @@ impl Fwends {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(palette_color::BLACK).transparent()
+    pub(crate) fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -490,7 +490,7 @@ impl Fwends {
                         text_x,
                         text_y as usize,
                         1,
-                        palette.color(palette_color::BLACK),
+                        palette_color::BLACK,
                     );
                 }
                 text_y += LINE_H as isize;
@@ -525,7 +525,7 @@ impl Fwends {
                 let px = x + dx;
                 let sx = stretch_source_coord(dx, w, image.width, style.left_cap, style.right_cap);
                 let sy = stretch_source_coord(dy, h, image.height, style.top_cap, style.bottom_cap);
-                let Some(color) = palette.resolve(image.at(sx, sy), px, py as usize) else {
+                let Some(color) = palette.resolve_index(image.at(sx, sy), px, py as usize) else {
                     continue;
                 };
                 fb.set_pixel(px, py as usize, color);
@@ -670,7 +670,7 @@ impl Fwends {
         let max_width = self.input_text_width();
         let lines = self.font.wrap_lines(label, max_width);
         if self.pending.is_none() {
-            self.draw_input_selection(fb, palette.color(palette_color::LAVENDER));
+            self.draw_input_selection(fb, palette_color::LAVENDER);
         }
         for (index, line) in lines.into_iter().enumerate() {
             self.font.draw_text(
@@ -679,13 +679,13 @@ impl Fwends {
                 text_x,
                 text_y + index * LINE_H,
                 1,
-                palette.color(palette_color::BLACK),
+                palette_color::BLACK,
             );
         }
         self.draw_focused_pencil(fb, palette);
     }
 
-    fn draw_input_selection(&self, fb: &mut Framebuffer, color: Rgb) {
+    fn draw_input_selection(&self, fb: &mut Framebuffer, color: Index) {
         let Some((selection_start, selection_end)) = self.input_edit.selection_range() else {
             return;
         };
@@ -895,7 +895,7 @@ fn lamp_shadow_color(
     x: usize,
     y: usize,
     palette: &Palette,
-) -> Option<Rgb> {
+) -> Option<Index> {
     let local_x = x.checked_sub(lamp_x)?;
     let local_y = y.checked_sub(lamp_y)?;
     if local_x >= lamp.width || local_y >= lamp.height {
@@ -911,7 +911,7 @@ fn lamp_shadow_color(
         palette_color::CRIMSON => palette_color::PLUM,
         other => other,
     };
-    palette.resolve(mapped, x, y)
+    palette.resolve_index(mapped, x, y)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -932,7 +932,7 @@ fn draw_resized_image(
         let sy = stretch_source_coord(dy, h, image.height, top_cap, bottom_cap);
         for dx in 0..w {
             let sx = stretch_source_coord(dx, w, image.width, left_cap, right_cap);
-            let Some(color) = palette.resolve(image.at(sx, sy), x + dx, y + dy) else {
+            let Some(color) = palette.resolve_index(image.at(sx, sy), x + dx, y + dy) else {
                 continue;
             };
             fb.set_pixel(x + dx, y + dy, color);

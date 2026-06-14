@@ -14,17 +14,6 @@ pub struct Rgb {
     pub(crate) b: u8,
 }
 
-impl Rgb {
-    pub(crate) const fn transparent(self) -> Rgba {
-        Rgba {
-            r: self.r,
-            g: self.g,
-            b: self.b,
-            a: 0,
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct Rgba {
     pub(crate) r: u8,
@@ -133,6 +122,9 @@ impl Swap {
     }
 }
 
+/// Precomputed `Index` -> output BGRA table for the present pass.
+pub(crate) type PresentLut = [[u8; Framebuffer::BYTES_PER_PIXEL]; 256];
+
 pub struct Palette {
     colors: Vec<Rgb>,
     remap: Vec<Paint>,
@@ -180,20 +172,45 @@ impl Palette {
         self.remap[slot] = paint;
     }
 
-    /// Resolve an index through the global remap at destination cell
-    /// coordinates (fat-pixel units, screen-anchored checker phase).
-    pub(crate) fn resolve(&self, index: Index, cell_x: usize, cell_y: usize) -> Option<Rgb> {
+    /// Resolve an index through the global remap to a final *palette index*
+    /// (remap + checker pick applied), deferring the index->color step to
+    /// present time. This is what the indexed framebuffer stores.
+    pub(crate) fn resolve_index(
+        &self,
+        index: Index,
+        cell_x: usize,
+        cell_y: usize,
+    ) -> Option<Index> {
         if index == TRANSPARENT {
             return None;
         }
         let paint = self.remap[Self::wrap(index as usize, self.colors.len())];
-        paint.pick(cell_x, cell_y).map(|index| self.color(index))
+        paint.pick(cell_x, cell_y)
     }
 
-    /// Resolve a per-draw paint, then the global remap.
-    pub(crate) fn resolve_paint(&self, paint: Paint, cell_x: usize, cell_y: usize) -> Option<Rgb> {
+    /// Per-draw paint -> global remap, to a final palette index.
+    pub(crate) fn resolve_paint_index(
+        &self,
+        paint: Paint,
+        cell_x: usize,
+        cell_y: usize,
+    ) -> Option<Index> {
         let index = paint.pick(cell_x, cell_y)?;
-        self.resolve(index, cell_x, cell_y)
+        self.resolve_index(index, cell_x, cell_y)
+    }
+
+    /// Precompute a 256-entry index -> output BGRA table for the present pass.
+    /// `TRANSPARENT` and out-of-range indices collapse to opaque black; the
+    /// root framebuffer is cleared to an opaque index so they don't occur in
+    /// practice.
+    pub(crate) fn present_lut(&self) -> Box<PresentLut> {
+        let mut lut = Box::new([[0u8, 0, 0, 0xFF]; 256]);
+        for (i, entry) in lut.iter_mut().enumerate() {
+            if i as Index != TRANSPARENT {
+                *entry = Framebuffer::color_bytes(self.color(i as Index).into());
+            }
+        }
+        lut
     }
 
     pub(crate) fn nearest_index(&self, color: Rgb) -> Index {
@@ -204,10 +221,6 @@ impl Palette {
             .map_or(0, |(index, _)| index as Index)
     }
 
-    pub(crate) fn nearest(&self, color: Rgb) -> Rgb {
-        self.color(self.nearest_index(color))
-    }
-
     pub(crate) fn exact_index(&self, color: Rgb) -> Option<Index> {
         self.colors
             .iter()
@@ -215,8 +228,8 @@ impl Palette {
             .map(|index| index as Index)
     }
 
-    pub(crate) fn closest_to_white(&self) -> Rgb {
-        self.nearest(Rgb {
+    pub(crate) fn closest_to_white_index(&self) -> Index {
+        self.nearest_index(Rgb {
             r: 255,
             g: 255,
             b: 255,
@@ -412,24 +425,25 @@ impl Sprite {
     }
 }
 
+/// Indexed render target: one palette index per pixel, `TRANSPARENT` for
+/// see-through pixels. The output BGRA format is produced once per frame by
+/// `present_into`, fully decoupling rendering from the framebuffer layout.
 pub struct Framebuffer {
     pub(crate) width: usize,
     pub(crate) height: usize,
-    pixels: Vec<u8>,
+    pixels: Vec<Index>,
 }
 
 impl Framebuffer {
+    /// Output bytes per pixel — only relevant at present time.
     pub(crate) const BYTES_PER_PIXEL: usize = 4;
-    const ALPHA_OFFSET: usize = 3;
 
-    pub(crate) fn new(width: usize, height: usize, fill: impl Into<Rgba>) -> Self {
-        let mut fb = Self {
+    pub(crate) fn new(width: usize, height: usize, fill: Index) -> Self {
+        Self {
             width,
             height,
-            pixels: vec![0; width * height * Self::BYTES_PER_PIXEL],
-        };
-        fb.clear(fill);
-        fb
+            pixels: vec![fill; width * height],
+        }
     }
 
     const fn color_bytes(color: Rgba) -> [u8; Self::BYTES_PER_PIXEL] {
@@ -437,38 +451,64 @@ impl Framebuffer {
     }
 
     const fn pixel_offset(&self, x: usize, y: usize) -> usize {
-        (y * self.width + x) * Self::BYTES_PER_PIXEL
+        y * self.width + x
     }
 
-    pub(crate) fn row_bytes(&self, y: usize, x: usize, width: usize) -> &[u8] {
+    fn row_indices(&self, y: usize, x: usize, width: usize) -> &[Index] {
         let start = self.pixel_offset(x, y);
-        let end = start + width * Self::BYTES_PER_PIXEL;
-        &self.pixels[start..end]
+        &self.pixels[start..start + width]
     }
 
-    fn row_bytes_mut(&mut self, y: usize, x: usize, width: usize) -> &mut [u8] {
+    fn row_indices_mut(&mut self, y: usize, x: usize, width: usize) -> &mut [Index] {
         let start = self.pixel_offset(x, y);
-        let end = start + width * Self::BYTES_PER_PIXEL;
-        &mut self.pixels[start..end]
+        &mut self.pixels[start..start + width]
     }
 
-    pub(crate) fn ximage_bytes(&self) -> &[u8] {
-        &self.pixels
+    /// Convert the whole framebuffer to output BGRA bytes via `lut` — the only
+    /// place the index->color step happens, once per frame.
+    pub(crate) fn present_into(
+        &self,
+        out: &mut [u8],
+        lut: &[[u8; Self::BYTES_PER_PIXEL]; 256],
+    ) {
+        for (pixel, &index) in out
+            .chunks_exact_mut(Self::BYTES_PER_PIXEL)
+            .zip(self.pixels.iter())
+        {
+            pixel.copy_from_slice(&lut[index as usize]);
+        }
     }
 
-    pub(crate) fn clear(&mut self, color: impl Into<Rgba>) {
-        let color = Self::color_bytes(color.into());
-        fill_pattern(&mut self.pixels, &color);
+    /// Convert a sub-rectangle to output BGRA bytes, row by row, into `out`
+    /// (tightly packed at `rect.w` pixels per row).
+    pub(crate) fn present_rect_into(
+        &self,
+        rect: Rect,
+        out: &mut [u8],
+        lut: &[[u8; Self::BYTES_PER_PIXEL]; 256],
+    ) {
+        for y in 0..rect.h {
+            let src = self.row_indices(rect.y + y, rect.x, rect.w);
+            let dst_start = y * rect.w * Self::BYTES_PER_PIXEL;
+            let dst = &mut out[dst_start..dst_start + rect.w * Self::BYTES_PER_PIXEL];
+            for (pixel, &index) in dst.chunks_exact_mut(Self::BYTES_PER_PIXEL).zip(src) {
+                pixel.copy_from_slice(&lut[index as usize]);
+            }
+        }
+    }
+
+    pub(crate) fn clear(&mut self, fill: Index) {
+        self.pixels.fill(fill);
     }
 
     /// Fill the whole framebuffer with `sprite` scaled up, repeating edge
     /// pixels past the sprite's extent. Transparent pixels keep the
     /// framebuffer's existing content (e.g. a widget's see-through corners).
     pub(crate) fn clear_scaled(&mut self, sprite: &Sprite, scale: usize, palette: &Palette) {
-        // Resolve each source row once into a byte row, write it, and copy it
+        // Resolve each source row once into an index row, write it, and copy it
         // to the remaining rows of the scaled band; rows with transparency
         // fall back to per-pixel writes since they can't be blanket-copied.
-        let mut row = vec![0u8; self.width * Self::BYTES_PER_PIXEL];
+        let mut row = vec![TRANSPARENT; self.width];
         let sx_map: Vec<usize> = (0..self.width)
             .map(|x| (x / scale).min(sprite.width - 1))
             .collect();
@@ -476,31 +516,26 @@ impl Framebuffer {
             let sy = band.min(sprite.height - 1);
             let mut opaque_row = true;
             for (x, &sx) in sx_map.iter().enumerate().take(self.width) {
-                match palette.resolve(sprite.at(sx, sy), sx, sy) {
-                    Some(color) => {
-                        let offset = x * Self::BYTES_PER_PIXEL;
-                        row[offset..offset + Self::BYTES_PER_PIXEL]
-                            .copy_from_slice(&Self::color_bytes(color.into()));
-                    }
+                match palette.resolve_index(sprite.at(sx, sy), sx, sy) {
+                    Some(index) => row[x] = index,
                     None => opaque_row = false,
                 }
             }
             let y0 = band * scale;
             let band_end = (y0 + scale).min(self.height);
             if opaque_row {
-                self.row_bytes_mut(y0, 0, self.width).copy_from_slice(&row);
+                self.row_indices_mut(y0, 0, self.width).copy_from_slice(&row);
                 let first_row = self.pixel_offset(0, y0);
-                let row_len = self.width * Self::BYTES_PER_PIXEL;
                 for y in y0 + 1..band_end {
                     let dest = self.pixel_offset(0, y);
                     self.pixels
-                        .copy_within(first_row..first_row + row_len, dest);
+                        .copy_within(first_row..first_row + self.width, dest);
                 }
             } else {
                 for y in y0..band_end {
                     for (x, &sx) in sx_map.iter().enumerate().take(self.width) {
-                        if let Some(color) = palette.resolve(sprite.at(sx, sy), sx, sy) {
-                            self.set_pixel(x, y, color);
+                        if let Some(index) = palette.resolve_index(sprite.at(sx, sy), sx, sy) {
+                            self.set_pixel(x, y, index);
                         }
                     }
                 }
@@ -508,39 +543,25 @@ impl Framebuffer {
         }
     }
 
-    /// Write a single pixel (bounds-checked). Cheaper than a 1x1 `fill_rect` in
-    /// per-pixel loops.
-    pub(crate) fn set_pixel(&mut self, x: usize, y: usize, color: impl Into<Rgba>) {
+    /// Write a single pixel index (bounds-checked). Cheaper than a 1x1
+    /// `fill_rect` in per-pixel loops.
+    pub(crate) fn set_pixel(&mut self, x: usize, y: usize, index: Index) {
         if x >= self.width || y >= self.height {
             return;
         }
         let offset = self.pixel_offset(x, y);
-        self.pixels[offset..offset + Self::BYTES_PER_PIXEL]
-            .copy_from_slice(&Self::color_bytes(color.into()));
+        self.pixels[offset] = index;
     }
 
-    pub(crate) fn fill_rect(
-        &mut self,
-        x: usize,
-        y: usize,
-        w: usize,
-        h: usize,
-        color: impl Into<Rgba>,
-    ) {
+    pub(crate) fn fill_rect(&mut self, x: usize, y: usize, w: usize, h: usize, index: Index) {
         if x >= self.width || y >= self.height {
             return;
         }
 
         let width = w.min(self.width - x);
         let height = h.min(self.height - y);
-        let color = Self::color_bytes(color.into());
-        fill_pattern(self.row_bytes_mut(y, x, width), &color);
-        let row_len = width * Self::BYTES_PER_PIXEL;
-        let first_row = self.pixel_offset(x, y);
-        for py in y + 1..y + height {
-            let dest = self.pixel_offset(x, py);
-            self.pixels
-                .copy_within(first_row..first_row + row_len, dest);
+        for py in y..y + height {
+            self.row_indices_mut(py, x, width).fill(index);
         }
     }
 
@@ -632,11 +653,10 @@ impl Framebuffer {
         let width = src.w.min(sprite.width.saturating_sub(src.x));
         let height = src.h.min(sprite.height.saturating_sub(src.y));
 
-        // Unscaled, unclipped draws write rows directly instead of going through
-        // fill_rect per pixel — the common case for full-size sprite blits. A
-        // per-draw swap is fine here; it only changes how each index resolves,
-        // not the row-at-a-time write pattern.
-        if scale == 1 && clip.is_none() && dest_x >= 0 && dest_y >= 0 {
+        // Unscaled, unswapped, unclipped draws write rows directly instead of
+        // going through fill_rect per pixel — the common case for full-size
+        // sprite blits.
+        if scale == 1 && swap.is_none() && clip.is_none() && dest_x >= 0 && dest_y >= 0 {
             let dest_x = dest_x as usize;
             let dest_y = dest_y as usize;
             if dest_x >= self.width || dest_y >= self.height {
@@ -645,19 +665,14 @@ impl Framebuffer {
             let copy_w = width.min(self.width - dest_x);
             let copy_h = height.min(self.height - dest_y);
             for y in 0..copy_h {
-                let row = self.row_bytes_mut(dest_y + y, dest_x, copy_w);
+                let row = self.row_indices_mut(dest_y + y, dest_x, copy_w);
                 for x in 0..copy_w {
                     let index = sprite.at(src.x + x, src.y + y);
-                    let color = swap.map_or_else(
-                        || palette.resolve(index, dest_x + x, dest_y + y),
-                        |swap| palette.resolve_paint(swap.paint(index), dest_x + x, dest_y + y),
-                    );
-                    let Some(color) = color else {
+                    let Some(resolved) = palette.resolve_index(index, dest_x + x, dest_y + y)
+                    else {
                         continue;
                     };
-                    let offset = x * Self::BYTES_PER_PIXEL;
-                    row[offset..offset + Self::BYTES_PER_PIXEL]
-                        .copy_from_slice(&Self::color_bytes(color.into()));
+                    row[x] = resolved;
                 }
             }
             return;
@@ -680,14 +695,14 @@ impl Framebuffer {
 
                 let cell_x = dx / scale.max(1);
                 let cell_y = dy / scale.max(1);
-                let color = swap.map_or_else(
-                    || palette.resolve(index, cell_x, cell_y),
-                    |swap| palette.resolve_paint(swap.paint(index), cell_x, cell_y),
+                let resolved = swap.map_or_else(
+                    || palette.resolve_index(index, cell_x, cell_y),
+                    |swap| palette.resolve_paint_index(swap.paint(index), cell_x, cell_y),
                 );
-                let Some(color) = color else {
+                let Some(resolved) = resolved else {
                     continue;
                 };
-                self.fill_rect(dx, dy, scale, scale, color);
+                self.fill_rect(dx, dy, scale, scale, resolved);
             }
         }
     }
@@ -700,34 +715,14 @@ impl Framebuffer {
         let copy_width = src.width.min(self.width - dest_x);
         let copy_height = src.height.min(self.height - dest_y);
         for y in 0..copy_height {
-            let src_row = src.row_bytes(y, 0, copy_width);
-            let dst_row = self.row_bytes_mut(dest_y + y, dest_x, copy_width);
-            for (src_pixel, dst_pixel) in src_row
-                .chunks_exact(Self::BYTES_PER_PIXEL)
-                .zip(dst_row.chunks_exact_mut(Self::BYTES_PER_PIXEL))
-            {
-                if src_pixel[Self::ALPHA_OFFSET] != 0 {
-                    dst_pixel.copy_from_slice(src_pixel);
+            let src_row = src.row_indices(y, 0, copy_width);
+            let dst_row = self.row_indices_mut(dest_y + y, dest_x, copy_width);
+            for (&src_index, dst_index) in src_row.iter().zip(dst_row.iter_mut()) {
+                if src_index != TRANSPARENT {
+                    *dst_index = src_index;
                 }
             }
         }
-    }
-}
-
-/// Fill `bytes` with a repeating 4-byte pattern by doubling copies: O(log n)
-/// `copy_within` calls instead of one slice write per pixel.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn fill_pattern(bytes: &mut [u8], pattern: &[u8; Framebuffer::BYTES_PER_PIXEL]) {
-    if bytes.is_empty() {
-        return;
-    }
-    let len = bytes.len().min(pattern.len());
-    bytes[..len].copy_from_slice(&pattern[..len]);
-    let mut filled = len;
-    while filled < bytes.len() {
-        let copy = filled.min(bytes.len() - filled);
-        bytes.copy_within(..copy, filled);
-        filled += copy;
     }
 }
 
@@ -800,4 +795,71 @@ const fn color_distance(a: Rgb, b: Rgb) -> u32 {
     let dg = a.g as i32 - b.g as i32;
     let db = a.b as i32 - b.b as i32;
     (dr * dr + dg * dg + db * db) as u32
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "perf benchmark; run with --release --ignored"]
+    fn bench_draw_sprite_full() {
+        const W: usize = 256;
+        const H: usize = 256;
+        const ITERS: usize = 2000;
+
+        // 32-color palette, identity remap.
+        let colors: Vec<Rgb> = (0..32)
+            .map(|i| Rgb {
+                r: (i * 8) as u8,
+                g: (255 - i * 8) as u8,
+                b: (i * 4) as u8,
+            })
+            .collect();
+        let palette = Palette::from_colors(colors);
+
+        // Opaque sprite, indices 0..31 cycling (all in range -> wrap never idivs).
+        let pixels: Vec<Index> = (0..W * H).map(|n| (n % 32) as Index).collect();
+        let sprite = Sprite {
+            width: W,
+            height: H,
+            pixels,
+        };
+
+        let mut fb = Framebuffer::new(W, H, 0);
+        let src = Rect::new(0, 0, W, H);
+
+        // warmup
+        for _ in 0..50 {
+            fb.draw_sprite_full(&sprite, src, 0, 0, 1, None, &palette, None);
+        }
+
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            fb.draw_sprite_full(
+                black_box(&sprite),
+                black_box(src),
+                0,
+                0,
+                1,
+                None,
+                black_box(&palette),
+                None,
+            );
+        }
+        black_box(&fb);
+        let elapsed = start.elapsed();
+
+        let pixels_total = (W * H * ITERS) as f64;
+        let ns = elapsed.as_nanos() as f64;
+        eprintln!(
+            "draw_sprite_full: {ITERS} iters of {W}x{H} in {:?} => {:.2} ns/iter, {:.3} ns/pixel, {:.1} Mpix/s",
+            elapsed,
+            ns / ITERS as f64,
+            ns / pixels_total,
+            pixels_total / ns * 1000.0,
+        );
+    }
 }

@@ -19,7 +19,7 @@ use xkbcommon::xkb::keysyms;
 use crate::palette_color;
 use crate::text_input::KeyInput;
 use crate::{
-    Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Rgba, Sprite, decode_png_with_size,
+    Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Rgba, Sprite, TRANSPARENT, decode_png_with_size,
 };
 
 const BG_SCALE: usize = 1;
@@ -209,8 +209,8 @@ impl Puter {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(COLOR_CURSOR).transparent()
+    pub(crate) fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     pub(crate) fn press_button(&mut self, x: i16, y: i16, state: u16) {
@@ -316,7 +316,7 @@ impl Puter {
                 .as_ref()
                 .is_some_and(|selection| selection.contains(indexed.point));
             if selected {
-                fb.fill_rect(x, y, cell_w, cell_h, palette.color(COLOR_SELECTION));
+                fb.fill_rect(x, y, cell_w, cell_h, COLOR_SELECTION );
             }
             let style = self.cell_style(cell, selected, palette);
             self.draw_cell(fb, cell, style, x, y);
@@ -331,7 +331,7 @@ impl Puter {
                 cursor_y,
                 cell_w,
                 cell_h,
-                palette.color(COLOR_CURSOR),
+                COLOR_CURSOR ,
             );
         }
 
@@ -368,7 +368,7 @@ impl Puter {
             art_y(CONTROL_CLEAR_Y),
             CONTROL_CLEAR_W * BG_SCALE,
             CONTROL_CLEAR_H * BG_SCALE,
-            palette.color(palette_color::CREAM),
+            palette_color::CREAM ,
         );
         draw_mode_buttons(fb, &self.button_sprites, palette);
         draw_lights(fb, self.settings, palette);
@@ -417,9 +417,9 @@ impl Puter {
             bg = Some(inverse_bg);
         }
         if selected {
-            fg = palette.color(palette_color::CREAM);
-            bg = Some(palette.color(COLOR_SELECTION));
-            glow = Some(palette.color(COLOR_SELECTION));
+            fg = palette_color::CREAM ;
+            bg = Some(COLOR_SELECTION );
+            glow = Some(COLOR_SELECTION );
         } else if self.settings.high_brightness {
             let style = self.high_brightness_terminal_style(fg_color, palette);
             fg = style.fg;
@@ -470,35 +470,35 @@ impl Puter {
             .expect("puter terminal must be started before use")
     }
 
-    fn terminal_color(&self, color: Color, palette: &Palette) -> PaletteRgb {
+    fn terminal_color(&self, color: Color, palette: &Palette) -> Index {
         match color {
             Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
                 self.background_terminal_text_color(palette)
             }
             Color::Named(NamedColor::DimForeground) => self.settings.glow_color(palette),
             Color::Named(NamedColor::Background) => self.background_terminal_bg_color(palette),
-            Color::Named(NamedColor::Cursor) => palette.color(COLOR_CURSOR),
-            Color::Named(named) => palette.color(named_terminal_palette_index(named)),
+            Color::Named(NamedColor::Cursor) => COLOR_CURSOR ,
+            Color::Named(named) => named_terminal_palette_index(named) ,
             Color::Indexed(index) => indexed_terminal_color(index, palette),
-            Color::Spec(rgb) => palette.nearest(terminal_rgb(rgb)),
+            Color::Spec(rgb) => palette.nearest_index(terminal_rgb(rgb)),
         }
     }
 
-    fn terminal_background_color(&self, color: Color, palette: &Palette) -> Option<PaletteRgb> {
+    fn terminal_background_color(&self, color: Color, palette: &Palette) -> Option<Index> {
         (color != Color::Named(NamedColor::Background)).then(|| self.terminal_color(color, palette))
     }
 
-    fn terminal_glow_color(&self, color: Color, palette: &Palette) -> PaletteRgb {
+    fn terminal_glow_color(&self, color: Color, palette: &Palette) -> Index {
         match color {
             Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
                 self.settings.glow_color(palette)
             }
-            Color::Named(NamedColor::DimForeground) => palette.color(TERM_COLOR_DIM_WHITE),
+            Color::Named(NamedColor::DimForeground) => TERM_COLOR_DIM_WHITE ,
             Color::Named(NamedColor::Background) => self.settings.glow_color(palette),
-            Color::Named(NamedColor::Cursor) => palette.color(COLOR_CURSOR),
-            Color::Named(named) => palette.color(named_terminal_glow_palette_index(named)),
+            Color::Named(NamedColor::Cursor) => COLOR_CURSOR ,
+            Color::Named(named) => named_terminal_glow_palette_index(named) ,
             Color::Indexed(index) => indexed_terminal_glow_color(index, palette),
-            Color::Spec(rgb) => palette.nearest(terminal_rgb(rgb)),
+            Color::Spec(rgb) => palette.nearest_index(terminal_rgb(rgb)),
         }
     }
 
@@ -506,23 +506,23 @@ impl Puter {
         match color {
             Color::Named(named) if normal_terminal_named_color(named).is_some() => {
                 TerminalTextStyle {
-                    fg: palette.color(named_terminal_palette_index(named.to_bright())),
+                    fg: (named_terminal_palette_index(named.to_bright())),
                     glow: None,
                 }
             }
             Color::Indexed(index @ 0..=7) => TerminalTextStyle {
-                fg: palette.color(ANSI_16_TO_NA16[index as usize + 8]),
+                fg: (ANSI_16_TO_NA16[index as usize + 8]),
                 glow: None,
             },
             Color::Named(named) if bright_terminal_named_color(named).is_some() => {
                 TerminalTextStyle {
-                    fg: palette.color(palette_color::CREAM),
-                    glow: Some(palette.color(named_terminal_glow_palette_index(named))),
+                    fg: (palette_color::CREAM),
+                    glow: Some(named_terminal_glow_palette_index(named) ),
                 }
             }
             Color::Indexed(index @ 8..=15) => TerminalTextStyle {
-                fg: palette.color(palette_color::CREAM),
-                glow: Some(palette.color(ANSI_16_GLOW_TO_NA16[index as usize])),
+                fg: (palette_color::CREAM),
+                glow: Some(ANSI_16_GLOW_TO_NA16[index as usize] ),
             },
             Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
                 TerminalTextStyle {
@@ -537,26 +537,26 @@ impl Puter {
         }
     }
 
-    fn background_terminal_text_color(&self, palette: &Palette) -> PaletteRgb {
+    fn background_terminal_text_color(&self, palette: &Palette) -> Index {
         self.settings.text_color(palette)
     }
 
     #[allow(clippy::unused_self)]
-    fn background_terminal_bg_color(&self, palette: &Palette) -> PaletteRgb {
-        palette.color(palette_color::BLACK)
+    fn background_terminal_bg_color(&self, _palette: &Palette) -> Index {
+        palette_color::BLACK 
     }
 }
 
 struct TerminalTextStyle {
-    fg: PaletteRgb,
-    glow: Option<PaletteRgb>,
+    fg: Index,
+    glow: Option<Index>,
 }
 
 /// Final resolved colors for one terminal cell.
 struct CellStyle {
-    fg: PaletteRgb,
-    bg: Option<PaletteRgb>,
-    glow: Option<PaletteRgb>,
+    fg: Index,
+    bg: Option<Index>,
+    glow: Option<Index>,
 }
 
 struct GlyphAtlas {
@@ -889,22 +889,22 @@ impl DisplaySettings {
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    fn text_color(&self, palette: &Palette) -> PaletteRgb {
+    fn text_color(&self, palette: &Palette) -> Index {
         if self.high_brightness {
-            return palette.closest_to_white();
+            return palette.closest_to_white_index();
         }
 
         match self.text_mode {
-            TextMode::Green => palette.color(COLOR_GREEN_TEXT),
-            TextMode::Orange => palette.color(COLOR_ORANGE_TEXT),
+            TextMode::Green => COLOR_GREEN_TEXT ,
+            TextMode::Orange => COLOR_ORANGE_TEXT ,
         }
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    fn glow_color(&self, palette: &Palette) -> PaletteRgb {
+    fn glow_color(&self, _palette: &Palette) -> Index {
         match self.text_mode {
-            TextMode::Green => palette.color(COLOR_GREEN_GLOW),
-            TextMode::Orange => palette.color(COLOR_ORANGE_GLOW),
+            TextMode::Green => COLOR_GREEN_GLOW ,
+            TextMode::Orange => COLOR_ORANGE_GLOW ,
         }
     }
 
@@ -988,22 +988,22 @@ fn draw_lights(fb: &mut Framebuffer, settings: DisplaySettings, palette: &Palett
     }
 }
 
-fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState, palette: &Palette) {
+fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState, _palette: &Palette) {
     let (shell, core, top) = match state {
         LightState::Off => (
-            palette.color(COLOR_LIGHT_OFF),
-            palette.color(COLOR_LIGHT_OFF_CORE),
-            palette.color(COLOR_LIGHT_OFF_TOP),
+            (COLOR_LIGHT_OFF),
+            (COLOR_LIGHT_OFF_CORE),
+            (COLOR_LIGHT_OFF_TOP),
         ),
         LightState::Red => (
-            palette.color(COLOR_LIGHT_RED),
-            palette.color(COLOR_LIGHT_RED_CORE),
-            palette.color(COLOR_LIGHT_RED_TOP),
+            (COLOR_LIGHT_RED),
+            (COLOR_LIGHT_RED_CORE),
+            (COLOR_LIGHT_RED_TOP),
         ),
         LightState::Green => (
-            palette.color(COLOR_LIGHT_GREEN),
-            palette.color(COLOR_LIGHT_GREEN_CORE),
-            palette.color(COLOR_LIGHT_GREEN_TOP),
+            (COLOR_LIGHT_GREEN),
+            (COLOR_LIGHT_GREEN_CORE),
+            (COLOR_LIGHT_GREEN_TOP),
         ),
     };
 
@@ -1102,20 +1102,20 @@ const fn bright_terminal_named_color(color: NamedColor) -> Option<NamedColor> {
     }
 }
 
-fn indexed_terminal_color(index: u8, palette: &Palette) -> PaletteRgb {
+fn indexed_terminal_color(index: u8, palette: &Palette) -> Index {
     if index < 16 {
-        return palette.color(ANSI_16_TO_NA16[index as usize]);
+        return ANSI_16_TO_NA16[index as usize] ;
     }
 
-    palette.nearest(indexed_terminal_rgb(index))
+    palette.nearest_index(indexed_terminal_rgb(index))
 }
 
-fn indexed_terminal_glow_color(index: u8, palette: &Palette) -> PaletteRgb {
+fn indexed_terminal_glow_color(index: u8, palette: &Palette) -> Index {
     if index < 16 {
-        return palette.color(ANSI_16_GLOW_TO_NA16[index as usize]);
+        return ANSI_16_GLOW_TO_NA16[index as usize] ;
     }
 
-    palette.nearest(indexed_terminal_rgb(index))
+    palette.nearest_index(indexed_terminal_rgb(index))
 }
 
 const fn indexed_terminal_rgb(index: u8) -> PaletteRgb {
@@ -1233,7 +1233,7 @@ fn fill_source_rect(
     y: usize,
     w: usize,
     h: usize,
-    color: PaletteRgb,
+    color: Index,
 ) {
     fb.fill_rect(
         x * BG_SCALE,
@@ -1251,7 +1251,7 @@ fn draw_glyph(
     x: usize,
     y: usize,
     scale: usize,
-    color: PaletteRgb,
+    color: Index,
 ) {
     for gy in 0..GLYPH_H {
         for gx in 0..GLYPH_W {

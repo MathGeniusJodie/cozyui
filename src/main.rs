@@ -173,7 +173,7 @@ impl App {
             (wavey.width(), wavey.height()),
             (day.width(), day.height()),
         ];
-        let fills: [Rgba; WIDGET_COUNT] = [
+        let fills: [Index; WIDGET_COUNT] = [
             puter.fill_color(palette),
             toodle.fill_color(palette),
             fwends.fill_color(palette),
@@ -252,8 +252,8 @@ impl App {
     }
 
     #[allow(clippy::unused_self)]
-    fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(app_color::BACKGROUND).into()
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        app_color::BACKGROUND
     }
 
     fn render_background(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -659,7 +659,7 @@ fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Pal
         let source_y = y - desk_y;
         for x in x0..x1 {
             let index = desk_background_index(desk.at(source_x[x - x0], source_y));
-            if let Some(color) = palette.resolve(index, x, y) {
+            if let Some(color) = palette.resolve_index(index, x, y) {
                 fb.set_pixel(x, y, color);
             }
         }
@@ -698,7 +698,7 @@ pub(crate) fn draw_filled_circle(
     center_x: isize,
     center_y: isize,
     radius: isize,
-    color: Rgb,
+    color: Index,
 ) {
     draw_filled_ellipse(fb, center_x, center_y, radius, radius, color);
 }
@@ -710,7 +710,7 @@ pub(crate) fn draw_filled_ellipse(
     center_y: isize,
     radius_x: isize,
     radius_y: isize,
-    color: Rgb,
+    color: Index,
 ) {
     if radius_x <= 0 || radius_y <= 0 {
         return;
@@ -748,6 +748,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let height = app.height();
     let mut fb = Framebuffer::new(width, height, app.fill_color(&palette));
     let mut xwin = XWindow::open(width, height)?;
+    xwin.set_palette(&palette);
     app.start(u64::from(xwin.window))?;
     app.render(&mut fb, &palette);
     xwin.draw(&fb)?;
