@@ -46,7 +46,7 @@ const CLICK_DURATION_SECONDS: f32 = 0.012;
 const CLICK_VOLUME: f32 = 1200.0;
 const TOTAL_GAP: usize = 4;
 
-pub(crate) struct Twirl {
+pub struct Twirl {
     wheel: Sprite,
     font: BitmapFont,
     angle: f32,
@@ -69,14 +69,15 @@ impl Twirl {
         })
     }
 
-    pub(crate) fn width(&self) -> usize {
+    pub(crate) const fn width(&self) -> usize {
         self.wheel.width + SHADOW_X_OFFSET as usize
     }
 
-    pub(crate) fn height(&self) -> usize {
+    pub(crate) const fn height(&self) -> usize {
         self.wheel.height + TOTAL_GAP + self.font.cell_h() + SHADOW_Y_OFFSET as usize
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
         palette.color(palette_color::BLACK).transparent()
     }
@@ -120,7 +121,7 @@ impl Twirl {
         }
 
         let previous_segment = self.pointer_segment();
-        self.angle = normalize_angle(self.angle + self.speed * dt.as_secs_f32());
+        self.angle = normalize_angle(self.speed.mul_add(dt.as_secs_f32(), self.angle));
         self.speed *= FRICTION_PER_SECOND.powf(dt.as_secs_f32());
 
         let current_segment = self.pointer_segment();
@@ -160,7 +161,7 @@ impl Twirl {
     }
 
     pub(crate) fn spin(&mut self) {
-        self.speed = START_SPEED_MIN + random_unit() * START_SPEED_RANGE;
+        self.speed = random_unit().mul_add(START_SPEED_RANGE, START_SPEED_MIN);
         self.last_update = Instant::now();
         self.last_click_segment = self.pointer_segment();
         play_click();
@@ -183,8 +184,8 @@ impl Twirl {
             let angle = segment_center_angle(segment) - self.angle;
             let text_w = self.font.text_width(number);
             let text_h = self.font.cell_h();
-            let x = center_x + angle.cos() * NUMBER_RADIUS - text_w as f32 / 2.0;
-            let y = center_y + angle.sin() * NUMBER_RADIUS - text_h as f32 / 2.0;
+            let x = angle.cos().mul_add(NUMBER_RADIUS, center_x) - text_w as f32 / 2.0;
+            let y = angle.sin().mul_add(NUMBER_RADIUS, center_y) - text_h as f32 / 2.0;
             self.font.draw_text(
                 fb,
                 number,
@@ -272,6 +273,7 @@ fn play_jingle() {
     play_wav("cozyui-twirl-jingle.wav", synth_jingle());
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn play_wav(name: &str, samples: Vec<i16>) {
     let path = std::env::temp_dir().join(name);
     if fs::write(&path, wav_bytes(&samples)).is_err() {
@@ -325,7 +327,7 @@ fn synth_click() -> Vec<i16> {
         .map(|i| {
             noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let envelope = (1.0 - i as f32 / len as f32).powi(4);
-            let sample = ((noise >> 16) as f32 / 32_768.0) * 2.0 - 1.0;
+            let sample = ((noise >> 16) as f32 / 32_768.0).mul_add(2.0, -1.0);
             (sample * envelope * CLICK_VOLUME) as i16
         })
         .collect()

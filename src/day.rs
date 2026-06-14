@@ -66,7 +66,7 @@ struct DateParts {
     weekday_index: i32,
 }
 
-pub(crate) struct Day {
+pub struct Day {
     background: Sprite,
     label_font: BitmapFont,
     number_font: BitmapFont,
@@ -89,14 +89,17 @@ impl Day {
         })
     }
 
-    pub(crate) fn width(&self) -> usize {
+    #[allow(clippy::unused_self)]
+    pub(crate) const fn width(&self) -> usize {
         WIDTH + SHADOW_X_OFFSET as usize
     }
 
-    pub(crate) fn height(&self) -> usize {
+    #[allow(clippy::unused_self)]
+    pub(crate) const fn height(&self) -> usize {
         HEIGHT + SHADOW_Y_OFFSET as usize
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
         palette.color(palette_color::BLACK).transparent()
     }
@@ -119,7 +122,7 @@ impl Day {
         }
     }
 
-    pub(crate) fn toggle_mode(&mut self) {
+    pub(crate) const fn toggle_mode(&mut self) {
         self.calendar_mode = !self.calendar_mode;
     }
 
@@ -197,12 +200,13 @@ impl Day {
         true
     }
 
+    #[allow(clippy::unused_self)]
     fn tight_height(&self, font: &BitmapFont, text: &str) -> usize {
         font.text_ink_bounds(text)
-            .map(|bounds| bounds.height())
-            .unwrap_or_else(|| font.cell_h())
+            .map_or_else(|| font.cell_h(), |bounds| bounds.height())
     }
 
+    #[allow(clippy::unused_self)]
     fn draw_centered_tight(
         &self,
         fb: &mut Framebuffer,
@@ -219,6 +223,7 @@ impl Day {
         font.draw_text(fb, text, x, draw_y, 1, color);
     }
 
+    #[allow(clippy::unused_self)]
     fn draw_centered(
         &self,
         fb: &mut Framebuffer,
@@ -245,7 +250,7 @@ impl Day {
         self.calendar_font.draw_text(fb, text, text_x, y, 1, color);
     }
 
-    fn calendar_cell_center(&self, col: usize, y: usize) -> (isize, isize) {
+    const fn calendar_cell_center(&self, col: usize, y: usize) -> (isize, isize) {
         (
             (CALENDAR_LEFT + col * CALENDAR_COL_W + CALENDAR_COL_W / 2) as isize
                 + TODAY_CIRCLE_X_OFFSET,
@@ -254,7 +259,7 @@ impl Day {
     }
 }
 
-fn centered_x(text_width: usize) -> usize {
+const fn centered_x(text_width: usize) -> usize {
     WIDTH.saturating_sub(text_width) / 2
 }
 
@@ -280,27 +285,27 @@ fn current_date_parts() -> DateParts {
     }
 }
 
-fn first_weekday_of_month(date: &DateParts) -> usize {
+const fn first_weekday_of_month(date: &DateParts) -> usize {
     let weekday = date.weekday_index;
     let offset = (date.day_num - 1).rem_euclid(7);
     (weekday - offset).rem_euclid(7) as usize
 }
 
-fn days_in_month(year: i32, month_index: usize) -> i32 {
+const fn days_in_month(year: i32, month_index: usize) -> i32 {
     match month_index {
         0 | 2 | 4 | 6 | 7 | 9 | 11 => 31,
         3 | 5 | 8 | 10 => 30,
         1 if is_leap_year(year) => 29,
-        1 => 28,
+        #[allow(clippy::match_same_arms)]
         _ => 31,
     }
 }
 
-fn is_leap_year(year: i32) -> bool {
+const fn is_leap_year(year: i32) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-fn short_month_name(month_index: usize) -> &'static str {
+const fn short_month_name(month_index: usize) -> &'static str {
     match month_index {
         0 => "JAN",
         1 => "FEB",
@@ -314,6 +319,7 @@ fn short_month_name(month_index: usize) -> &'static str {
         9 => "OCT",
         10 => "NOV",
         11 => "DEC",
+        #[allow(clippy::match_same_arms)]
         _ => "JAN",
     }
 }
@@ -321,7 +327,7 @@ fn short_month_name(month_index: usize) -> &'static str {
 fn local_time() -> Option<Tm> {
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as TimeT;
     let mut out = Tm::default();
-    let result = unsafe { localtime_r(&seconds, &mut out) };
+    let result = unsafe { localtime_r(&raw const seconds, &raw mut out) };
     (!result.is_null()).then_some(out)
 }
 

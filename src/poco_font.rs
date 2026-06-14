@@ -2,16 +2,15 @@
 // units_per_pixel=102, range=U+0020..U+007E
 use crate::bitmap_font::FontSpec;
 
-pub(crate) const POCO_ATLAS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/poco_ascii.png");
-pub(crate) const POCO_CELL_W: usize = 6;
-pub(crate) const POCO_CELL_H: usize = 7;
-pub(crate) const POCO_COLS: usize = 16;
-pub(crate) const POCO_X_ORIGIN: usize = 0;
+pub const POCO_ATLAS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/poco_ascii.png");
+pub const POCO_CELL_W: usize = 6;
+pub const POCO_CELL_H: usize = 7;
+pub const POCO_COLS: usize = 16;
+pub const POCO_X_ORIGIN: usize = 0;
 #[rustfmt::skip]
-pub(crate) const POCO_ADVANCE: [u8; 128] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 4, 6, 5, 6, 5, 2, 3, 3, 4, 4, 2, 3, 2, 4, 4, 3, 5, 5, 5, 5, 5, 5, 5, 5, 2, 3, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 5, 5, 4, 6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 5, 5, 5, 3, 4, 3, 4, 5, 3, 5, 5, 4, 5, 5, 4, 5, 5, 2, 3, 5, 3, 6, 5, 5, 5, 5, 4, 5, 4, 5, 5, 6, 5, 5, 5, 5, 2, 5, 5, 0];
+pub const POCO_ADVANCE: [u8; 128] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 4, 6, 5, 6, 5, 2, 3, 3, 4, 4, 2, 3, 2, 4, 4, 3, 5, 5, 5, 5, 5, 5, 5, 5, 2, 3, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 5, 5, 4, 6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 5, 5, 5, 3, 4, 3, 4, 5, 3, 5, 5, 4, 5, 5, 4, 5, 5, 2, 3, 5, 3, 6, 5, 5, 5, 5, 4, 5, 4, 5, 5, 6, 5, 5, 5, 5, 2, 5, 5, 0];
 
-pub(crate) const POCO_SPEC: FontSpec = FontSpec {
+pub const POCO_SPEC: FontSpec = FontSpec {
     atlas_path: POCO_ATLAS_PATH,
     cell_w: POCO_CELL_W,
     cell_h: POCO_CELL_H,

@@ -169,7 +169,7 @@ const BUTTON_TARGETS: [Button; 5] = [
     },
 ];
 
-pub(crate) struct Puter {
+pub struct Puter {
     mode_images: ModeImages,
     button_sprites: Sprite,
     button_pressed_sprites: Sprite,
@@ -200,14 +200,15 @@ impl Puter {
         })
     }
 
-    pub(crate) fn width(&self) -> usize {
+    pub(crate) const fn width(&self) -> usize {
         self.mode_images.green_low_contrast.width * BG_SCALE
     }
 
-    pub(crate) fn height(&self) -> usize {
+    pub(crate) const fn height(&self) -> usize {
         self.mode_images.green_low_contrast.height * BG_SCALE
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
         palette.color(COLOR_CURSOR).transparent()
     }
@@ -289,6 +290,7 @@ impl Puter {
         }
     }
 
+    #[allow(clippy::significant_drop_tightening)]
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         let term = self.terminal().term();
 
@@ -388,6 +390,7 @@ impl Puter {
 
     /// Resolve a cell's colors through the DIM, INVERSE, selection, and
     /// high-brightness layers, in that order.
+    #[allow(clippy::similar_names)]
     fn cell_style(&self, cell: &Cell, selected: bool, palette: &Palette) -> CellStyle {
         let mut fg_color = cell.fg;
         let mut fg = self.terminal_color(fg_color, palette);
@@ -403,11 +406,11 @@ impl Puter {
         }
         if cell.flags.contains(Flags::INVERSE) {
             let inverse_bg = fg;
-            let inverse_fg = cell
-                .bg
-                .ne(&Color::Named(NamedColor::Background))
-                .then_some(cell.bg)
-                .unwrap_or(Color::Named(NamedColor::Foreground));
+            let inverse_fg = if cell.bg == Color::Named(NamedColor::Background) {
+                Color::Named(NamedColor::Foreground)
+            } else {
+                cell.bg
+            };
             fg_color = inverse_fg;
             fg = bg.unwrap_or_else(|| self.background_terminal_text_color(palette));
             glow = Some(self.terminal_glow_color(fg_color, palette));
@@ -427,6 +430,7 @@ impl Puter {
 
     /// Paint one cell at framebuffer position (x, y): background, glow halo,
     /// glyph, and the bold/underline/strikeout decorations.
+    #[allow(clippy::needless_pass_by_value)]
     fn draw_cell(&self, fb: &mut Framebuffer, cell: &Cell, style: CellStyle, x: usize, y: usize) {
         let cell_w = GLYPH_W * GLYPH_SCALE;
         let cell_h = GLYPH_H * GLYPH_SCALE;
@@ -460,7 +464,7 @@ impl Puter {
         }
     }
 
-    fn terminal(&self) -> &Terminal {
+    const fn terminal(&self) -> &Terminal {
         self.terminal
             .as_ref()
             .expect("puter terminal must be started before use")
@@ -468,7 +472,7 @@ impl Puter {
 
     fn terminal_color(&self, color: Color, palette: &Palette) -> PaletteRgb {
         match color {
-            Color::Named(NamedColor::Foreground) | Color::Named(NamedColor::BrightForeground) => {
+            Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
                 self.background_terminal_text_color(palette)
             }
             Color::Named(NamedColor::DimForeground) => self.settings.glow_color(palette),
@@ -486,7 +490,7 @@ impl Puter {
 
     fn terminal_glow_color(&self, color: Color, palette: &Palette) -> PaletteRgb {
         match color {
-            Color::Named(NamedColor::Foreground) | Color::Named(NamedColor::BrightForeground) => {
+            Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
                 self.settings.glow_color(palette)
             }
             Color::Named(NamedColor::DimForeground) => palette.color(TERM_COLOR_DIM_WHITE),
@@ -520,7 +524,7 @@ impl Puter {
                 fg: palette.color(palette_color::CREAM),
                 glow: Some(palette.color(ANSI_16_GLOW_TO_NA16[index as usize])),
             },
-            Color::Named(NamedColor::Foreground) | Color::Named(NamedColor::BrightForeground) => {
+            Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
                 TerminalTextStyle {
                     fg: self.background_terminal_text_color(palette),
                     glow: Some(self.settings.glow_color(palette)),
@@ -537,6 +541,7 @@ impl Puter {
         self.settings.text_color(palette)
     }
 
+    #[allow(clippy::unused_self)]
     fn background_terminal_bg_color(&self, palette: &Palette) -> PaletteRgb {
         palette.color(palette_color::BLACK)
     }
@@ -678,7 +683,7 @@ impl Terminal {
         })
     }
 
-    fn term(&self) -> &Arc<FairMutex<Term<UiEventProxy>>> {
+    const fn term(&self) -> &Arc<FairMutex<Term<UiEventProxy>>> {
         &self.term
     }
 
@@ -726,10 +731,9 @@ impl Terminal {
         }
     }
 
+    #[allow(clippy::significant_drop_tightening)]
     fn mouse_press(&self, x: i16, y: i16, state: u16) -> Option<Point> {
-        let Some(point) = screen_point(x, y, &self.window_size) else {
-            return None;
-        };
+        let point = screen_point(x, y, &self.window_size)?;
 
         let mouse_mode = self.term.lock().mode().intersects(TermMode::MOUSE_MODE);
         if mouse_mode && state & SHIFT_MASK == 0 {
@@ -745,12 +749,10 @@ impl Terminal {
 
     fn mouse_motion(&self, point: Point) -> bool {
         let mut term = self.term.lock();
-        if let Some(selection) = term.selection.as_mut() {
+        term.selection.as_mut().is_some_and(|selection| {
             selection.update(point, Side::Right);
             true
-        } else {
-            false
-        }
+        })
     }
 
     fn screen_point(&self, x: i16, y: i16) -> Option<Point> {
@@ -789,7 +791,7 @@ impl Terminal {
             .copy_selection()
             .or_else(|| (!fallback.is_empty()).then_some(fallback.clone()))?;
         drop(fallback);
-        *self.clipboard.lock() = text.clone();
+        self.clipboard.lock().clone_from(&text);
         Some(text)
     }
 
@@ -805,7 +807,7 @@ impl Terminal {
     }
 }
 
-pub(crate) struct TerminalEvents {
+pub struct TerminalEvents {
     pub(crate) running: bool,
     pub(crate) dirty: bool,
 }
@@ -864,7 +866,7 @@ struct DisplaySettings {
 }
 
 impl DisplaySettings {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             high_brightness: true,
             text_mode: TextMode::Orange,
@@ -872,7 +874,7 @@ impl DisplaySettings {
         }
     }
 
-    fn toggle(&mut self, action: ButtonAction) {
+    const fn toggle(&mut self, action: ButtonAction) {
         match action {
             ButtonAction::Power | ButtonAction::Lock => {}
             ButtonAction::Brightness => self.high_brightness = !self.high_brightness,
@@ -886,6 +888,7 @@ impl DisplaySettings {
         }
     }
 
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     fn text_color(&self, palette: &Palette) -> PaletteRgb {
         if self.high_brightness {
             return palette.closest_to_white();
@@ -897,6 +900,7 @@ impl DisplaySettings {
         }
     }
 
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     fn glow_color(&self, palette: &Palette) -> PaletteRgb {
         match self.text_mode {
             TextMode::Green => palette.color(COLOR_GREEN_GLOW),
@@ -904,7 +908,8 @@ impl DisplaySettings {
         }
     }
 
-    fn light_state(&self, kind: LightKind) -> LightState {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    const fn light_state(&self, kind: LightKind) -> LightState {
         match kind {
             LightKind::Brightness => {
                 if self.high_brightness {
@@ -943,7 +948,7 @@ impl ModeImages {
         })
     }
 
-    fn for_settings(&self, settings: DisplaySettings) -> &Sprite {
+    const fn for_settings(&self, settings: DisplaySettings) -> &Sprite {
         if settings.high_contrast {
             return &self.high_contrast;
         }
@@ -1007,7 +1012,8 @@ fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState, palette: &P
     fill_source_rect(fb, light.x + 1, light.y + 2, LIGHT_W - 2, LIGHT_H - 3, core);
 }
 
-fn named_terminal_palette_index(color: NamedColor) -> Index {
+#[allow(clippy::match_same_arms)]
+const fn named_terminal_palette_index(color: NamedColor) -> Index {
     match color {
         NamedColor::Black => TERM_COLOR_BLACK,
         NamedColor::Red => TERM_COLOR_RED,
@@ -1041,14 +1047,19 @@ fn named_terminal_palette_index(color: NamedColor) -> Index {
     }
 }
 
-fn named_terminal_glow_palette_index(color: NamedColor) -> Index {
+#[allow(clippy::match_same_arms)]
+const fn named_terminal_glow_palette_index(color: NamedColor) -> Index {
     match color {
         NamedColor::Black | NamedColor::BrightBlack | NamedColor::DimBlack => TERM_COLOR_DIM_BLACK,
+        #[allow(clippy::match_same_arms)]
         NamedColor::Red | NamedColor::BrightRed | NamedColor::DimRed => TERM_COLOR_DIM_RED,
+        #[allow(clippy::match_same_arms)]
         NamedColor::Green | NamedColor::BrightGreen | NamedColor::DimGreen => TERM_COLOR_DIM_GREEN,
+        #[allow(clippy::match_same_arms)]
         NamedColor::Yellow | NamedColor::BrightYellow | NamedColor::DimYellow => {
             TERM_COLOR_DIM_YELLOW
         }
+        #[allow(clippy::match_same_arms)]
         NamedColor::Blue | NamedColor::BrightBlue | NamedColor::DimBlue => TERM_COLOR_DIM_BLUE,
         NamedColor::Magenta | NamedColor::BrightMagenta | NamedColor::DimMagenta => {
             TERM_COLOR_DIM_MAGENTA
@@ -1063,7 +1074,7 @@ fn named_terminal_glow_palette_index(color: NamedColor) -> Index {
     }
 }
 
-fn normal_terminal_named_color(color: NamedColor) -> Option<NamedColor> {
+const fn normal_terminal_named_color(color: NamedColor) -> Option<NamedColor> {
     match color {
         NamedColor::Black
         | NamedColor::Red
@@ -1077,7 +1088,7 @@ fn normal_terminal_named_color(color: NamedColor) -> Option<NamedColor> {
     }
 }
 
-fn bright_terminal_named_color(color: NamedColor) -> Option<NamedColor> {
+const fn bright_terminal_named_color(color: NamedColor) -> Option<NamedColor> {
     match color {
         NamedColor::BrightBlack
         | NamedColor::BrightRed
@@ -1107,7 +1118,7 @@ fn indexed_terminal_glow_color(index: u8, palette: &Palette) -> PaletteRgb {
     palette.nearest(indexed_terminal_rgb(index))
 }
 
-fn indexed_terminal_rgb(index: u8) -> PaletteRgb {
+const fn indexed_terminal_rgb(index: u8) -> PaletteRgb {
     if index < 16 {
         return terminal_palette_rgb(ANSI_16_TO_NA16[index as usize]);
     }
@@ -1128,10 +1139,11 @@ fn indexed_terminal_rgb(index: u8) -> PaletteRgb {
     }
 }
 
-fn color_cube_value(value: u8) -> u8 {
+const fn color_cube_value(value: u8) -> u8 {
     if value == 0 { 0 } else { 55 + value * 40 }
 }
 
+#[allow(clippy::match_wildcard_for_single_variants)]
 fn dim_color(color: Color) -> Color {
     match color {
         Color::Named(named) => Color::Named(named.to_dim()),
@@ -1145,7 +1157,7 @@ fn dim_color(color: Color) -> Color {
     }
 }
 
-fn terminal_rgb(rgb: Rgb) -> PaletteRgb {
+const fn terminal_rgb(rgb: Rgb) -> PaletteRgb {
     PaletteRgb {
         r: rgb.r,
         g: rgb.g,
@@ -1153,7 +1165,7 @@ fn terminal_rgb(rgb: Rgb) -> PaletteRgb {
     }
 }
 
-fn terminal_palette_rgb(index: Index) -> PaletteRgb {
+const fn terminal_palette_rgb(index: Index) -> PaletteRgb {
     let (r, g, b) = SOURCE_PALETTE_RGB[index as usize % SOURCE_PALETTE_RGB.len()];
     PaletteRgb { r, g, b }
 }
@@ -1253,7 +1265,7 @@ fn draw_glyph(
     }
 }
 
-fn is_glyph_ink(color: Rgba) -> bool {
+const fn is_glyph_ink(color: Rgba) -> bool {
     let luminance = color.r as u16 + color.g as u16 + color.b as u16;
     luminance >= 384
 }
@@ -1268,14 +1280,15 @@ fn button_at(x: i16, y: i16) -> Option<usize> {
     })
 }
 
-fn art_x(x: usize) -> usize {
+const fn art_x(x: usize) -> usize {
     (x - ART_CROP_X) * BG_SCALE
 }
 
-fn art_y(y: usize) -> usize {
+const fn art_y(y: usize) -> usize {
     (y - ART_CROP_Y) * BG_SCALE
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn screen_point(x: i16, y: i16, size: &WindowSize) -> Option<Point> {
     if x < 0 || y < 0 {
         return None;
@@ -1349,7 +1362,7 @@ fn control_byte(input: &KeyInput) -> Option<u8> {
     None
 }
 
-fn key_scroll(input: &KeyInput) -> Option<Scroll> {
+const fn key_scroll(input: &KeyInput) -> Option<Scroll> {
     if !input.shift() {
         return None;
     }

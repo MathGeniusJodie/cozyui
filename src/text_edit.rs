@@ -3,20 +3,20 @@ use xkbcommon::xkb::keysyms;
 use crate::text_input::{EditKey, KeyInput, edit_key};
 
 #[derive(Clone, Default)]
-pub(crate) struct TextEdit {
+pub struct TextEdit {
     cursor: usize,
     anchor: Option<usize>,
     undo: Option<String>,
     drag_anchor: Option<usize>,
 }
 
-pub(crate) enum TextEditOutcome {
+pub enum TextEditOutcome {
     Handled { changed: bool, copy: Option<String> },
     Unhandled,
 }
 
 impl TextEdit {
-    pub(crate) fn cursor(&self) -> usize {
+    pub(crate) const fn cursor(&self) -> usize {
         self.cursor
     }
 
@@ -45,11 +45,11 @@ impl TextEdit {
         old_cursor != self.cursor || old_anchor != self.anchor
     }
 
-    pub(crate) fn end_drag(&mut self) {
+    pub(crate) const fn end_drag(&mut self) {
         self.drag_anchor = None;
     }
 
-    pub(crate) fn is_dragging(&self) -> bool {
+    pub(crate) const fn is_dragging(&self) -> bool {
         self.drag_anchor.is_some()
     }
 
@@ -71,6 +71,7 @@ impl TextEdit {
         Some(slice_chars(text, start, end).to_string())
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn handle_key<F>(
         &mut self,
         input: &KeyInput,
@@ -317,17 +318,16 @@ impl TextEdit {
     }
 }
 
-pub(crate) fn char_len(text: &str) -> usize {
+pub fn char_len(text: &str) -> usize {
     text.chars().count()
 }
 
-pub(crate) fn char_to_byte(text: &str, char_index: usize) -> usize {
+pub fn char_to_byte(text: &str, char_index: usize) -> usize {
     text.char_indices()
         .nth(char_index)
-        .map(|(index, _)| index)
-        .unwrap_or(text.len())
+        .map_or(text.len(), |(index, _)| index)
 }
 
-pub(crate) fn slice_chars(text: &str, start: usize, end: usize) -> &str {
+pub fn slice_chars(text: &str, start: usize, end: usize) -> &str {
     &text[char_to_byte(text, start)..char_to_byte(text, end)]
 }

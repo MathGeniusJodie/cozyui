@@ -2,16 +2,16 @@
 // units_per_pixel=64, range=U+0020..U+007E
 use crate::bitmap_font::FontSpec;
 
-pub(crate) const PEANUT_MONEY_ATLAS_PATH: &str =
+pub const PEANUT_MONEY_ATLAS_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/assets/peanut_money_ascii.png");
-pub(crate) const PEANUT_MONEY_CELL_W: usize = 12;
-pub(crate) const PEANUT_MONEY_CELL_H: usize = 14;
-pub(crate) const PEANUT_MONEY_COLS: usize = 16;
-pub(crate) const PEANUT_MONEY_X_ORIGIN: usize = 1;
+pub const PEANUT_MONEY_CELL_W: usize = 12;
+pub const PEANUT_MONEY_CELL_H: usize = 14;
+pub const PEANUT_MONEY_COLS: usize = 16;
+pub const PEANUT_MONEY_X_ORIGIN: usize = 1;
 #[rustfmt::skip]
-pub(crate) const PEANUT_MONEY_ADVANCE: [u8; 128] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 3, 4, 7, 6, 10, 8, 3, 4, 4, 6, 6, 3, 5, 2, 6, 9, 3, 8, 7, 7, 8, 8, 7, 7, 7, 2, 2, 6, 6, 6, 6, 11, 8, 7, 8, 7, 6, 7, 8, 7, 3, 6, 8, 7, 9, 7, 7, 7, 8, 7, 6, 8, 8, 8, 8, 7, 7, 7, 4, 6, 4, 6, 7, 3, 6, 7, 6, 7, 5, 6, 6, 6, 3, 3, 7, 3, 9, 7, 5, 7, 6, 6, 4, 6, 6, 5, 7, 5, 6, 5, 6, 2, 6, 7, 0];
+pub const PEANUT_MONEY_ADVANCE: [u8; 128] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 3, 4, 7, 6, 10, 8, 3, 4, 4, 6, 6, 3, 5, 2, 6, 9, 3, 8, 7, 7, 8, 8, 7, 7, 7, 2, 2, 6, 6, 6, 6, 11, 8, 7, 8, 7, 6, 7, 8, 7, 3, 6, 8, 7, 9, 7, 7, 7, 8, 7, 6, 8, 8, 8, 8, 7, 7, 7, 4, 6, 4, 6, 7, 3, 6, 7, 6, 7, 5, 6, 6, 6, 3, 3, 7, 3, 9, 7, 5, 7, 6, 6, 4, 6, 6, 5, 7, 5, 6, 5, 6, 2, 6, 7, 0];
 
-pub(crate) const PEANUT_MONEY_SPEC: FontSpec = FontSpec {
+pub const PEANUT_MONEY_SPEC: FontSpec = FontSpec {
     atlas_path: PEANUT_MONEY_ATLAS_PATH,
     cell_w: PEANUT_MONEY_CELL_W,
     cell_h: PEANUT_MONEY_CELL_H,

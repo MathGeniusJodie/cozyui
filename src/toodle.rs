@@ -93,7 +93,7 @@ enum PageColor {
     Blue,
 }
 
-pub(crate) struct Toodle {
+pub struct Toodle {
     pages: [Sprite; VISIBLE_PAGE_COUNT],
     checkboxes: Sprite,
     checks: Sprite,
@@ -170,6 +170,7 @@ impl Toodle {
         (self.pages[0].height + self.stack_offset()) * SCALE + SHADOW_Y_OFFSET as usize
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
         palette.color(palette_color::BLACK).transparent()
     }
@@ -345,11 +346,11 @@ impl Toodle {
         self.text_edit.drag_to(cursor, text)
     }
 
-    pub(crate) fn end_text_drag(&mut self) {
+    pub(crate) const fn end_text_drag(&mut self) {
         self.text_edit.end_drag();
     }
 
-    pub(crate) fn text_dragging(&self) -> bool {
+    pub(crate) const fn text_dragging(&self) -> bool {
         self.text_edit.is_dragging()
     }
 
@@ -476,9 +477,9 @@ impl Toodle {
 
     /// Write all pending edits now (shutdown, structural changes).
     pub(crate) fn flush_saves(&mut self) -> Result<(), Box<dyn Error>> {
-        for section in 0..SECTION_COUNT {
+        for (section, file) in TODO_FILES.iter().enumerate() {
             if self.dirty_sections[section] {
-                self.todos[section].save(TODO_FILES[section])?;
+                self.todos[section].save(file)?;
                 self.dirty_sections[section] = false;
             }
         }
@@ -817,7 +818,7 @@ impl TodoList {
     fn page_count(&self) -> usize {
         let pages_with_items = self.items.len().div_ceil(LINE_COUNT).max(1);
         let last_page_start = (pages_with_items - 1) * LINE_COUNT;
-        let last_page_full = self.items.len() > 0
+        let last_page_full = !self.items.is_empty()
             && (last_page_start..last_page_start + LINE_COUNT)
                 .all(|index| self.items.get(index).is_some_and(|item| !item.is_blank()));
         if last_page_full {
@@ -984,6 +985,7 @@ struct TodoItem {
 }
 
 impl TodoItem {
+    #[allow(clippy::option_if_let_else)]
     fn parse(line: &str) -> Self {
         if let Some(text) = line.strip_prefix("[x] ") {
             Self {
@@ -1011,7 +1013,7 @@ impl TodoItem {
         }
     }
 
-    fn is_blank(&self) -> bool {
+    const fn is_blank(&self) -> bool {
         !self.checked && self.text.is_empty()
     }
 }
@@ -1062,7 +1064,7 @@ fn page_swap(page_color: PageColor, pencil_on_second_line: bool) -> Swap {
     Swap::from_indices(&indices)
 }
 
-fn section_color(section: usize) -> PageColor {
+const fn section_color(section: usize) -> PageColor {
     match section % SECTION_COUNT {
         0 => PageColor::Pink,
         1 => PageColor::Green,
@@ -1071,7 +1073,7 @@ fn section_color(section: usize) -> PageColor {
     }
 }
 
-fn page_remap(page_color: PageColor) -> &'static [Index; 16] {
+const fn page_remap(page_color: PageColor) -> &'static [Index; 16] {
     match page_color {
         PageColor::Pink => &PINK_PAGE_REMAP,
         PageColor::Yellow => &YELLOW_PAGE_REMAP,
@@ -1187,7 +1189,7 @@ fn line_at(y: usize) -> Option<usize> {
     })
 }
 
-fn text_chars_per_row(line: usize) -> usize {
+const fn text_chars_per_row(line: usize) -> usize {
     if line == LINE_COUNT - 1 {
         LAST_LINE_MAX_TEXT_CHARS
     } else {
@@ -1195,7 +1197,7 @@ fn text_chars_per_row(line: usize) -> usize {
     }
 }
 
-fn max_text_width(line: usize) -> usize {
+const fn max_text_width(line: usize) -> usize {
     if line == LINE_COUNT - 1 {
         LAST_LINE_MAX_TEXT_WIDTH
     } else {
@@ -1236,15 +1238,12 @@ fn todo_text_fits(font: &BitmapFont, line: usize, text: &str) -> bool {
 fn todo_text_index_at(font: &BitmapFont, line: usize, text: &str, x: usize, y: usize) -> usize {
     let lines = font.wrap_lines(text, max_text_width(line));
     let base_y = LINE_Y[line] - TEXT_Y_OFFSET;
-    let line_index = if y >= base_y + WRAPPED_SECOND_LINE_OFFSET_Y.saturating_sub(3) {
-        1
-    } else {
-        0
-    };
+    let line_index = usize::from(y >= base_y + WRAPPED_SECOND_LINE_OFFSET_Y.saturating_sub(3));
     let max_width = max_text_width(line);
     text_index_at(font, &lines, line_index, x.min(max_width))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_wrapped_selection(
     fb: &mut Framebuffer,
     font: &BitmapFont,
@@ -1297,10 +1296,9 @@ fn line_for_char_index(lines: &[String], index: usize) -> (usize, usize, &str) {
         }
         line_start = line_end;
     }
-    lines
-        .last()
-        .map(|line| (lines.len().saturating_sub(1), line_start, line.as_str()))
-        .unwrap_or((0, 0, ""))
+    lines.last().map_or((0, 0, ""), |line| {
+        (lines.len().saturating_sub(1), line_start, line.as_str())
+    })
 }
 
 fn text_index_at(font: &BitmapFont, lines: &[String], line_index: usize, x: usize) -> usize {
@@ -1331,8 +1329,7 @@ fn prefix_chars(text: &str, len: usize) -> &str {
     let byte = text
         .char_indices()
         .nth(len)
-        .map(|(index, _)| index)
-        .unwrap_or(text.len());
+        .map_or(text.len(), |(index, _)| index);
     &text[..byte]
 }
 

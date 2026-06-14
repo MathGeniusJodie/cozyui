@@ -1,5 +1,6 @@
 use std::env;
 use std::error::Error;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -116,7 +117,7 @@ const MODELS: [Model; 4] = [
     },
 ];
 
-pub(crate) struct Fwends {
+pub struct Fwends {
     avatars: [Sprite; 4],
     bubble: Sprite,
     user_sticky: Sprite,
@@ -202,15 +203,17 @@ impl Fwends {
         Ok(fwends)
     }
 
-    pub(crate) fn width(&self) -> usize {
+    #[allow(clippy::unused_self)]
+    pub(crate) const fn width(&self) -> usize {
         W
     }
 
-    pub(crate) fn height(&self) -> usize {
+    pub(crate) const fn height(&self) -> usize {
         self.height
     }
 
-    pub(crate) fn min_height(&self) -> usize {
+    #[allow(clippy::unused_self)]
+    pub(crate) const fn min_height(&self) -> usize {
         H
     }
 
@@ -225,6 +228,7 @@ impl Fwends {
         true
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
         palette.color(palette_color::BLACK).transparent()
     }
@@ -289,11 +293,11 @@ impl Fwends {
         self.input_edit.drag_to(cursor, &self.input)
     }
 
-    pub(crate) fn end_text_drag(&mut self) {
+    pub(crate) const fn end_text_drag(&mut self) {
         self.input_edit.end_drag();
     }
 
-    pub(crate) fn text_dragging(&self) -> bool {
+    pub(crate) const fn text_dragging(&self) -> bool {
         self.input_edit.is_dragging()
     }
 
@@ -331,7 +335,7 @@ impl Fwends {
         None
     }
 
-    fn select_next_model(&mut self) {
+    const fn select_next_model(&mut self) {
         self.selected_model = (self.selected_model + 1) % MODELS.len();
     }
 
@@ -563,15 +567,12 @@ impl Fwends {
         layouts
     }
 
-    fn assistant_bubble_x(&self) -> usize {
+    const fn assistant_bubble_x(&self) -> usize {
         self.input_sticky_x()
     }
 
     fn content_height(&self) -> usize {
-        self.layouts
-            .last()
-            .map(|layout| layout.y + layout.h)
-            .unwrap_or(0)
+        self.layouts.last().map_or(0, |layout| layout.y + layout.h)
     }
 
     fn max_scroll(&self) -> usize {
@@ -606,7 +607,7 @@ impl Fwends {
         self.eraser.is_opaque(x - eraser_x, y - eraser_y)
     }
 
-    fn eraser_position(&self) -> (usize, usize) {
+    const fn eraser_position(&self) -> (usize, usize) {
         (
             W.saturating_sub(self.eraser.width + ERASER_RIGHT_PAD),
             self.height.saturating_sub(self.eraser.height),
@@ -628,7 +629,7 @@ impl Fwends {
         image.is_opaque(x - lamp_x, y - lamp_y)
     }
 
-    fn lamp_image(&self) -> &Sprite {
+    const fn lamp_image(&self) -> &Sprite {
         if self.lamp_on {
             &self.lamp_on_image
         } else {
@@ -636,7 +637,7 @@ impl Fwends {
         }
     }
 
-    fn lamp_position(&self) -> (usize, usize) {
+    const fn lamp_position(&self) -> (usize, usize) {
         let image = self.lamp_image();
         (
             CONTENT_W.saturating_sub(image.width + LAMP_RIGHT_PAD),
@@ -737,7 +738,7 @@ impl Fwends {
         fb.draw_sprite(avatar, avatar_x as isize, avatar_y as isize, 1, palette);
     }
 
-    fn selected_fwend_rect(&self) -> FwendRect {
+    const fn selected_fwend_rect(&self) -> FwendRect {
         FwendRect {
             x: CONTENT_X_OFFSET + INPUT_X,
             y: self.input_y(),
@@ -791,37 +792,37 @@ impl Fwends {
         )
     }
 
-    fn input_text_x(&self) -> usize {
+    const fn input_text_x(&self) -> usize {
         self.input_sticky_x() + TEXT_PAD
     }
 
-    fn input_text_y(&self) -> usize {
+    const fn input_text_y(&self) -> usize {
         (self.input_y() + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET)
     }
 
-    fn input_text_width(&self) -> usize {
+    const fn input_text_width(&self) -> usize {
         let right_edge =
             self.input_sticky_x() + self.input_sticky_w() - TEXT_PAD - INPUT_BOX_RIGHT_PAD;
         right_edge.saturating_sub(self.input_text_x())
     }
 
-    fn input_sticky_x(&self) -> usize {
+    const fn input_sticky_x(&self) -> usize {
         CONTENT_X_OFFSET + INPUT_X + self.model_slot_w + SELECTED_FWEND_GAP
     }
 
-    fn input_sticky_w(&self) -> usize {
+    const fn input_sticky_w(&self) -> usize {
         self.input_sticky.width + INPUT_EXTRA_W
     }
 
-    fn input_sticky_h(&self) -> usize {
+    const fn input_sticky_h(&self) -> usize {
         self.input_sticky.height + INPUT_EXTRA_H
     }
 
-    fn input_y(&self) -> usize {
+    const fn input_y(&self) -> usize {
         self.height.saturating_sub(INPUT_BOTTOM_PAD + INPUT_EXTRA_H)
     }
 
-    fn chat_h(&self) -> usize {
+    const fn chat_h(&self) -> usize {
         self.input_y().saturating_sub(CHAT_Y + CHAT_INPUT_GAP)
     }
 
@@ -844,7 +845,7 @@ struct FwendRect {
 }
 
 impl FwendRect {
-    fn contains_point(self, x: usize, y: usize) -> bool {
+    const fn contains_point(self, x: usize, y: usize) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 }
@@ -904,6 +905,7 @@ fn lamp_shadow_color(
     let mapped = match lamp.at(local_x, local_y) {
         TRANSPARENT => return None,
         palette_color::ROSE => palette_color::CRIMSON,
+        #[allow(clippy::match_same_arms)]
         palette_color::PEACH => palette_color::CRIMSON,
         palette_color::PLUM => palette_color::BLACK,
         palette_color::CRIMSON => palette_color::PLUM,
@@ -1016,8 +1018,7 @@ fn prefix_chars(text: &str, len: usize) -> &str {
     let byte = text
         .char_indices()
         .nth(len)
-        .map(|(index, _)| index)
-        .unwrap_or(text.len());
+        .map_or(text.len(), |(index, _)| index);
     &text[..byte]
 }
 
@@ -1049,7 +1050,7 @@ struct MessageLayout {
 }
 
 impl Message {
-    fn user(text: String) -> Self {
+    const fn user(text: String) -> Self {
         Self {
             role: Role::User,
             text,
@@ -1058,7 +1059,7 @@ impl Message {
         }
     }
 
-    fn assistant(text: String) -> Self {
+    const fn assistant(text: String) -> Self {
         Self {
             role: Role::Assistant,
             text,
@@ -1082,7 +1083,7 @@ impl Message {
         }
     }
 
-    fn style(&self) -> MessageStyle {
+    const fn style(&self) -> MessageStyle {
         match self.role {
             Role::User => USER_MESSAGE_STYLE,
             Role::Assistant => ASSISTANT_MESSAGE_STYLE,
@@ -1196,9 +1197,10 @@ fn strip_self_prefix(text: &str, name: &str) -> String {
 
 fn fwend_system_prompt(template: &str, name: &str) -> String {
     let mut prompt = template.replace("[[FREND_NAME]]", name);
-    prompt.push_str(&format!(
+    let _ = write!(
+        prompt,
         "\n\nThis is a group chat: messages from {USER_NAME} and from other fwends arrive labeled like \"{USER_NAME}: ...\" or \"Qwen: ...\". Your own earlier replies are unlabeled. Never start your reply with \"{name}:\" — just speak."
-    ));
+    );
     prompt
 }
 
@@ -1305,7 +1307,7 @@ fn unique_temp_path() -> PathBuf {
 }
 
 /// History as plain {"role", "content"} messages for the senpai pipeline,
-/// same role/text mapping as chat_body.
+/// same role/text mapping as `chat_body`.
 fn history_values(history: &[Message]) -> Vec<Value> {
     history
         .iter()

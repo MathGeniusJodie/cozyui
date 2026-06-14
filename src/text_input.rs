@@ -4,7 +4,7 @@ use x11rb::xcb_ffi::XCBConnection;
 use xkbcommon::xkb;
 use xkbcommon::xkb::keysyms;
 
-pub(crate) enum EditKey {
+pub enum EditKey {
     Insert(char),
     Backspace,
     Enter,
@@ -16,7 +16,7 @@ pub(crate) enum EditKey {
 }
 
 #[derive(Clone)]
-pub(crate) struct KeyInput {
+pub struct KeyInput {
     sym: xkb::Keysym,
     text: String,
     ctrl: bool,
@@ -38,20 +38,20 @@ impl KeyInput {
         &self.text
     }
 
-    pub(crate) fn ctrl(&self) -> bool {
+    pub(crate) const fn ctrl(&self) -> bool {
         self.ctrl
     }
 
-    pub(crate) fn shift(&self) -> bool {
+    pub(crate) const fn shift(&self) -> bool {
         self.shift
     }
 
-    pub(crate) fn sym_raw(&self) -> u32 {
+    pub(crate) const fn sym_raw(&self) -> u32 {
         self.sym.raw()
     }
 }
 
-pub(crate) struct Keyboard {
+pub struct Keyboard {
     state: xkb::State,
 }
 
@@ -90,7 +90,7 @@ impl Keyboard {
     }
 
     pub(crate) fn press(&mut self, keycode: u8, event_state: u16) -> KeyInput {
-        let keycode = xkb::Keycode::new(keycode as u32);
+        let keycode = xkb::Keycode::new(u32::from(keycode));
         let input = KeyInput {
             sym: self.state.key_get_one_sym(keycode),
             text: self.state.key_get_utf8(keycode),
@@ -103,11 +103,11 @@ impl Keyboard {
 
     pub(crate) fn release(&mut self, keycode: u8) {
         self.state
-            .update_key(xkb::Keycode::new(keycode as u32), xkb::KeyDirection::Up);
+            .update_key(xkb::Keycode::new(u32::from(keycode)), xkb::KeyDirection::Up);
     }
 }
 
-pub(crate) fn edit_key(input: &KeyInput) -> EditKey {
+pub fn edit_key(input: &KeyInput) -> EditKey {
     match input.sym_raw() {
         keysyms::KEY_Escape => EditKey::Escape,
         keysyms::KEY_BackSpace => EditKey::Backspace,
@@ -120,8 +120,7 @@ pub(crate) fn edit_key(input: &KeyInput) -> EditKey {
             .chars()
             .next()
             .filter(|_| input.text().chars().count() == 1)
-            .map(EditKey::Insert)
-            .unwrap_or(EditKey::None),
+            .map_or(EditKey::None, EditKey::Insert),
     }
 }
 

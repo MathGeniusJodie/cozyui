@@ -2,5 +2,5 @@
 mod senpai;
 
 fn main() {
-    senpai::cli_main()
+    senpai::cli_main();
 }

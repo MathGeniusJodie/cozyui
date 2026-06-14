@@ -36,6 +36,7 @@
 #![allow(dead_code)]
 
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -85,6 +86,9 @@ pub fn respond(
 
 // ---------------------------------------------------------------- transport
 
+// The fallback-detection check reads as three unrelated conditions on
+// `requested`/`served`; clippy's grouping heuristic misfires here.
+#[allow(clippy::suspicious_operation_groupings)]
 fn curl_post(body: &Value) -> Result<Value, String> {
     let requested = body["model"].as_str().unwrap_or("");
 
@@ -210,32 +214,33 @@ fn sandboxed(program: &str, args: &[&str]) -> Command {
     cmd
 }
 
-fn run_python(code: &str) -> String {
-    let out = sandboxed("python3", &["-c", code])
-        .output()
-        .map(|o| {
+/// Run a program in the sandbox and return its combined stdout+stderr,
+/// truncated to `cap` bytes. `fail_msg` prefixes a spawn/exec failure.
+fn run_sandboxed(program: &str, args: &[&str], fail_msg: &str, cap: usize) -> String {
+    let out = sandboxed(program, args).output().map_or_else(
+        |e| format!("{fail_msg}: {e}"),
+        |o| {
             format!(
                 "{}{}",
                 String::from_utf8_lossy(&o.stdout),
                 String::from_utf8_lossy(&o.stderr)
             )
-        })
-        .unwrap_or_else(|e| format!("exec error: {e}"));
-    truncate(&out, 4000)
+        },
+    );
+    truncate(&out, cap)
+}
+
+fn run_python(code: &str) -> String {
+    run_sandboxed("python3", &["-c", code], "exec error", 4000)
 }
 
 fn run_wolframscript(code: &str) -> String {
-    let out = sandboxed("wolframscript", &["-code", code])
-        .output()
-        .map(|o| {
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            )
-        })
-        .unwrap_or_else(|e| format!("wolframscript unavailable: {e}"));
-    truncate(&out, 2000)
+    run_sandboxed(
+        "wolframscript",
+        &["-code", code],
+        "wolframscript unavailable",
+        2000,
+    )
 }
 
 // Web Q&A: one Brave Answers call, capped and configured for a tiny
@@ -333,7 +338,7 @@ fn curl_post_brave_answers(body: &Value) -> Result<Value, String> {
 }
 
 /// Parse a response body as JSON; on failure wrap the raw text in an
-/// error-shaped Value so api_error_message can surface it.
+/// error-shaped Value so `api_error_message` can surface it.
 fn parse_json_body(stdout: &[u8]) -> Value {
     serde_json::from_slice(stdout).unwrap_or_else(
         |_| json!({"error": {"message": String::from_utf8_lossy(stdout).to_string()}}),
@@ -378,8 +383,10 @@ fn fetch_url(url: &str) -> String {
     let out = Command::new("curl")
         .args(["-sL", "--max-time", "15", url])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_else(|e| format!("fetch error: {e}"));
+        .map_or_else(
+            |e| format!("fetch error: {e}"),
+            |o| String::from_utf8_lossy(&o.stdout).to_string(),
+        );
     truncate(&html_to_text(&out), 6000)
 }
 
@@ -392,7 +399,7 @@ fn html_to_text(html: &str) -> String {
 
     let mut text = String::with_capacity(html.len() / 2);
     let bytes = html.as_bytes();
-    let mut chars = html.char_indices().peekable();
+    let mut chars = html.char_indices();
     let mut skip_until: Option<&str> = None;
     while let Some((i, c)) = chars.next() {
         if let Some(end) = skip_until {
@@ -509,10 +516,10 @@ impl Chat {
     }
 
     fn read_block(&self, id: usize) -> String {
-        match self.archive.get(id) {
-            Some(block) => block_transcript(&block.messages),
-            None => format!("no such block: {id}"),
-        }
+        self.archive.get(id).map_or_else(
+            || format!("no such block: {id}"),
+            |block| block_transcript(&block.messages),
+        )
     }
 }
 
@@ -555,17 +562,15 @@ count of messages. Nothing but the number.";
 /// starts a new topic, i.e. the size of the leading block. Falls back to a
 /// fixed cut if the model's answer doesn't parse.
 fn topic_boundary(student_model: &str, messages: &[Value]) -> usize {
-    let numbered: String = messages
-        .iter()
-        .enumerate()
-        .map(|(i, message)| {
-            format!(
-                "{i} {}: {}\n",
-                message["role"].as_str().unwrap_or("?"),
-                message["content"].as_str().unwrap_or("")
-            )
-        })
-        .collect();
+    let mut numbered = String::new();
+    for (i, message) in messages.iter().enumerate() {
+        let _ = writeln!(
+            numbered,
+            "{i} {}: {}",
+            message["role"].as_str().unwrap_or("?"),
+            message["content"].as_str().unwrap_or("")
+        );
+    }
     let resp = curl_post(&json!({
         // Budget covers minimal reasoning too; the answer is a bare number.
         "model": student_model, "max_tokens": 600,
@@ -651,9 +656,10 @@ attached to the message; weave it into your advice where it matters.";
 fn senpai_briefing(config: &SenpaiConfig, user_message: &str, context: Option<&str>) -> String {
     let mut user = user_message.to_string();
     if let Some(context) = context {
-        user.push_str(&format!(
+        let _ = write!(
+            user,
             "\n\nRELEVANT CONTEXT (from earlier conversation):\n{context}"
-        ));
+        );
     }
     let body = json!({
         "model": config.senpai_model, "max_tokens": 150,
@@ -737,7 +743,7 @@ fn relevant_context(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> O
             for tc in msg["tool_calls"].as_array().cloned().unwrap_or_default() {
                 let args: Value =
                     serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}"))
-                        .unwrap_or(json!({}));
+                        .unwrap_or_else(|_| json!({}));
                 let id = args["id"].as_u64().unwrap_or(u64::MAX) as usize;
                 eprintln!("[context pass read block {id}]");
                 messages.push(json!({
@@ -794,7 +800,7 @@ fn student_system(config: &SenpaiConfig) -> String {
     // finer-grained timestamp would break the cached prefix on every call.
     let mut system = format!("{STUDENT_SYSTEM}\nToday's date is {}.", today());
     if let Some(persona) = &config.persona {
-        system.push_str(&format!("\n\nPERSONA (speak as this):\n{persona}"));
+        let _ = write!(system, "\n\nPERSONA (speak as this):\n{persona}");
     }
     system
 }
@@ -855,7 +861,7 @@ fn run_turn(config: &SenpaiConfig, chat: &Chat, user_message: &str) -> Result<St
                 let name = tc["function"]["name"].as_str().unwrap_or("");
                 let args: Value =
                     serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}"))
-                        .unwrap_or(json!({}));
+                        .unwrap_or_else(|_| json!({}));
 
                 let result = match name {
                     "run_python" => run_python(args["code"].as_str().unwrap_or("")),

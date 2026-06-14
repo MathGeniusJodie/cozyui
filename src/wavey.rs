@@ -85,7 +85,7 @@ enum MediaButton {
     Forward,
 }
 
-pub(crate) struct Wavey {
+pub struct Wavey {
     image: Sprite,
     font: BitmapFont,
     stations: Vec<Station>,
@@ -144,7 +144,7 @@ impl Wavey {
         }
     }
 
-    pub(crate) fn width(&self) -> usize {
+    pub(crate) const fn width(&self) -> usize {
         self.image.width
     }
 
@@ -154,6 +154,7 @@ impl Wavey {
             .max(TITLE_Y + self.font.cell_h() + TITLE_BOX_PAD)
     }
 
+    #[allow(clippy::unused_self)]
     pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
         palette.color(palette_color::BLACK).transparent()
     }
@@ -257,6 +258,7 @@ impl Wavey {
                 .contains(&y)
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     fn title_copy_text(&self) -> Option<String> {
         let title = self.current_title.clone();
         match mpv_property("path").as_ref().and_then(json_string) {
@@ -265,7 +267,7 @@ impl Wavey {
         }
     }
 
-    pub(crate) fn release(&mut self) -> bool {
+    pub(crate) const fn release(&mut self) -> bool {
         let was_dragging = self.dragging_knob;
         self.dragging_knob = false;
         was_dragging
@@ -288,21 +290,25 @@ impl Wavey {
         self.scroll_volume(x, y, -5)
     }
 
-    pub(crate) fn shutdown(&mut self) {
+    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
+    pub(crate) const fn shutdown(&mut self) {
         // The player lives in the "wavey" abduco session and keeps playing
         // across cozyui restarts; only the stop button kills it.
     }
 
+    #[allow(clippy::unused_self)]
     fn tuner_contains(&self, x: usize, y: usize) -> bool {
         (TUNER_X..TUNER_X + TUNER_W).contains(&x) && (TUNER_Y..TUNER_Y + TUNER_H).contains(&y)
     }
 
+    #[allow(clippy::unused_self)]
     fn clock_contains(&self, x: usize, y: usize) -> bool {
         (DISPLAY_X..DISPLAY_X + CLOCK_CLEAR_W).contains(&x)
             && (DISPLAY_Y..DISPLAY_Y + CLOCK_CLEAR_H).contains(&y)
     }
 
-    fn knob_contains(&self, x: usize, y: usize) -> bool {
+    #[allow(clippy::unused_self)]
+    const fn knob_contains(&self, x: usize, y: usize) -> bool {
         let dx = x as isize - KNOB_X as isize;
         let dy = y as isize - KNOB_Y as isize;
         dx * dx + dy * dy <= (KNOB_RADIUS * KNOB_RADIUS) as isize
@@ -322,14 +328,14 @@ impl Wavey {
         let dy = y as f32 + 0.5 - KNOB_Y as f32;
         let angle = dy.atan2(dx);
         let sweep = (angle - FRAC_PI_2).rem_euclid(2.0 * PI);
-        let mut volume = (sweep / (2.0 * PI) * MAX_VOLUME as f32).round() as i16;
+        let mut volume = (sweep / (2.0 * PI) * f32::from(MAX_VOLUME)).round() as i16;
 
         if clamp_wrap {
-            let delta = volume - self.volume as i16;
+            let delta = volume - i16::from(self.volume);
             if delta > 50 {
-                volume = MIN_VOLUME as i16;
+                volume = i16::from(MIN_VOLUME);
             } else if delta < -50 {
-                volume = MAX_VOLUME as i16;
+                volume = i16::from(MAX_VOLUME);
             }
         }
 
@@ -341,12 +347,12 @@ impl Wavey {
             return false;
         }
 
-        self.set_volume(self.volume as i16 + delta);
+        self.set_volume(i16::from(self.volume) + delta);
         true
     }
 
     fn set_volume(&mut self, volume: i16) {
-        let volume = volume.clamp(MIN_VOLUME as i16, MAX_VOLUME as i16) as u8;
+        let volume = volume.clamp(i16::from(MIN_VOLUME), i16::from(MAX_VOLUME)) as u8;
         if volume == self.volume {
             return;
         }
@@ -390,6 +396,7 @@ impl Wavey {
         }
     }
 
+    #[allow(clippy::needless_pass_by_ref_mut)]
     fn send_mpv_command(&mut self, command: &[&str]) {
         if !self.playing {
             return;
@@ -502,7 +509,7 @@ impl Wavey {
     }
 }
 
-fn station_center(index: usize, count: usize) -> usize {
+const fn station_center(index: usize, count: usize) -> usize {
     TUNER_X + ((index * 2 + 1) * TUNER_W / (count * 2))
 }
 
@@ -563,6 +570,7 @@ fn json_string(value: &serde_json::Value) -> Option<String> {
         .filter(|text| !text.trim().is_empty())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn clean_title(title: String) -> Option<String> {
     let title = deunicode::deunicode(&title);
     let title = title.split_whitespace().collect::<Vec<&str>>().join(" ");
@@ -743,7 +751,7 @@ fn queue_player_command(command: &str) {
 }
 
 fn volume_angle(volume: u8) -> f32 {
-    FRAC_PI_2 + (volume as f32 / MAX_VOLUME as f32) * 2.0 * PI
+    ((f32::from(volume) / f32::from(MAX_VOLUME)) * 2.0).mul_add(PI, FRAC_PI_2)
 }
 
 fn clear_clock_art(fb: &mut Framebuffer, palette: &Palette) {
@@ -827,7 +835,7 @@ fn copy_clock_pixels(
     }
 }
 
-fn digit_mask(digit: char) -> Option<u8> {
+const fn digit_mask(digit: char) -> Option<u8> {
     Some(match digit {
         '0' => 0b011_1111,
         '1' => 0b000_0110,
@@ -851,7 +859,7 @@ struct SourceRect {
     h: usize,
 }
 
-fn clock_segment_rect(segment: usize) -> SourceRect {
+const fn clock_segment_rect(segment: usize) -> SourceRect {
     match segment {
         0 => SourceRect {
             x: CLOCK_EIGHT_SRC_X + 2,
@@ -924,11 +932,9 @@ fn copy_moved_knob_marker(
 ) {
     let marker_center_x = KNOB_MARKER_SRC_X as f32 + KNOB_MARKER_SRC_W as f32 / 2.0 - 0.5;
     let marker_center_y = KNOB_MARKER_SRC_Y as f32 + KNOB_MARKER_SRC_H as f32 / 2.0 - 0.5;
-    let radius = ((marker_center_x - KNOB_X as f32).powi(2)
-        + (marker_center_y - KNOB_Y as f32).powi(2))
-    .sqrt();
-    let dest_center_x = KNOB_X as f32 + target_angle.cos() * radius;
-    let dest_center_y = KNOB_Y as f32 + target_angle.sin() * radius;
+    let radius = (marker_center_x - KNOB_X as f32).hypot(marker_center_y - KNOB_Y as f32);
+    let dest_center_x = target_angle.cos().mul_add(radius, KNOB_X as f32);
+    let dest_center_y = target_angle.sin().mul_add(radius, KNOB_Y as f32);
     let dest_left = (dest_center_x - KNOB_MARKER_SRC_W as f32 / 2.0 + 0.5).round() as isize;
     let dest_top = (dest_center_y - KNOB_MARKER_SRC_H as f32 / 2.0 + 0.5).round() as isize;
 
@@ -1076,7 +1082,7 @@ fn clock_text(clock_24h: bool) -> String {
 fn local_hour_minute() -> Option<(u8, u8)> {
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as TimeT;
     let mut out = Tm::default();
-    let result = unsafe { localtime_r(&seconds, &mut out) };
+    let result = unsafe { localtime_r(&raw const seconds, &raw mut out) };
     if result.is_null() {
         return None;
     }

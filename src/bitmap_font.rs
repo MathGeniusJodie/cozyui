@@ -3,7 +3,7 @@ use std::error::Error;
 use crate::text_wrap;
 use crate::{Framebuffer, Rgb, Rgba, decode_png_with_size};
 
-pub(crate) struct FontSpec {
+pub struct FontSpec {
     pub(crate) atlas_path: &'static str,
     pub(crate) cell_w: usize,
     pub(crate) cell_h: usize,
@@ -12,7 +12,7 @@ pub(crate) struct FontSpec {
     pub(crate) advance: &'static [u8; 128],
 }
 
-pub(crate) struct BitmapFont {
+pub struct BitmapFont {
     spec: &'static FontSpec,
     width: usize,
     pixels: Vec<bool>,
@@ -37,11 +37,11 @@ impl BitmapFont {
         })
     }
 
-    pub(crate) fn cell_h(&self) -> usize {
+    pub(crate) const fn cell_h(&self) -> usize {
         self.spec.cell_h
     }
 
-    pub(crate) fn advance(&self, ch: char) -> usize {
+    pub(crate) const fn advance(&self, ch: char) -> usize {
         let code = glyph_code(ch);
         self.spec.advance[code] as usize
     }
@@ -62,20 +62,20 @@ impl BitmapFont {
 
                     let x = cursor_x + gx as isize - self.spec.x_origin as isize;
                     let y = gy;
-                    bounds = Some(match bounds {
-                        Some(bounds) => TextInkBounds {
-                            min_x: bounds.min_x.min(x),
-                            min_y: bounds.min_y.min(y),
-                            max_x: bounds.max_x.max(x + 1),
-                            max_y: bounds.max_y.max(y + 1),
-                        },
-                        None => TextInkBounds {
+                    bounds = Some(bounds.map_or(
+                        TextInkBounds {
                             min_x: x,
                             min_y: y,
                             max_x: x + 1,
                             max_y: y + 1,
                         },
-                    });
+                        |bounds| TextInkBounds {
+                            min_x: bounds.min_x.min(x),
+                            min_y: bounds.min_y.min(y),
+                            max_x: bounds.max_x.max(x + 1),
+                            max_y: bounds.max_y.max(y + 1),
+                        },
+                    ));
                 }
             }
             cursor_x += self.advance(ch) as isize;
@@ -192,7 +192,7 @@ impl BitmapFont {
     }
 }
 
-pub(crate) struct TextInkBounds {
+pub struct TextInkBounds {
     pub(crate) min_x: isize,
     pub(crate) min_y: usize,
     pub(crate) max_x: isize,
@@ -204,12 +204,12 @@ impl TextInkBounds {
         (self.max_x - self.min_x).max(0) as usize
     }
 
-    pub(crate) fn height(&self) -> usize {
+    pub(crate) const fn height(&self) -> usize {
         self.max_y.saturating_sub(self.min_y)
     }
 }
 
-fn glyph_code(ch: char) -> usize {
+const fn glyph_code(ch: char) -> usize {
     if ch.is_ascii() {
         ch as usize
     } else {
@@ -217,7 +217,7 @@ fn glyph_code(ch: char) -> usize {
     }
 }
 
-fn is_glyph_ink(color: Rgba) -> bool {
+const fn is_glyph_ink(color: Rgba) -> bool {
     let luminance = color.r as u16 + color.g as u16 + color.b as u16;
     luminance >= 384
 }

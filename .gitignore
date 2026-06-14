@@ -2,3 +2,5 @@ target/
 glyphs/
 toodle_*.txt
 *.ttf
+.scrooge/accounts.log
+.scrooge/ledger.json

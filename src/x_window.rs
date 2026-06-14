@@ -20,7 +20,7 @@ use x11rb::xcb_ffi::XCBConnection;
 use crate::text_input;
 use crate::{Framebuffer, Rect};
 
-pub(crate) struct XWindow {
+pub struct XWindow {
     pub(crate) conn: XCBConnection,
     pub(crate) window: Window,
     gc: Gcontext,
@@ -320,6 +320,7 @@ impl XWindow {
         Ok(None)
     }
 
+    #[allow(clippy::needless_pass_by_ref_mut)]
     pub(crate) fn handle_selection_request(
         &mut self,
         event: SelectionRequestEvent,

@@ -1,4 +1,4 @@
-pub(crate) fn wrap_lines<F>(text: &str, max_width: usize, char_width: F) -> Vec<String>
+pub fn wrap_lines<F>(text: &str, max_width: usize, char_width: F) -> Vec<String>
 where
     F: Fn(char) -> usize,
 {

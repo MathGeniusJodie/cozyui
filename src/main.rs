@@ -1,3 +1,8 @@
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::struct_field_names)]
+
 use std::error::Error;
 use std::time::Duration;
 
@@ -48,22 +53,22 @@ const DESK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/desk.png");
 pub(crate) mod palette_color {
     use crate::Index;
 
-    pub(crate) const LAVENDER: Index = 0;
-    pub(crate) const GUNMETAL: Index = 1;
-    pub(crate) const PLUM: Index = 2;
-    pub(crate) const BROWN: Index = 3;
-    pub(crate) const PEACH: Index = 4;
-    pub(crate) const CREAM: Index = 5;
-    pub(crate) const LIME: Index = 6;
-    pub(crate) const GREEN: Index = 7;
-    pub(crate) const ORANGE: Index = 8;
-    pub(crate) const CRIMSON: Index = 9;
-    pub(crate) const ROSE: Index = 10;
-    pub(crate) const PURPLE: Index = 11;
-    pub(crate) const CYAN: Index = 12;
-    pub(crate) const BLUE: Index = 13;
-    pub(crate) const PINE: Index = 14;
-    pub(crate) const BLACK: Index = 15;
+    pub const LAVENDER: Index = 0;
+    pub const GUNMETAL: Index = 1;
+    pub const PLUM: Index = 2;
+    pub const BROWN: Index = 3;
+    pub const PEACH: Index = 4;
+    pub const CREAM: Index = 5;
+    pub const LIME: Index = 6;
+    pub const GREEN: Index = 7;
+    pub const ORANGE: Index = 8;
+    pub const CRIMSON: Index = 9;
+    pub const ROSE: Index = 10;
+    pub const PURPLE: Index = 11;
+    pub const CYAN: Index = 12;
+    pub const BLUE: Index = 13;
+    pub const PINE: Index = 14;
+    pub const BLACK: Index = 15;
 }
 
 #[allow(dead_code)]
@@ -71,8 +76,8 @@ pub(crate) mod app_color {
     use crate::Index;
     use crate::palette_color;
 
-    pub(crate) const BACKGROUND: Index = palette_color::CYAN;
-    pub(crate) const BACKGROUND_SHADOW: Index = palette_color::BLUE;
+    pub const BACKGROUND: Index = palette_color::CYAN;
+    pub const BACKGROUND_SHADOW: Index = palette_color::BLUE;
 }
 
 const WHEEL_UP: u8 = 4;
@@ -97,7 +102,7 @@ enum WidgetId {
 const WIDGET_COUNT: usize = 6;
 
 impl WidgetId {
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         self as usize
     }
 }
@@ -121,7 +126,7 @@ impl WidgetId {
         Self::Day,
     ];
 
-    fn visible() -> &'static [Self] {
+    const fn visible() -> &'static [Self] {
         if SHOW_FWENDS {
             &Self::VISIBLE_WITH_FWENDS
         } else {
@@ -246,6 +251,7 @@ impl App {
         height + APP_BOTTOM_PADDING
     }
 
+    #[allow(clippy::unused_self)]
     fn fill_color(&self, palette: &Palette) -> Rgba {
         palette.color(app_color::BACKGROUND).into()
     }
@@ -377,11 +383,11 @@ impl App {
         true
     }
 
-    fn focused_rect(&self) -> Rect {
+    const fn focused_rect(&self) -> Rect {
         self.rect_for(self.focus)
     }
 
-    fn rect_for(&self, widget: WidgetId) -> Rect {
+    const fn rect_for(&self, widget: WidgetId) -> Rect {
         self.rects[widget.index()]
     }
 
@@ -404,6 +410,7 @@ impl App {
             WidgetId::Fwends if SHOW_FWENDS => {
                 Ok(self.fwends.handle_key_press(input, clipboard_text))
             }
+            #[allow(clippy::match_same_arms)]
             WidgetId::Fwends => Ok(None),
             WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => Ok(None),
         }
@@ -613,7 +620,7 @@ fn widget_positions(
     ]
 }
 
-fn move_rect(rect: &mut Rect, x: usize, y: usize) -> bool {
+const fn move_rect(rect: &mut Rect, x: usize, y: usize) -> bool {
     if rect.x == x && rect.y == y {
         return false;
     }
@@ -623,7 +630,7 @@ fn move_rect(rect: &mut Rect, x: usize, y: usize) -> bool {
     true
 }
 
-fn rects_intersect(a: Rect, b: Rect) -> bool {
+const fn rects_intersect(a: Rect, b: Rect) -> bool {
     a.x < b.x.saturating_add(b.w)
         && b.x < a.x.saturating_add(a.w)
         && a.y < b.y.saturating_add(b.h)
@@ -678,7 +685,7 @@ fn stretched_desk_source_x(x: usize, target_w: usize, source_w: usize) -> usize 
     }
 }
 
-fn desk_background_index(index: Index) -> Index {
+const fn desk_background_index(index: Index) -> Index {
     match index {
         palette_color::ROSE => app_color::BACKGROUND,
         palette_color::CRIMSON => app_color::BACKGROUND_SHADOW,
@@ -696,6 +703,7 @@ pub(crate) fn draw_filled_circle(
     draw_filled_ellipse(fb, center_x, center_y, radius, radius, color);
 }
 
+#[allow(clippy::similar_names)]
 pub(crate) fn draw_filled_ellipse(
     fb: &mut Framebuffer,
     center_x: isize,
@@ -732,6 +740,7 @@ enum ScrollDirection {
     Down,
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn Error>> {
     let palette = Palette::load(PALETTE_PATH)?;
     let mut app = App::load(&palette)?;
@@ -739,7 +748,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let height = app.height();
     let mut fb = Framebuffer::new(width, height, app.fill_color(&palette));
     let mut xwin = XWindow::open(width, height)?;
-    app.start(xwin.window as u64)?;
+    app.start(u64::from(xwin.window))?;
     app.render(&mut fb, &palette);
     xwin.draw(&fb)?;
 

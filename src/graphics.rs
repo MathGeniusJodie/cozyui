@@ -4,18 +4,18 @@ use std::io::BufReader;
 
 /// A palette index stored in sprite pixels. `TRANSPARENT` is the only
 /// non-palette value; palettes never contain transparent colors.
-pub(crate) type Index = u8;
-pub(crate) const TRANSPARENT: Index = 0xFF;
+pub type Index = u8;
+pub const TRANSPARENT: Index = 0xFF;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Rgb {
+pub struct Rgb {
     pub(crate) r: u8,
     pub(crate) g: u8,
     pub(crate) b: u8,
 }
 
 impl Rgb {
-    pub(crate) fn transparent(self) -> Rgba {
+    pub(crate) const fn transparent(self) -> Rgba {
         Rgba {
             r: self.r,
             g: self.g,
@@ -26,7 +26,7 @@ impl Rgb {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Rgba {
+pub struct Rgba {
     pub(crate) r: u8,
     pub(crate) g: u8,
     pub(crate) b: u8,
@@ -45,7 +45,7 @@ impl From<Rgb> for Rgba {
 }
 
 impl Rgba {
-    fn rgb(self) -> Rgb {
+    const fn rgb(self) -> Rgb {
         Rgb {
             r: self.r,
             g: self.g,
@@ -59,34 +59,34 @@ impl Rgba {
 /// coordinates in fat-pixel units so overlapping dithers mesh.
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
-pub(crate) enum Paint {
+pub enum Paint {
     Solid(Index),
     Checker(Index, Index),
     Transparent,
 }
 
 impl Paint {
-    fn pick(self, cell_x: usize, cell_y: usize) -> Option<Index> {
+    const fn pick(self, cell_x: usize, cell_y: usize) -> Option<Index> {
         match self {
-            Paint::Solid(index) => Some(index),
-            Paint::Checker(even, odd) => Some(if (cell_x + cell_y).is_multiple_of(2) {
+            Self::Solid(index) => Some(index),
+            Self::Checker(even, odd) => Some(if (cell_x + cell_y).is_multiple_of(2) {
                 even
             } else {
                 odd
             }),
-            Paint::Transparent => None,
+            Self::Transparent => None,
         }
     }
 }
 
 /// Per-draw index remap. Indices without an explicit entry pass through.
-pub(crate) struct Swap {
+pub struct Swap {
     paints: Vec<Paint>,
     uniform: Option<Paint>,
 }
 
 impl Swap {
-    pub(crate) fn identity() -> Self {
+    pub(crate) const fn identity() -> Self {
         Self {
             paints: Vec::new(),
             uniform: None,
@@ -94,7 +94,7 @@ impl Swap {
     }
 
     /// Every opaque pixel becomes `paint` (silhouettes, shadows, tints).
-    pub(crate) fn uniform(paint: Paint) -> Self {
+    pub(crate) const fn uniform(paint: Paint) -> Self {
         Self {
             paints: Vec::new(),
             uniform: Some(paint),
@@ -133,7 +133,7 @@ impl Swap {
     }
 }
 
-pub(crate) struct Palette {
+pub struct Palette {
     colors: Vec<Rgb>,
     remap: Vec<Paint>,
 }
@@ -158,7 +158,7 @@ impl Palette {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.colors.len()
     }
 
@@ -168,7 +168,7 @@ impl Palette {
 
     /// Like `index % len` but branch-only for in-range indices; `%` is an
     /// integer division and this runs per pixel in the raster loops.
-    fn wrap(index: usize, len: usize) -> usize {
+    const fn wrap(index: usize, len: usize) -> usize {
         if index < len { index } else { index % len }
     }
 
@@ -201,8 +201,7 @@ impl Palette {
             .iter()
             .enumerate()
             .min_by_key(|(_, candidate)| color_distance(**candidate, color))
-            .map(|(index, _)| index as Index)
-            .unwrap_or(0)
+            .map_or(0, |(index, _)| index as Index)
     }
 
     pub(crate) fn nearest(&self, color: Rgb) -> Rgb {
@@ -226,7 +225,7 @@ impl Palette {
 
     /// index-in-self -> nearest index-in-other; basis for cross-palette
     /// sprite import and palette migration.
-    pub(crate) fn mapping_to(&self, other: &Palette) -> Vec<Index> {
+    pub(crate) fn mapping_to(&self, other: &Self) -> Vec<Index> {
         self.colors
             .iter()
             .map(|&color| other.nearest_index(color))
@@ -235,7 +234,7 @@ impl Palette {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Rect {
+pub struct Rect {
     pub(crate) x: usize,
     pub(crate) y: usize,
     pub(crate) w: usize,
@@ -243,7 +242,7 @@ pub(crate) struct Rect {
 }
 
 impl Rect {
-    pub(crate) fn new(x: usize, y: usize, w: usize, h: usize) -> Self {
+    pub(crate) const fn new(x: usize, y: usize, w: usize, h: usize) -> Self {
         Self { x, y, w, h }
     }
 
@@ -253,17 +252,17 @@ impl Rect {
         self.contains_point(x, y)
     }
 
-    pub(crate) fn contains_point(self, x: usize, y: usize) -> bool {
+    pub(crate) const fn contains_point(self, x: usize, y: usize) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 
-    pub(crate) fn local(self, x: i16, y: i16) -> (i16, i16) {
+    pub(crate) const fn local(self, x: i16, y: i16) -> (i16, i16) {
         (x - self.x as i16, y - self.y as i16)
     }
 }
 
 /// Indexed pixel art: one palette index per pixel, `TRANSPARENT` for holes.
-pub(crate) struct Sprite {
+pub struct Sprite {
     pub(crate) width: usize,
     pub(crate) height: usize,
     pixels: Vec<Index>,
@@ -319,7 +318,7 @@ impl Sprite {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn region(&self, src: Rect) -> Sprite {
+    pub(crate) fn region(&self, src: Rect) -> Self {
         let w = src.w.min(self.width.saturating_sub(src.x));
         let h = src.h.min(self.height.saturating_sub(src.y));
         let mut pixels = Vec::with_capacity(w * h);
@@ -328,7 +327,7 @@ impl Sprite {
                 pixels.push(self.at(src.x + x, src.y + y));
             }
         }
-        Sprite {
+        Self {
             width: w,
             height: h,
             pixels,
@@ -336,18 +335,18 @@ impl Sprite {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn flip_h(&self) -> Sprite {
+    pub(crate) fn flip_h(&self) -> Self {
         self.map_coords(|x, y| (self.width - 1 - x, y), self.width, self.height)
     }
 
     #[allow(dead_code)]
-    pub(crate) fn flip_v(&self) -> Sprite {
+    pub(crate) fn flip_v(&self) -> Self {
         self.map_coords(|x, y| (x, self.height - 1 - y), self.width, self.height)
     }
 
     /// Rotate 90 degrees clockwise.
     #[allow(dead_code)]
-    pub(crate) fn rot90(&self) -> Sprite {
+    pub(crate) fn rot90(&self) -> Self {
         self.map_coords(|x, y| (y, self.height - 1 - x), self.height, self.width)
     }
 
@@ -356,7 +355,7 @@ impl Sprite {
         source: impl Fn(usize, usize) -> (usize, usize),
         width: usize,
         height: usize,
-    ) -> Sprite {
+    ) -> Self {
         let mut pixels = Vec::with_capacity(width * height);
         for y in 0..height {
             for x in 0..width {
@@ -364,7 +363,7 @@ impl Sprite {
                 pixels.push(self.at(sx, sy));
             }
         }
-        Sprite {
+        Self {
             width,
             height,
             pixels,
@@ -373,7 +372,7 @@ impl Sprite {
 
     /// Keep pixels only where `mask` is opaque.
     #[allow(dead_code)]
-    pub(crate) fn mask(&self, mask: &Sprite) -> Sprite {
+    pub(crate) fn mask(&self, mask: &Self) -> Self {
         let mut pixels = self.pixels.clone();
         for y in 0..self.height {
             for x in 0..self.width {
@@ -383,7 +382,7 @@ impl Sprite {
                 }
             }
         }
-        Sprite {
+        Self {
             width: self.width,
             height: self.height,
             pixels,
@@ -392,7 +391,7 @@ impl Sprite {
 
     /// Remap every pixel index from one palette's space to another's.
     #[allow(dead_code)]
-    pub(crate) fn convert(&self, from: &Palette, to: &Palette) -> Sprite {
+    pub(crate) fn convert(&self, from: &Palette, to: &Palette) -> Self {
         let lut = from.mapping_to(to);
         let pixels = self
             .pixels
@@ -405,7 +404,7 @@ impl Sprite {
                 }
             })
             .collect();
-        Sprite {
+        Self {
             width: self.width,
             height: self.height,
             pixels,
@@ -413,7 +412,7 @@ impl Sprite {
     }
 }
 
-pub(crate) struct Framebuffer {
+pub struct Framebuffer {
     pub(crate) width: usize,
     pub(crate) height: usize,
     pixels: Vec<u8>,
@@ -433,11 +432,11 @@ impl Framebuffer {
         fb
     }
 
-    fn color_bytes(color: Rgba) -> [u8; Self::BYTES_PER_PIXEL] {
+    const fn color_bytes(color: Rgba) -> [u8; Self::BYTES_PER_PIXEL] {
         [color.b, color.g, color.r, color.a]
     }
 
-    fn pixel_offset(&self, x: usize, y: usize) -> usize {
+    const fn pixel_offset(&self, x: usize, y: usize) -> usize {
         (y * self.width + x) * Self::BYTES_PER_PIXEL
     }
 
@@ -476,8 +475,7 @@ impl Framebuffer {
         for band in 0..self.height.div_ceil(scale) {
             let sy = band.min(sprite.height - 1);
             let mut opaque_row = true;
-            for x in 0..self.width {
-                let sx = sx_map[x];
+            for (x, &sx) in sx_map.iter().enumerate().take(self.width) {
                 match palette.resolve(sprite.at(sx, sy), sx, sy) {
                     Some(color) => {
                         let offset = x * Self::BYTES_PER_PIXEL;
@@ -500,8 +498,7 @@ impl Framebuffer {
                 }
             } else {
                 for y in y0..band_end {
-                    for x in 0..self.width {
-                        let sx = sx_map[x];
+                    for (x, &sx) in sx_map.iter().enumerate().take(self.width) {
                         if let Some(color) = palette.resolve(sprite.at(sx, sy), sx, sy) {
                             self.set_pixel(x, y, color);
                         }
@@ -511,7 +508,7 @@ impl Framebuffer {
         }
     }
 
-    /// Write a single pixel (bounds-checked). Cheaper than a 1x1 fill_rect in
+    /// Write a single pixel (bounds-checked). Cheaper than a 1x1 `fill_rect` in
     /// per-pixel loops.
     pub(crate) fn set_pixel(&mut self, x: usize, y: usize, color: impl Into<Rgba>) {
         if x >= self.width || y >= self.height {
@@ -678,10 +675,10 @@ impl Framebuffer {
 
                 let cell_x = dx / scale.max(1);
                 let cell_y = dy / scale.max(1);
-                let color = match swap {
-                    Some(swap) => palette.resolve_paint(swap.paint(index), cell_x, cell_y),
-                    None => palette.resolve(index, cell_x, cell_y),
-                };
+                let color = swap.map_or_else(
+                    || palette.resolve(index, cell_x, cell_y),
+                    |swap| palette.resolve_paint(swap.paint(index), cell_x, cell_y),
+                );
                 let Some(color) = color else {
                     continue;
                 };
@@ -690,7 +687,7 @@ impl Framebuffer {
         }
     }
 
-    pub(crate) fn blit_from(&mut self, src: &Framebuffer, dest_x: usize, dest_y: usize) {
+    pub(crate) fn blit_from(&mut self, src: &Self, dest_x: usize, dest_y: usize) {
         if dest_x >= self.width || dest_y >= self.height {
             return;
         }
@@ -714,6 +711,7 @@ impl Framebuffer {
 
 /// Fill `bytes` with a repeating 4-byte pattern by doubling copies: O(log n)
 /// `copy_within` calls instead of one slice write per pixel.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn fill_pattern(bytes: &mut [u8], pattern: &[u8; Framebuffer::BYTES_PER_PIXEL]) {
     if bytes.is_empty() {
         return;
@@ -732,9 +730,7 @@ fn decode_png(path: &str) -> Result<Vec<Rgba>, Box<dyn Error>> {
     Ok(decode_png_with_size(path)?.2)
 }
 
-pub(crate) fn decode_png_with_size(
-    path: &str,
-) -> Result<(usize, usize, Vec<Rgba>), Box<dyn Error>> {
+pub fn decode_png_with_size(path: &str) -> Result<(usize, usize, Vec<Rgba>), Box<dyn Error>> {
     let file = File::open(path)?;
     let mut decoder = png::Decoder::new(BufReader::new(file));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
@@ -794,7 +790,7 @@ pub(crate) fn decode_png_with_size(
     Ok((info.width as usize, info.height as usize, pixels))
 }
 
-fn color_distance(a: Rgb, b: Rgb) -> u32 {
+const fn color_distance(a: Rgb, b: Rgb) -> u32 {
     let dr = a.r as i32 - b.r as i32;
     let dg = a.g as i32 - b.g as i32;
     let db = a.b as i32 - b.b as i32;

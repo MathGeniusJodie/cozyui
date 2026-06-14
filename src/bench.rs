@@ -4,7 +4,6 @@
 //!
 //! Each bench prints the mean time per iteration; compare before/after when
 //! touching Framebuffer, sprite drawing, or widget layout code.
-#![cfg(test)]
 
 use std::time::Instant;
 

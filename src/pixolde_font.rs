@@ -2,16 +2,16 @@
 // units_per_pixel=64, range=U+0020..U+007E
 use crate::bitmap_font::FontSpec;
 
-pub(crate) const PIXOLDE_ATLAS_PATH: &str =
+pub const PIXOLDE_ATLAS_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/assets/pixolde_ascii.png");
-pub(crate) const PIXOLDE_CELL_W: usize = 11;
-pub(crate) const PIXOLDE_CELL_H: usize = 15;
-pub(crate) const PIXOLDE_COLS: usize = 16;
-pub(crate) const PIXOLDE_X_ORIGIN: usize = 1;
+pub const PIXOLDE_CELL_W: usize = 11;
+pub const PIXOLDE_CELL_H: usize = 15;
+pub const PIXOLDE_COLS: usize = 16;
+pub const PIXOLDE_X_ORIGIN: usize = 1;
 #[rustfmt::skip]
-pub(crate) const PIXOLDE_ADVANCE: [u8; 128] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 4, 8, 6, 8, 8, 2, 3, 3, 6, 6, 3, 4, 2, 4, 6, 4, 6, 6, 7, 6, 6, 7, 6, 6, 2, 3, 5, 6, 5, 6, 8, 9, 8, 7, 8, 7, 7, 8, 8, 4, 6, 8, 7, 8, 8, 8, 7, 8, 8, 7, 8, 8, 8, 10, 8, 8, 7, 3, 4, 3, 6, 6, 3, 7, 7, 6, 7, 6, 6, 7, 8, 4, 3, 7, 4, 10, 8, 7, 7, 7, 7, 6, 5, 8, 8, 10, 7, 7, 7, 4, 2, 4, 7, 0];
+pub const PIXOLDE_ADVANCE: [u8; 128] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 4, 8, 6, 8, 8, 2, 3, 3, 6, 6, 3, 4, 2, 4, 6, 4, 6, 6, 7, 6, 6, 7, 6, 6, 2, 3, 5, 6, 5, 6, 8, 9, 8, 7, 8, 7, 7, 8, 8, 4, 6, 8, 7, 8, 8, 8, 7, 8, 8, 7, 8, 8, 8, 10, 8, 8, 7, 3, 4, 3, 6, 6, 3, 7, 7, 6, 7, 6, 6, 7, 8, 4, 3, 7, 4, 10, 8, 7, 7, 7, 7, 6, 5, 8, 8, 10, 7, 7, 7, 4, 2, 4, 7, 0];
 
-pub(crate) const PIXOLDE_SPEC: FontSpec = FontSpec {
+pub const PIXOLDE_SPEC: FontSpec = FontSpec {
     atlas_path: PIXOLDE_ATLAS_PATH,
     cell_w: PIXOLDE_CELL_W,
     cell_h: PIXOLDE_CELL_H,
