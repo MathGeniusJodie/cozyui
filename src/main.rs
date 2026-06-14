@@ -252,7 +252,7 @@ impl App {
     }
 
     #[allow(clippy::unused_self)]
-    fn fill_color(&self, _palette: &Palette) -> Index {
+    const fn fill_color(&self, _palette: &Palette) -> Index {
         app_color::BACKGROUND
     }
 

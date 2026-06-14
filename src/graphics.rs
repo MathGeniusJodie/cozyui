@@ -123,7 +123,7 @@ impl Swap {
 }
 
 /// Precomputed `Index` -> output BGRA table for the present pass.
-pub(crate) type PresentLut = [[u8; Framebuffer::BYTES_PER_PIXEL]; 256];
+pub type PresentLut = [[u8; Framebuffer::BYTES_PER_PIXEL]; 256];
 
 pub struct Palette {
     colors: Vec<Rgb>,
@@ -663,13 +663,13 @@ impl Framebuffer {
             let copy_h = height.min(self.height - dest_y);
             for y in 0..copy_h {
                 let row = self.row_indices_mut(dest_y + y, dest_x, copy_w);
-                for x in 0..copy_w {
+                for (x, slot) in row.iter_mut().enumerate() {
                     let index = sprite.at(src.x + x, src.y + y);
                     let Some(resolved) = palette.resolve_index(index, dest_x + x, dest_y + y)
                     else {
                         continue;
                     };
-                    row[x] = resolved;
+                    *slot = resolved;
                 }
             }
             return;

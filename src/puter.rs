@@ -210,7 +210,7 @@ impl Puter {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn fill_color(&self, _palette: &Palette) -> Index {
+    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
         TRANSPARENT
     }
 
@@ -537,7 +537,7 @@ impl Puter {
     }
 
     #[allow(clippy::unused_self)]
-    fn background_terminal_bg_color(&self, _palette: &Palette) -> Index {
+    const fn background_terminal_bg_color(&self, _palette: &Palette) -> Index {
         palette_color::BLACK
     }
 }
@@ -896,7 +896,7 @@ impl DisplaySettings {
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    fn glow_color(&self, _palette: &Palette) -> Index {
+    const fn glow_color(&self, _palette: &Palette) -> Index {
         match self.text_mode {
             TextMode::Green => COLOR_GREEN_GLOW,
             TextMode::Orange => COLOR_ORANGE_GLOW,

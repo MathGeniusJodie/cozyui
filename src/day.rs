@@ -100,7 +100,7 @@ impl Day {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn fill_color(&self, _palette: &Palette) -> Index {
+    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
         TRANSPARENT
     }
 

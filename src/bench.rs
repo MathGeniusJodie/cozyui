@@ -57,7 +57,6 @@ fn bench_draw_sprite() {
 #[test]
 #[ignore]
 fn bench_fill_rect() {
-    let palette = palette();
     let mut fb = Framebuffer::new(800, 600, 0);
     time("fill_rect 800x600", 500, || {
         fb.fill_rect(0, 0, 800, 600, 3);
