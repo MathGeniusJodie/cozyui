@@ -632,10 +632,11 @@ impl Framebuffer {
         let width = src.w.min(sprite.width.saturating_sub(src.x));
         let height = src.h.min(sprite.height.saturating_sub(src.y));
 
-        // Unscaled, unswapped, unclipped draws write rows directly instead of
-        // going through fill_rect per pixel — the common case for full-size
-        // sprite blits.
-        if scale == 1 && swap.is_none() && clip.is_none() && dest_x >= 0 && dest_y >= 0 {
+        // Unscaled, unclipped draws write rows directly instead of going through
+        // fill_rect per pixel — the common case for full-size sprite blits. A
+        // per-draw swap is fine here; it only changes how each index resolves,
+        // not the row-at-a-time write pattern.
+        if scale == 1 && clip.is_none() && dest_x >= 0 && dest_y >= 0 {
             let dest_x = dest_x as usize;
             let dest_y = dest_y as usize;
             if dest_x >= self.width || dest_y >= self.height {
@@ -647,7 +648,11 @@ impl Framebuffer {
                 let row = self.row_bytes_mut(dest_y + y, dest_x, copy_w);
                 for x in 0..copy_w {
                     let index = sprite.at(src.x + x, src.y + y);
-                    let Some(color) = palette.resolve(index, dest_x + x, dest_y + y) else {
+                    let color = swap.map_or_else(
+                        || palette.resolve(index, dest_x + x, dest_y + y),
+                        |swap| palette.resolve_paint(swap.paint(index), dest_x + x, dest_y + y),
+                    );
+                    let Some(color) = color else {
                         continue;
                     };
                     let offset = x * Self::BYTES_PER_PIXEL;

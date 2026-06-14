@@ -786,12 +786,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         app.toodle.maintain()?;
 
         let mut pending_motion_widget = None;
+        // Coalesce input redraws: key auto-repeat and rapid clicks can deliver
+        // many events in a single drain. Repainting per event piles up frames
+        // faster than they display and makes typing lag. We update state for
+        // every event but repaint the focused widget at most once per batch.
+        let mut needs_input_redraw = false;
         while let Some(event) = xwin.conn.poll_for_event()? {
             match event {
                 XEvent::Expose(_) => {
                     app.render(&mut fb, &palette);
                     xwin.draw(&fb)?;
                     drew_frame = true;
+                    needs_input_redraw = false;
                     pending_motion_widget = None;
                 }
                 XEvent::KeyPress(event) => {
@@ -804,8 +810,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if let Some(copy_text) = app.handle_key_press(&input, paste_text.as_deref())? {
                         xwin.set_clipboard_text(copy_text)?;
                     }
-                    redraw_after_input(&mut app, &mut fb, &mut xwin, &palette)?;
-                    drew_frame = true;
+                    needs_input_redraw = true;
                 }
                 XEvent::KeyRelease(event) => {
                     xwin.keyboard.release(event.detail);
@@ -829,8 +834,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         {
                             xwin.set_clipboard_text(copy_text)?;
                         }
-                        redraw_after_input(&mut app, &mut fb, &mut xwin, &palette)?;
-                        drew_frame = true;
+                        needs_input_redraw = true;
                     }
                     _ => {}
                 },
@@ -854,6 +858,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 XEvent::DestroyNotify(_) => running = false,
                 _ => {}
             }
+        }
+        if needs_input_redraw {
+            redraw_after_input(&mut app, &mut fb, &mut xwin, &palette)?;
+            drew_frame = true;
         }
         if let Some(widget) = pending_motion_widget {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;

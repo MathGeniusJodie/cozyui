@@ -115,7 +115,18 @@ pub struct Toodle {
     // typing pause instead (and flushed on shutdown).
     dirty_sections: [bool; SECTION_COUNT],
     last_edit: Instant,
+    // The static page-stack art (shadows + page images + checkboxes) is the
+    // expensive part to draw and only changes when the stack geometry does.
+    // We cache it and blit it each frame, painting the live front-page text and
+    // cursor on top. `page_art_key` is the geometry signature it was built for.
+    page_art: Option<Framebuffer>,
+    page_art_key: Option<PageArtKey>,
 }
+
+/// Everything the cached page art depends on: which page is on top and how many
+/// pages each section contributes (which fixes the stack height and per-page
+/// section colors). Text, focus, checks, and hover are painted live on top.
+type PageArtKey = (usize, [usize; SECTION_COUNT]);
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
@@ -158,6 +169,8 @@ impl Toodle {
             eraser_hovered: false,
             dirty_sections: [false; SECTION_COUNT],
             last_edit: Instant::now(),
+            page_art: None,
+            page_art_key: None,
         })
     }
 
@@ -175,7 +188,42 @@ impl Toodle {
         palette.color(palette_color::BLACK).transparent()
     }
 
-    pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
+    /// Geometry signature the cached page art depends on.
+    fn page_art_key(&self) -> PageArtKey {
+        let mut counts = [0usize; SECTION_COUNT];
+        for (count, todos) in counts.iter_mut().zip(self.todos.iter()) {
+            *count = todos.page_count();
+        }
+        (self.page, counts)
+    }
+
+    pub(crate) fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        let (w, h) = (self.width(), self.height());
+        let key = self.page_art_key();
+        let stale = self.page_art_key != Some(key)
+            || self
+                .page_art
+                .as_ref()
+                .is_none_or(|art| art.width != w || art.height != h);
+        if stale {
+            let mut art = match self.page_art.take() {
+                Some(art) if art.width == w && art.height == h => art,
+                _ => Framebuffer::new(w, h, self.fill_color(palette)),
+            };
+            self.build_page_art(&mut art, palette);
+            self.page_art = Some(art);
+            self.page_art_key = Some(key);
+        }
+
+        if let Some(art) = &self.page_art {
+            fb.blit_from(art, 0, 0);
+        }
+        self.draw_front_overlay(fb, palette);
+    }
+
+    /// The expensive, rarely-changing layer: the stacked page shadows, page
+    /// images, and checkboxes. Built only when the stack geometry changes.
+    fn build_page_art(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.clear(self.fill_color(palette));
 
         let page_count = self.logical_page_count();
@@ -184,7 +232,75 @@ impl Toodle {
         }
         for visual_page in (0..page_count).rev() {
             let logical_page = (self.page + visual_page) % page_count;
-            self.render_page(fb, palette, logical_page, visual_page);
+            let PageRef { section, .. } = self.page_ref(logical_page);
+            let page_offset = visual_page * PAGE_STACK_OFFSET;
+            let page_x = PAGE_OFFSET_X + page_offset;
+            let page_y = page_offset;
+            let page_image = &self.pages[visual_page.min(self.pages.len() - 1)];
+            draw_page_image(
+                fb,
+                page_image,
+                section_color(section),
+                palette,
+                page_x,
+                page_y,
+            );
+            fb.draw_sprite(
+                &self.checkboxes,
+                (page_x * SCALE) as isize,
+                (page_y * SCALE) as isize,
+                SCALE,
+                palette,
+            );
+        }
+    }
+
+    /// The live layer, painted on top of the cached art every frame. Only the
+    /// front page is interactive and its interior is the only thing not hidden
+    /// behind the page on top of it, so this is O(1) in the page count.
+    fn draw_front_overlay(&self, fb: &mut Framebuffer, palette: &Palette) {
+        let page_count = self.logical_page_count();
+        let logical_page = self.page % page_count;
+        let PageRef { section, page } = self.page_ref(logical_page);
+
+        self.draw_focused_pencil_shadow(fb, palette);
+
+        let text_color = palette.color(palette_color::BLACK);
+        let completed_text_color = if self.eraser_hovered {
+            palette.color(palette_color::GUNMETAL)
+        } else {
+            text_color
+        };
+        for (line, _) in LINE_Y.iter().enumerate().take(LINE_COUNT) {
+            let todo = self.todos[section].item(page, line);
+            if todo.checked {
+                self.draw_check(fb, palette, section, line, 0);
+            }
+
+            if self.focused_line == Some(line) {
+                self.draw_todo_selection(
+                    fb,
+                    &todo.text,
+                    line,
+                    PAGE_OFFSET_X + TEXT_X,
+                    LINE_Y[line] - TEXT_Y_OFFSET,
+                    palette.color(palette_color::LAVENDER),
+                );
+            }
+            draw_todo_text(
+                fb,
+                &self.font,
+                &todo.text,
+                (PAGE_OFFSET_X + TEXT_X) * SCALE,
+                (LINE_Y[line] - TEXT_Y_OFFSET) * SCALE,
+                GLYPH_SCALE * SCALE,
+                if todo.checked {
+                    completed_text_color
+                } else {
+                    text_color
+                },
+                text_chars_per_row(line),
+            );
         }
 
         fb.draw_sprite(
@@ -212,76 +328,6 @@ impl Toodle {
             palette,
             Paint::Solid(app_color::BACKGROUND_SHADOW),
         );
-    }
-
-    fn render_page(
-        &self,
-        fb: &mut Framebuffer,
-        palette: &Palette,
-        logical_page: usize,
-        visual_page: usize,
-    ) {
-        let page_image = &self.pages[visual_page.min(self.pages.len() - 1)];
-        let PageRef { section, page } = self.page_ref(logical_page);
-        let page_offset = visual_page * PAGE_STACK_OFFSET;
-        let page_x = PAGE_OFFSET_X + page_offset;
-        let page_y = page_offset;
-        draw_page_image(
-            fb,
-            page_image,
-            section_color(section),
-            palette,
-            page_x,
-            page_y,
-        );
-        fb.draw_sprite(
-            &self.checkboxes,
-            (page_x * SCALE) as isize,
-            (page_y * SCALE) as isize,
-            SCALE,
-            palette,
-        );
-        if visual_page == 0 {
-            self.draw_focused_pencil_shadow(fb, palette);
-        }
-
-        let text_color = palette.color(palette_color::BLACK);
-        let completed_text_color = if self.eraser_hovered {
-            palette.color(palette_color::GUNMETAL)
-        } else {
-            text_color
-        };
-        for (line, _) in LINE_Y.iter().enumerate().take(LINE_COUNT) {
-            let todo = self.todos[section].item(page, line);
-            if todo.checked {
-                self.draw_check(fb, palette, section, line, page_offset);
-            }
-
-            if visual_page == 0 && self.focused_line == Some(line) {
-                self.draw_todo_selection(
-                    fb,
-                    &todo.text,
-                    line,
-                    page_x + TEXT_X,
-                    page_y + LINE_Y[line] - TEXT_Y_OFFSET,
-                    palette.color(palette_color::LAVENDER),
-                );
-            }
-            draw_todo_text(
-                fb,
-                &self.font,
-                &todo.text,
-                (page_x + TEXT_X) * SCALE,
-                (page_y + LINE_Y[line] - TEXT_Y_OFFSET) * SCALE,
-                GLYPH_SCALE * SCALE,
-                if todo.checked {
-                    completed_text_color
-                } else {
-                    text_color
-                },
-                text_chars_per_row(line),
-            );
-        }
     }
 
     pub(crate) fn click(&mut self, x: i16, y: i16) -> Result<bool, Box<dyn Error>> {
@@ -358,7 +404,7 @@ impl Toodle {
         let was_hovered = self.eraser_hovered;
         if x < 0 || y < 0 {
             self.eraser_hovered = false;
-            return was_hovered != self.eraser_hovered;
+            return was_hovered;
         }
         self.eraser_hovered = self.eraser_at(x, y);
         was_hovered != self.eraser_hovered
