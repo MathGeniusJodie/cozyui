@@ -484,14 +484,8 @@ impl Fwends {
                 if text_y >= viewport_top as isize
                     && text_y + self.font.cell_h() as isize <= viewport_bottom as isize
                 {
-                    self.font.draw_text(
-                        fb,
-                        line,
-                        text_x,
-                        text_y as usize,
-                        1,
-                        palette_color::BLACK,
-                    );
+                    self.font
+                        .draw_text(fb, line, text_x, text_y as usize, 1, palette_color::BLACK);
                 }
                 text_y += LINE_H as isize;
             }

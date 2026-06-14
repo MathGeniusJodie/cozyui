@@ -19,7 +19,8 @@ use xkbcommon::xkb::keysyms;
 use crate::palette_color;
 use crate::text_input::KeyInput;
 use crate::{
-    Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Rgba, Sprite, TRANSPARENT, decode_png_with_size,
+    Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Rgba, Sprite, TRANSPARENT,
+    decode_png_with_size,
 };
 
 const BG_SCALE: usize = 1;
@@ -316,7 +317,7 @@ impl Puter {
                 .as_ref()
                 .is_some_and(|selection| selection.contains(indexed.point));
             if selected {
-                fb.fill_rect(x, y, cell_w, cell_h, COLOR_SELECTION );
+                fb.fill_rect(x, y, cell_w, cell_h, COLOR_SELECTION);
             }
             let style = self.cell_style(cell, selected, palette);
             self.draw_cell(fb, cell, style, x, y);
@@ -326,13 +327,7 @@ impl Puter {
         {
             let cursor_x = art_x(SCREEN_SOURCE_X) + cursor_point.column.0 * cell_w;
             let cursor_y = art_y(SCREEN_SOURCE_Y) + cursor_point.line * cell_h;
-            fb.fill_rect(
-                cursor_x,
-                cursor_y,
-                cell_w,
-                cell_h,
-                COLOR_CURSOR ,
-            );
+            fb.fill_rect(cursor_x, cursor_y, cell_w, cell_h, COLOR_CURSOR);
         }
 
         if let Some(index) = self.active_button {
@@ -368,7 +363,7 @@ impl Puter {
             art_y(CONTROL_CLEAR_Y),
             CONTROL_CLEAR_W * BG_SCALE,
             CONTROL_CLEAR_H * BG_SCALE,
-            palette_color::CREAM ,
+            palette_color::CREAM,
         );
         draw_mode_buttons(fb, &self.button_sprites, palette);
         draw_lights(fb, self.settings, palette);
@@ -417,9 +412,9 @@ impl Puter {
             bg = Some(inverse_bg);
         }
         if selected {
-            fg = palette_color::CREAM ;
-            bg = Some(COLOR_SELECTION );
-            glow = Some(COLOR_SELECTION );
+            fg = palette_color::CREAM;
+            bg = Some(COLOR_SELECTION);
+            glow = Some(COLOR_SELECTION);
         } else if self.settings.high_brightness {
             let style = self.high_brightness_terminal_style(fg_color, palette);
             fg = style.fg;
@@ -477,8 +472,8 @@ impl Puter {
             }
             Color::Named(NamedColor::DimForeground) => self.settings.glow_color(palette),
             Color::Named(NamedColor::Background) => self.background_terminal_bg_color(palette),
-            Color::Named(NamedColor::Cursor) => COLOR_CURSOR ,
-            Color::Named(named) => named_terminal_palette_index(named) ,
+            Color::Named(NamedColor::Cursor) => COLOR_CURSOR,
+            Color::Named(named) => named_terminal_palette_index(named),
             Color::Indexed(index) => indexed_terminal_color(index, palette),
             Color::Spec(rgb) => palette.nearest_index(terminal_rgb(rgb)),
         }
@@ -493,10 +488,10 @@ impl Puter {
             Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
                 self.settings.glow_color(palette)
             }
-            Color::Named(NamedColor::DimForeground) => TERM_COLOR_DIM_WHITE ,
+            Color::Named(NamedColor::DimForeground) => TERM_COLOR_DIM_WHITE,
             Color::Named(NamedColor::Background) => self.settings.glow_color(palette),
-            Color::Named(NamedColor::Cursor) => COLOR_CURSOR ,
-            Color::Named(named) => named_terminal_glow_palette_index(named) ,
+            Color::Named(NamedColor::Cursor) => COLOR_CURSOR,
+            Color::Named(named) => named_terminal_glow_palette_index(named),
             Color::Indexed(index) => indexed_terminal_glow_color(index, palette),
             Color::Spec(rgb) => palette.nearest_index(terminal_rgb(rgb)),
         }
@@ -517,12 +512,12 @@ impl Puter {
             Color::Named(named) if bright_terminal_named_color(named).is_some() => {
                 TerminalTextStyle {
                     fg: (palette_color::CREAM),
-                    glow: Some(named_terminal_glow_palette_index(named) ),
+                    glow: Some(named_terminal_glow_palette_index(named)),
                 }
             }
             Color::Indexed(index @ 8..=15) => TerminalTextStyle {
                 fg: (palette_color::CREAM),
-                glow: Some(ANSI_16_GLOW_TO_NA16[index as usize] ),
+                glow: Some(ANSI_16_GLOW_TO_NA16[index as usize]),
             },
             Color::Named(NamedColor::Foreground | NamedColor::BrightForeground) => {
                 TerminalTextStyle {
@@ -543,7 +538,7 @@ impl Puter {
 
     #[allow(clippy::unused_self)]
     fn background_terminal_bg_color(&self, _palette: &Palette) -> Index {
-        palette_color::BLACK 
+        palette_color::BLACK
     }
 }
 
@@ -895,16 +890,16 @@ impl DisplaySettings {
         }
 
         match self.text_mode {
-            TextMode::Green => COLOR_GREEN_TEXT ,
-            TextMode::Orange => COLOR_ORANGE_TEXT ,
+            TextMode::Green => COLOR_GREEN_TEXT,
+            TextMode::Orange => COLOR_ORANGE_TEXT,
         }
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
     fn glow_color(&self, _palette: &Palette) -> Index {
         match self.text_mode {
-            TextMode::Green => COLOR_GREEN_GLOW ,
-            TextMode::Orange => COLOR_ORANGE_GLOW ,
+            TextMode::Green => COLOR_GREEN_GLOW,
+            TextMode::Orange => COLOR_ORANGE_GLOW,
         }
     }
 
@@ -1104,7 +1099,7 @@ const fn bright_terminal_named_color(color: NamedColor) -> Option<NamedColor> {
 
 fn indexed_terminal_color(index: u8, palette: &Palette) -> Index {
     if index < 16 {
-        return ANSI_16_TO_NA16[index as usize] ;
+        return ANSI_16_TO_NA16[index as usize];
     }
 
     palette.nearest_index(indexed_terminal_rgb(index))
@@ -1112,7 +1107,7 @@ fn indexed_terminal_color(index: u8, palette: &Palette) -> Index {
 
 fn indexed_terminal_glow_color(index: u8, palette: &Palette) -> Index {
     if index < 16 {
-        return ANSI_16_GLOW_TO_NA16[index as usize] ;
+        return ANSI_16_GLOW_TO_NA16[index as usize];
     }
 
     palette.nearest_index(indexed_terminal_rgb(index))
@@ -1227,14 +1222,7 @@ const SOURCE_PALETTE_RGB: [(u8, u8, u8); 16] = [
     (31, 14, 28),
 ];
 
-fn fill_source_rect(
-    fb: &mut Framebuffer,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    color: Index,
-) {
+fn fill_source_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize, color: Index) {
     fb.fill_rect(
         x * BG_SCALE,
         y * BG_SCALE,

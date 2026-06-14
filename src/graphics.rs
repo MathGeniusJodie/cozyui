@@ -466,11 +466,7 @@ impl Framebuffer {
 
     /// Convert the whole framebuffer to output BGRA bytes via `lut` — the only
     /// place the index->color step happens, once per frame.
-    pub(crate) fn present_into(
-        &self,
-        out: &mut [u8],
-        lut: &[[u8; Self::BYTES_PER_PIXEL]; 256],
-    ) {
+    pub(crate) fn present_into(&self, out: &mut [u8], lut: &[[u8; Self::BYTES_PER_PIXEL]; 256]) {
         for (pixel, &index) in out
             .chunks_exact_mut(Self::BYTES_PER_PIXEL)
             .zip(self.pixels.iter())
@@ -524,7 +520,8 @@ impl Framebuffer {
             let y0 = band * scale;
             let band_end = (y0 + scale).min(self.height);
             if opaque_row {
-                self.row_indices_mut(y0, 0, self.width).copy_from_slice(&row);
+                self.row_indices_mut(y0, 0, self.width)
+                    .copy_from_slice(&row);
                 let first_row = self.pixel_offset(0, y0);
                 for y in y0 + 1..band_end {
                     let dest = self.pixel_offset(0, y);
