@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::poco_font;
-use crate::{Framebuffer, Palette, Rgba, Sprite};
+use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
 const WAVEY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wavey.png");
 const STATIONS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/radio_stations.txt");
@@ -155,8 +155,8 @@ impl Wavey {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(palette_color::BLACK).transparent()
+    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -432,12 +432,12 @@ impl Wavey {
         }
     }
 
-    fn draw_tuner(&self, fb: &mut Framebuffer, palette: &Palette) {
+    fn draw_tuner(&self, fb: &mut Framebuffer, _palette: &Palette) {
         if self.stations.is_empty() {
             return;
         }
 
-        let text = palette.color(palette_color::LAVENDER);
+        let text = palette_color::LAVENDER;
         let count = self.stations.len();
         for (index, station) in self.stations.iter().enumerate() {
             let center = station_center(index, count);
@@ -462,7 +462,7 @@ impl Wavey {
             TUNER_MARK_Y,
             TUNER_MARK_SIZE,
             TUNER_MARK_SIZE,
-            palette.color(palette_color::ROSE),
+            palette_color::ROSE,
         );
     }
 
@@ -471,7 +471,7 @@ impl Wavey {
         copy_moved_knob_marker(&self.image, fb, volume_angle(self.volume), palette);
     }
 
-    fn draw_title(&self, fb: &mut Framebuffer, palette: &Palette) {
+    fn draw_title(&self, fb: &mut Framebuffer, _palette: &Palette) {
         if self.current_title.is_empty() {
             return;
         }
@@ -482,10 +482,10 @@ impl Wavey {
             y.saturating_sub(TITLE_BOX_PAD),
             TITLE_W + TITLE_BOX_PAD * 2,
             self.font.cell_h() + TITLE_BOX_PAD * 2,
-            palette.color(palette_color::BLACK),
+            palette_color::BLACK,
         );
 
-        let cream = palette.color(palette_color::CREAM);
+        let cream = palette_color::CREAM;
         let text_w = self.font.text_width(&self.current_title);
         if text_w <= TITLE_W {
             let x = TITLE_X + (TITLE_W - text_w) / 2;
@@ -754,8 +754,8 @@ fn volume_angle(volume: u8) -> f32 {
     ((f32::from(volume) / f32::from(MAX_VOLUME)) * 2.0).mul_add(PI, FRAC_PI_2)
 }
 
-fn clear_clock_art(fb: &mut Framebuffer, palette: &Palette) {
-    let black = palette.color(palette_color::BLACK);
+fn clear_clock_art(fb: &mut Framebuffer, _palette: &Palette) {
+    let black = palette_color::BLACK;
     fb.fill_rect(DISPLAY_X, DISPLAY_Y, CLOCK_CLEAR_W, CLOCK_CLEAR_H, black);
 }
 
@@ -828,7 +828,7 @@ fn copy_clock_pixels(
             }
             let px = dest_x + src.x + x - anchor.0;
             let py = dest_y + src.y + y - anchor.1;
-            if let Some(color) = palette.resolve(index, px, py) {
+            if let Some(color) = palette.resolve_index(index, px, py) {
                 fb.set_pixel(px, py, color);
             }
         }
@@ -916,7 +916,7 @@ fn clear_knob_marker(image: &Sprite, fb: &mut Framebuffer, palette: &Palette) {
     for y in KNOB_MARKER_SRC_Y..KNOB_MARKER_SRC_Y + KNOB_MARKER_SRC_H {
         for x in KNOB_MARKER_SRC_X..KNOB_MARKER_SRC_X + KNOB_MARKER_SRC_W {
             if image.at(x, y) == palette_color::LAVENDER
-                && let Some(color) = palette.resolve(palette_color::PLUM, x, y)
+                && let Some(color) = palette.resolve_index(palette_color::PLUM, x, y)
             {
                 fb.set_pixel(x, y, color);
             }
@@ -949,7 +949,7 @@ fn copy_moved_knob_marker(
             let dest_y = dest_top + (y - KNOB_MARKER_SRC_Y) as isize;
             if dest_x >= 0
                 && dest_y >= 0
-                && let Some(color) = palette.resolve(index, dest_x as usize, dest_y as usize)
+                && let Some(color) = palette.resolve_index(index, dest_x as usize, dest_y as usize)
             {
                 fb.set_pixel(dest_x as usize, dest_y as usize, color);
             }

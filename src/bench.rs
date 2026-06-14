@@ -32,12 +32,12 @@ fn palette() -> Palette {
 fn bench_clear_scaled() {
     let palette = palette();
     let desk = Sprite::load_native(DESK_PATH, &palette).unwrap();
-    let mut fb = Framebuffer::new(desk.width, desk.height, palette.color(0));
+    let mut fb = Framebuffer::new(desk.width, desk.height, 0);
     time("clear_scaled (1x)", 200, || {
         fb.clear_scaled(&desk, 1, &palette);
     });
 
-    let mut fb3 = Framebuffer::new(desk.width * 3, desk.height * 3, palette.color(0));
+    let mut fb3 = Framebuffer::new(desk.width * 3, desk.height * 3, 0);
     time("clear_scaled (3x)", 50, || {
         fb3.clear_scaled(&desk, 3, &palette);
     });
@@ -48,7 +48,7 @@ fn bench_clear_scaled() {
 fn bench_draw_sprite() {
     let palette = palette();
     let desk = Sprite::load_native(DESK_PATH, &palette).unwrap();
-    let mut fb = Framebuffer::new(desk.width, desk.height, palette.color(0));
+    let mut fb = Framebuffer::new(desk.width, desk.height, 0);
     time("draw_sprite (1x)", 200, || {
         fb.draw_sprite(&desk, 0, 0, 1, &palette);
     });
@@ -57,10 +57,9 @@ fn bench_draw_sprite() {
 #[test]
 #[ignore]
 fn bench_fill_rect() {
-    let palette = palette();
-    let mut fb = Framebuffer::new(800, 600, palette.color(0));
+    let mut fb = Framebuffer::new(800, 600, 0);
     time("fill_rect 800x600", 500, || {
-        fb.fill_rect(0, 0, 800, 600, palette.color(3));
+        fb.fill_rect(0, 0, 800, 600, 3);
     });
 }
 
@@ -69,7 +68,7 @@ fn bench_fill_rect() {
 fn bench_desk_background() {
     let palette = palette();
     let desk = Sprite::load_native(DESK_PATH, &palette).unwrap();
-    let mut fb = Framebuffer::new(1100, 800, palette.color(0));
+    let mut fb = Framebuffer::new(1100, 800, 0);
     let full = crate::Rect::new(0, 0, fb.width, fb.height);
     time("draw_stretched_desk_region (full window)", 100, || {
         crate::draw_stretched_desk_region(&mut fb, &desk, &palette, full);

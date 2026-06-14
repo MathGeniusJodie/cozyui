@@ -8,7 +8,7 @@ use crate::app_color;
 use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
-use crate::{Framebuffer, Index, Paint, Palette, Rgba, Sprite, TRANSPARENT};
+use crate::{Framebuffer, Index, Paint, Palette, Sprite, TRANSPARENT};
 
 const WHEEL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/wheel.png");
 const TOTAL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/twirl_total.txt");
@@ -78,8 +78,8 @@ impl Twirl {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(palette_color::BLACK).transparent()
+    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -101,7 +101,7 @@ impl Twirl {
                     TRANSPARENT => continue,
                     other => other,
                 };
-                if let Some(color) = palette.resolve(index, x, y) {
+                if let Some(color) = palette.resolve_index(index, x, y) {
                     fb.set_pixel(x, y, color);
                 }
             }
@@ -176,10 +176,10 @@ impl Twirl {
         }
     }
 
-    fn draw_numbers(&self, fb: &mut Framebuffer, palette: &Palette) {
+    fn draw_numbers(&self, fb: &mut Framebuffer, _palette: &Palette) {
         let center_x = self.wheel.width as f32 / 2.0;
         let center_y = self.wheel.height as f32 / 2.0;
-        let color = palette.color(palette_color::BLACK);
+        let color = palette_color::BLACK;
         for (segment, number) in SEGMENT_NUMBERS.iter().enumerate() {
             let angle = segment_center_angle(segment) - self.angle;
             let text_w = self.font.text_width(number);
@@ -197,13 +197,13 @@ impl Twirl {
         }
     }
 
-    fn draw_total(&self, fb: &mut Framebuffer, palette: &Palette) {
+    fn draw_total(&self, fb: &mut Framebuffer, _palette: &Palette) {
         let total = self.total.to_string();
         let text_w = self.font.text_width(&total);
         let x = self.wheel.width.saturating_sub(text_w) / 2;
         let y = self.wheel.height + TOTAL_GAP;
         self.font
-            .draw_text(fb, &total, x, y, 1, palette.color(palette_color::CREAM));
+            .draw_text(fb, &total, x, y, 1, palette_color::CREAM);
     }
 
     fn add_landed_value(&mut self) -> Result<(), Box<dyn Error>> {

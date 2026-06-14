@@ -7,7 +7,7 @@ use crate::palette_color;
 use crate::pixolde_bold_font;
 use crate::poco_font;
 use crate::rozha_one_48_font;
-use crate::{Framebuffer, Paint, Palette, Rgb, Rgba, Sprite, draw_filled_circle};
+use crate::{Framebuffer, Index, Paint, Palette, Sprite, TRANSPARENT, draw_filled_circle};
 
 const WIDTH: usize = 116;
 const HEIGHT: usize = 116;
@@ -100,8 +100,8 @@ impl Day {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(palette_color::BLACK).transparent()
+    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -126,12 +126,12 @@ impl Day {
         self.calendar_mode = !self.calendar_mode;
     }
 
-    fn render_day(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let black = palette.color(palette_color::BLACK);
-        let cream = palette.color(palette_color::CREAM);
-        let crimson = palette.color(palette_color::CRIMSON);
-        let purple = palette.color(palette_color::PURPLE);
-        let rose = palette.color(palette_color::ROSE);
+    fn render_day(&self, fb: &mut Framebuffer, _palette: &Palette) {
+        let black = palette_color::BLACK;
+        let cream = palette_color::CREAM;
+        let crimson = palette_color::CRIMSON;
+        let purple = palette_color::PURPLE;
+        let rose = palette_color::ROSE;
         let year_h = self.tight_height(&self.label_font, &self.date.year);
         let weekday_h = self.tight_height(&self.label_font, &self.date.weekday);
         let day_h = self.tight_height(&self.number_font, &self.date.day);
@@ -148,10 +148,10 @@ impl Day {
         self.draw_centered_tight(fb, &self.label_font, &self.date.month, y, black);
     }
 
-    fn render_calendar(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let black = palette.color(palette_color::BLACK);
-        let cream = palette.color(palette_color::CREAM);
-        let crimson = palette.color(palette_color::CRIMSON);
+    fn render_calendar(&self, fb: &mut Framebuffer, _palette: &Palette) {
+        let black = palette_color::BLACK;
+        let cream = palette_color::CREAM;
+        let crimson = palette_color::CRIMSON;
         let title = format!(
             "{} {}",
             short_month_name(self.date.month_index),
@@ -213,7 +213,7 @@ impl Day {
         font: &BitmapFont,
         text: &str,
         y: usize,
-        color: Rgb,
+        color: Index,
     ) {
         let Some(bounds) = font.text_ink_bounds(text) else {
             return;
@@ -230,7 +230,7 @@ impl Day {
         font: &BitmapFont,
         text: &str,
         y: usize,
-        color: Rgb,
+        color: Index,
     ) {
         let x = centered_x(font.text_width(text));
         font.draw_text(fb, text, x, y, 1, color);
@@ -242,7 +242,7 @@ impl Day {
         text: &str,
         col: usize,
         y: usize,
-        color: Rgb,
+        color: Index,
     ) {
         let cell_x = CALENDAR_LEFT + col * CALENDAR_COL_W;
         let text_x =

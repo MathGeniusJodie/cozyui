@@ -10,7 +10,7 @@ use crate::palette_color;
 use crate::peanut_money_font;
 use crate::text_edit::{TextEdit, TextEditOutcome};
 use crate::text_input::{EditKey, KeyInput, edit_key};
-use crate::{Framebuffer, Index, Paint, Palette, Rect, Rgb, Rgba, Sprite, Swap};
+use crate::{Framebuffer, Index, Paint, Palette, Rect, Sprite, Swap, TRANSPARENT};
 
 const SCALE: usize = 1;
 const GLYPH_SCALE: usize = 1;
@@ -184,8 +184,8 @@ impl Toodle {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn fill_color(&self, palette: &Palette) -> Rgba {
-        palette.color(palette_color::BLACK).transparent()
+    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     /// Geometry signature the cached page art depends on.
@@ -265,9 +265,9 @@ impl Toodle {
 
         self.draw_focused_pencil_shadow(fb, palette);
 
-        let text_color = palette.color(palette_color::BLACK);
+        let text_color = palette_color::BLACK;
         let completed_text_color = if self.eraser_hovered {
-            palette.color(palette_color::GUNMETAL)
+            palette_color::GUNMETAL
         } else {
             text_color
         };
@@ -284,7 +284,7 @@ impl Toodle {
                     line,
                     PAGE_OFFSET_X + TEXT_X,
                     LINE_Y[line] - TEXT_Y_OFFSET,
-                    palette.color(palette_color::LAVENDER),
+                    palette_color::LAVENDER,
                 );
             }
             draw_todo_text(
@@ -699,7 +699,7 @@ impl Toodle {
             text_x,
             text_y,
             text_scale,
-            palette.color(palette_color::BLACK),
+            palette_color::BLACK,
             count.chars().count(),
         );
     }
@@ -805,7 +805,7 @@ impl Toodle {
         line: usize,
         x: usize,
         y: usize,
-        color: Rgb,
+        color: Index,
     ) {
         draw_wrapped_selection(
             fb,
@@ -1195,7 +1195,7 @@ fn draw_todo_text(
     x: usize,
     y: usize,
     scale: usize,
-    color: Rgb,
+    color: Index,
     chars_per_row: usize,
 ) {
     let max_width = chars_per_row * 6;
@@ -1299,7 +1299,7 @@ fn draw_wrapped_selection(
     y: usize,
     max_width: usize,
     scale: usize,
-    color: Rgb,
+    color: Index,
 ) {
     let Some((selection_start, selection_end)) = selection else {
         return;
