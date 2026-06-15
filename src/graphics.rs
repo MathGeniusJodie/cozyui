@@ -674,6 +674,34 @@ impl Framebuffer {
         }
     }
 
+    /// 9-slice blit: stretch `image` to `w`x`h` at `(x, y)`, keeping the four
+    /// corner caps unscaled and tiling/stretching only the middle bands.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_resized(
+        &mut self,
+        image: &Sprite,
+        palette: &Palette,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        left_cap: usize,
+        right_cap: usize,
+        top_cap: usize,
+        bottom_cap: usize,
+    ) {
+        for dy in 0..h {
+            let sy = stretch_source_coord(dy, h, image.height, top_cap, bottom_cap);
+            for dx in 0..w {
+                let sx = stretch_source_coord(dx, w, image.width, left_cap, right_cap);
+                let Some(color) = palette.resolve_index(image.at(sx, sy), x + dx, y + dy) else {
+                    continue;
+                };
+                self.set_pixel(x + dx, y + dy, color);
+            }
+        }
+    }
+
     pub(crate) fn blit_from(&mut self, src: &Self, dest_x: usize, dest_y: usize) {
         if dest_x >= self.width || dest_y >= self.height {
             return;
@@ -757,11 +785,82 @@ pub fn decode_png_with_size(path: &str) -> Result<(usize, usize, Vec<Rgba>), Box
     Ok((info.width as usize, info.height as usize, pixels))
 }
 
+/// Map a destination coordinate back to a source coordinate for a 9-slice
+/// stretch: the `start_cap`/`end_cap` edges map 1:1, the middle band scales to
+/// fill whatever space remains. Handles the degenerate case where the
+/// destination is smaller than the combined caps without panicking.
+pub fn stretch_source_coord(
+    dest: usize,
+    dest_len: usize,
+    src_len: usize,
+    start_cap: usize,
+    end_cap: usize,
+) -> usize {
+    debug_assert!(src_len > 0, "stretching an empty sprite");
+    debug_assert!(
+        src_len >= start_cap + end_cap,
+        "9-slice caps larger than the sprite"
+    );
+
+    if dest_len <= start_cap + end_cap {
+        let src_middle = src_len.saturating_sub(start_cap + end_cap).max(1);
+        let dest_middle = dest_len.saturating_sub(start_cap + end_cap).max(1);
+        let last = src_len.saturating_sub(1);
+        if dest < start_cap.min(dest_len) {
+            return dest.min(last);
+        }
+        if dest >= dest_len.saturating_sub(end_cap) {
+            return src_len.saturating_sub(dest_len - dest).min(last);
+        }
+        return start_cap + (dest - start_cap) * src_middle / dest_middle;
+    }
+
+    if dest < start_cap {
+        return dest;
+    }
+    if dest >= dest_len - end_cap {
+        return src_len - (dest_len - dest);
+    }
+
+    let src_middle = src_len - start_cap - end_cap;
+    let dest_middle = dest_len - start_cap - end_cap;
+    start_cap + (dest - start_cap) * src_middle / dest_middle
+}
+
 const fn color_distance(a: Rgb, b: Rgb) -> u32 {
     let dr = a.r as i32 - b.r as i32;
     let dg = a.g as i32 - b.g as i32;
     let db = a.b as i32 - b.b as i32;
     (dr * dr + dg * dg + db * db) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stretch_is_identity_when_sizes_match() {
+        for dest in 0..30 {
+            assert_eq!(stretch_source_coord(dest, 30, 30, 10, 10), dest);
+        }
+    }
+
+    #[test]
+    fn stretch_preserves_caps_and_stays_in_bounds() {
+        for (dest_len, src_len) in [(60, 30), (30, 30), (12, 30), (3, 30)] {
+            for dest in 0..dest_len {
+                let src = stretch_source_coord(dest, dest_len, src_len, 10, 10);
+                assert!(src < src_len, "dest {dest}/{dest_len} mapped to {src}");
+            }
+            if dest_len > 20 {
+                assert_eq!(stretch_source_coord(0, dest_len, src_len, 10, 10), 0);
+                assert_eq!(
+                    stretch_source_coord(dest_len - 1, dest_len, src_len, 10, 10),
+                    src_len - 1
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

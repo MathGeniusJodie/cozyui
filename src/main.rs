@@ -19,6 +19,7 @@ mod day;
 mod emojimap;
 mod fwends;
 mod graphics;
+mod openrouter;
 mod peanut_money_font;
 #[allow(dead_code)]
 mod pixolde_bold_font;

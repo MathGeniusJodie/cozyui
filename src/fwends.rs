@@ -1,17 +1,12 @@
-use std::env;
 use std::error::Error;
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::fs;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
+use crate::openrouter;
 use crate::palette_color;
 use crate::senpai;
 use crate::text_edit::{TextEdit, TextEditOutcome, char_len};
@@ -62,10 +57,7 @@ const MAX_INPUT_CHARS: usize = 96;
 const INPUT_MAX_LINES: usize = 5;
 const HISTORY_LIMIT: usize = 8;
 const SYSTEM_PROMPT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fwends_system_prompt.txt");
-const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_FALLBACK_MODEL: &str = "@preset/free";
 const USER_NAME: &str = "Jodie";
-const REQUEST_TIMEOUT_SECS: &str = "30";
 const FOCUS_PENCIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/focus_pencil.png");
 const PENCIL_SHADOW_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -516,8 +508,20 @@ impl Fwends {
             }
             for dx in 0..w {
                 let px = x + dx;
-                let sx = stretch_source_coord(dx, w, image.width, style.left_cap, style.right_cap);
-                let sy = stretch_source_coord(dy, h, image.height, style.top_cap, style.bottom_cap);
+                let sx = crate::graphics::stretch_source_coord(
+                    dx,
+                    w,
+                    image.width,
+                    style.left_cap,
+                    style.right_cap,
+                );
+                let sy = crate::graphics::stretch_source_coord(
+                    dy,
+                    h,
+                    image.height,
+                    style.top_cap,
+                    style.bottom_cap,
+                );
                 let Some(color) = palette.resolve_index(image.at(sx, sy), px, py as usize) else {
                     continue;
                 };
@@ -639,10 +643,9 @@ impl Fwends {
     }
 
     fn draw_input(&self, fb: &mut Framebuffer, palette: &Palette) {
-        draw_resized_image(
-            fb,
-            palette,
+        fb.draw_resized(
             &self.input_sticky,
+            palette,
             self.input_sticky_x(),
             self.input_y(),
             self.input_sticky_w(),
@@ -904,32 +907,6 @@ fn lamp_shadow_color(
         other => other,
     };
     palette.resolve_index(mapped, x, y)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_resized_image(
-    fb: &mut Framebuffer,
-    palette: &Palette,
-    image: &Sprite,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    left_cap: usize,
-    right_cap: usize,
-    top_cap: usize,
-    bottom_cap: usize,
-) {
-    for dy in 0..h {
-        let sy = stretch_source_coord(dy, h, image.height, top_cap, bottom_cap);
-        for dx in 0..w {
-            let sx = stretch_source_coord(dx, w, image.width, left_cap, right_cap);
-            let Some(color) = palette.resolve_index(image.at(sx, sy), x + dx, y + dy) else {
-                continue;
-            };
-            fb.set_pixel(x + dx, y + dy, color);
-        }
-    }
 }
 
 fn draw_yellow_pencil_shadow(
@@ -1201,100 +1178,8 @@ fn send_openrouter_request(
     history: &[Message],
     latest_text: &str,
 ) -> Result<String, String> {
-    let api_key =
-        env::var("OPENROUTER_API_KEY").map_err(|_| "OPENROUTER_API_KEY is not set".to_string())?;
-    let body = chat_body(model, system_prompt, history, latest_text);
-    let body_file = CurlBodyFile::new(body.as_bytes())?;
-    let mut child = Command::new("curl")
-        .args(["-sS", "--max-time", REQUEST_TIMEOUT_SECS, "--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("curl failed: {err}"))?;
-    let config = format!(
-        "url = \"{}\"\nheader = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\n",
-        OPENROUTER_URL,
-        curl_config_escape(&api_key),
-        curl_config_escape(&body_file.path_string())
-    );
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "curl stdin was not available".to_string())?;
-    stdin
-        .write_all(config.as_bytes())
-        .map_err(|err| format!("curl config write failed: {err}"))?;
-    drop(stdin);
-    let output = child
-        .wait_with_output()
-        .map_err(|err| format!("curl failed: {err}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(if stderr.trim().is_empty() {
-            format!("OpenRouter request failed with status {}", output.status)
-        } else {
-            stderr.trim().to_string()
-        });
-    }
-
-    let response = String::from_utf8_lossy(&output.stdout);
+    let response = openrouter::post(&chat_body(model, system_prompt, history, latest_text))?;
     extract_content(&response).map_err(|err| format!("{err}: {}", compact_error(&response)))
-}
-
-fn curl_config_escape(text: &str) -> String {
-    // Control chars (esp. newlines) could smuggle extra config lines past the
-    // quoting, so drop them entirely.
-    text.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .collect()
-}
-
-struct CurlBodyFile {
-    path: PathBuf,
-}
-
-impl CurlBodyFile {
-    fn new(contents: &[u8]) -> Result<Self, String> {
-        let path = unique_temp_path();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|err| format!("request body temp file failed: {err}"))?;
-        file.write_all(contents)
-            .map_err(|err| format!("request body temp write failed: {err}"))?;
-        file.sync_all()
-            .map_err(|err| format!("request body temp sync failed: {err}"))?;
-        Ok(Self { path })
-    }
-
-    fn path_string(&self) -> String {
-        self.path.to_string_lossy().into_owned()
-    }
-}
-
-impl Drop for CurlBodyFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn unique_temp_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let mut path = env::temp_dir();
-    path.push(format!(
-        "cozyui-openrouter-{}-{nanos}.json",
-        std::process::id()
-    ));
-    path
 }
 
 /// History as plain {"role", "content"} messages for the senpai pipeline,
@@ -1314,7 +1199,7 @@ fn history_values(history: &[Message]) -> Vec<Value> {
         .collect()
 }
 
-fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text: &str) -> String {
+fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text: &str) -> Value {
     let mut messages = vec![json!({
         "role": "system",
         "content": system_prompt.trim(),
@@ -1337,17 +1222,15 @@ fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text:
     // the requested model must lead the list with the preset as fallback.
     json!({
         "model": model,
-        "models": [model, OPENROUTER_FALLBACK_MODEL],
+        "models": [model, openrouter::FALLBACK_MODEL],
         "messages": messages,
         "reasoning": {"exclude": true},
         "include_reasoning": false,
     })
-    .to_string()
 }
 
-fn extract_content(response: &str) -> Result<String, &'static str> {
-    let value: Value = serde_json::from_str(response).map_err(|_| "invalid OpenRouter JSON")?;
-    let Some(content) = value
+fn extract_content(response: &Value) -> Result<String, &'static str> {
+    let Some(content) = response
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
@@ -1357,27 +1240,11 @@ fn extract_content(response: &str) -> Result<String, &'static str> {
         return Err("OpenRouter response did not include assistant content");
     };
 
-    let text = content_text(content);
+    let text = openrouter::content_text(content);
     if text.trim().is_empty() {
         Err("OpenRouter assistant content was empty")
     } else {
         Ok(normalize_display_text(&text))
-    }
-}
-
-fn content_text(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(|part| {
-                part.get("text")
-                    .and_then(Value::as_str)
-                    .or_else(|| part.get("content").and_then(Value::as_str))
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => String::new(),
     }
 }
 
@@ -1396,52 +1263,27 @@ fn normalize_display_text(text: &str) -> String {
     out
 }
 
-fn compact_error(response: &str) -> String {
-    // Truncate by chars: String::truncate panics on a non-boundary byte.
-    let text: String = response.replace('\n', " ").chars().take(120).collect();
+fn compact_error(response: &Value) -> String {
+    // Prefer the API's own error message; otherwise fall back to a truncated
+    // dump of the response. Truncate by chars: a byte split could panic.
+    if let Some(message) = response
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+    {
+        return message.chars().take(120).collect();
+    }
+    let text: String = response
+        .to_string()
+        .replace('\n', " ")
+        .chars()
+        .take(120)
+        .collect();
     if text.is_empty() {
         "empty OpenRouter response".to_string()
     } else {
         text
     }
-}
-
-fn stretch_source_coord(
-    dest: usize,
-    dest_len: usize,
-    src_len: usize,
-    start_cap: usize,
-    end_cap: usize,
-) -> usize {
-    debug_assert!(src_len > 0, "stretching an empty sprite");
-    debug_assert!(
-        src_len >= start_cap + end_cap,
-        "9-slice caps larger than the sprite"
-    );
-
-    if dest_len <= start_cap + end_cap {
-        let src_middle = src_len.saturating_sub(start_cap + end_cap).max(1);
-        let dest_middle = dest_len.saturating_sub(start_cap + end_cap).max(1);
-        let last = src_len.saturating_sub(1);
-        if dest < start_cap.min(dest_len) {
-            return dest.min(last);
-        }
-        if dest >= dest_len.saturating_sub(end_cap) {
-            return src_len.saturating_sub(dest_len - dest).min(last);
-        }
-        return start_cap + (dest - start_cap) * src_middle / dest_middle;
-    }
-
-    if dest < start_cap {
-        return dest;
-    }
-    if dest >= dest_len - end_cap {
-        return src_len - (dest_len - dest);
-    }
-
-    let src_middle = src_len - start_cap - end_cap;
-    let dest_middle = dest_len - start_cap - end_cap;
-    start_cap + (dest - start_cap) * src_middle / dest_middle
 }
 
 #[cfg(test)]
@@ -1479,40 +1321,16 @@ mod tests {
     }
 
     #[test]
-    fn stretch_is_identity_when_sizes_match() {
-        for dest in 0..30 {
-            assert_eq!(stretch_source_coord(dest, 30, 30, 10, 10), dest);
-        }
-    }
-
-    #[test]
-    fn stretch_preserves_caps_and_stays_in_bounds() {
-        for (dest_len, src_len) in [(60, 30), (30, 30), (12, 30), (3, 30)] {
-            for dest in 0..dest_len {
-                let src = stretch_source_coord(dest, dest_len, src_len, 10, 10);
-                assert!(src < src_len, "dest {dest}/{dest_len} mapped to {src}");
-            }
-            if dest_len > 20 {
-                assert_eq!(stretch_source_coord(0, dest_len, src_len, 10, 10), 0);
-                assert_eq!(
-                    stretch_source_coord(dest_len - 1, dest_len, src_len, 10, 10),
-                    src_len - 1
-                );
-            }
-        }
-    }
-
-    #[test]
     fn extracts_assistant_message_content() {
         let json = r#"{"content":"wrong","choices":[{"message":{"role":"assistant","content":"hello\nthere"}}]}"#;
+        let response: Value = serde_json::from_str(json).unwrap();
 
-        assert_eq!(extract_content(json).as_deref(), Ok("hello there"));
+        assert_eq!(extract_content(&response).as_deref(), Ok("hello there"));
     }
 
     #[test]
     fn chat_body_preserves_unicode_and_escapes_json() {
-        let body = chat_body("model", "system", &[], "hi \"there\" 🩷");
-        let parsed: Value = serde_json::from_str(&body).unwrap();
+        let parsed = chat_body("model", "system", &[], "hi \"there\" 🩷");
 
         assert_eq!(parsed["model"], "model");
         assert_eq!(parsed["models"][0], "model");
@@ -1522,8 +1340,7 @@ mod tests {
 
     #[test]
     fn chat_body_excludes_reasoning_and_omits_tools() {
-        let body = chat_body("model", "system", &[], "hi");
-        let parsed: Value = serde_json::from_str(&body).unwrap();
+        let parsed = chat_body("model", "system", &[], "hi");
 
         assert_eq!(parsed["reasoning"]["exclude"], true);
         assert!(parsed.get("tools").is_none());

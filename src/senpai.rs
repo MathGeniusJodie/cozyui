@@ -35,20 +35,17 @@
 //      cargo run --bin senpai  (interactive chat)
 #![allow(dead_code)]
 
+use crate::openrouter::{self, FALLBACK_MODEL, content_text};
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const API: &str = "https://openrouter.ai/api/v1/chat/completions";
 const BRAVE_ANSWERS_API: &str = "https://api.search.brave.com/res/v1/chat/completions";
 const DEFAULT_SENPAI: &str = "anthropic/claude-opus-4.5";
 // Note: OpenRouter rejects presets whose fallback list has more than 3
 // models ("'models' array must have 3 items or fewer").
 const DEFAULT_STUDENT: &str = "@preset/fast";
-// Appended to every request's routing list so the chat degrades to a free
-// model instead of dying when the requested one errors or credits run out.
-const FALLBACK_MODEL: &str = "@preset/free";
 
 /// Which models play which role, plus an optional persona appended to the
 /// student's system prompt (so a host app can keep its own voice while
@@ -98,7 +95,7 @@ fn curl_post(body: &Value) -> Result<Value, String> {
     if requested != FALLBACK_MODEL {
         body["models"] = json!([requested, FALLBACK_MODEL]);
     }
-    let resp = curl_post_once(&body)?;
+    let resp = openrouter::post(&body)?;
 
     // The response names the model that actually served the request; presets
     // resolve to arbitrary concrete models, so only a non-preset mismatch
@@ -108,28 +105,6 @@ fn curl_post(body: &Value) -> Result<Value, String> {
         println!("[{requested} unavailable; {FALLBACK_MODEL} served {served}]");
     }
     Ok(resp)
-}
-
-fn curl_post_once(body: &Value) -> Result<Value, String> {
-    let key = std::env::var("OPENROUTER_API_KEY")
-        .map_err(|_| "OPENROUTER_API_KEY not set".to_string())?;
-    let out = Command::new("curl")
-        .args(["-s", API, "-H", "Content-Type: application/json"])
-        .arg("-H")
-        .arg(format!("Authorization: Bearer {key}"))
-        .args(["--data-binary", "@-"]) // body via stdin: avoids argv quoting issues
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .and_then(|mut c| {
-            c.stdin
-                .take()
-                .unwrap()
-                .write_all(body.to_string().as_bytes())?;
-            c.wait_with_output()
-        })
-        .map_err(|e| format!("curl failed: {e}"))?;
-    Ok(parse_json_body(&out.stdout))
 }
 
 fn choice(resp: &Value) -> &Value {
@@ -433,20 +408,6 @@ fn html_to_text(html: &str) -> String {
         .replace("&#39;", "'")
         .replace("&nbsp;", " ");
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Message content as plain text: either a JSON string or, when server-side
-/// tools ran, an array of parts whose text fields are concatenated.
-fn content_text(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(|part| part["text"].as_str())
-            .collect::<Vec<_>>()
-            .join(""),
-        _ => String::new(),
-    }
 }
 
 // ------------------------------------------------------------ chat archive
