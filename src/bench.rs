@@ -29,17 +29,12 @@ fn palette() -> Palette {
 
 #[test]
 #[ignore]
-fn bench_clear_scaled() {
+fn bench_fill_from_sprite() {
     let palette = palette();
     let desk = Sprite::load_native(DESK_PATH, &palette).unwrap();
     let mut fb = Framebuffer::new(desk.width, desk.height, 0);
-    time("clear_scaled (1x)", 200, || {
-        fb.clear_scaled(&desk, 1, &palette);
-    });
-
-    let mut fb3 = Framebuffer::new(desk.width * 3, desk.height * 3, 0);
-    time("clear_scaled (3x)", 50, || {
-        fb3.clear_scaled(&desk, 3, &palette);
+    time("fill_from_sprite", 200, || {
+        fb.fill_from_sprite(&desk, &palette);
     });
 }
 
@@ -49,8 +44,8 @@ fn bench_draw_sprite() {
     let palette = palette();
     let desk = Sprite::load_native(DESK_PATH, &palette).unwrap();
     let mut fb = Framebuffer::new(desk.width, desk.height, 0);
-    time("draw_sprite (1x)", 200, || {
-        fb.draw_sprite(&desk, 0, 0, 1, &palette);
+    time("draw_sprite", 200, || {
+        fb.draw_sprite(&desk, 0, 0, &palette);
     });
 }
 

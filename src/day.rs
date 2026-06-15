@@ -109,11 +109,10 @@ impl Day {
             &self.background,
             SHADOW_X_OFFSET,
             SHADOW_Y_OFFSET,
-            1,
             palette,
             Paint::Solid(app_color::BACKGROUND_SHADOW),
         );
-        fb.draw_sprite(&self.background, 0, 0, 1, palette);
+        fb.draw_sprite(&self.background, 0, 0, palette);
 
         if self.calendar_mode {
             self.render_calendar(fb, palette);
@@ -220,7 +219,7 @@ impl Day {
         };
         let x = centered_x(bounds.width()).saturating_add_signed(-bounds.min_x);
         let draw_y = y.saturating_sub(bounds.min_y);
-        font.draw_text(fb, text, x, draw_y, 1, color);
+        font.draw_text(fb, text, x, draw_y, color);
     }
 
     #[allow(clippy::unused_self)]
@@ -233,7 +232,7 @@ impl Day {
         color: Index,
     ) {
         let x = centered_x(font.text_width(text));
-        font.draw_text(fb, text, x, y, 1, color);
+        font.draw_text(fb, text, x, y, color);
     }
 
     fn draw_calendar_cell(
@@ -247,7 +246,7 @@ impl Day {
         let cell_x = CALENDAR_LEFT + col * CALENDAR_COL_W;
         let text_x =
             cell_x + CALENDAR_COL_W.saturating_sub(self.calendar_font.text_width(text)) / 2;
-        self.calendar_font.draw_text(fb, text, text_x, y, 1, color);
+        self.calendar_font.draw_text(fb, text, text_x, y, color);
     }
 
     const fn calendar_cell_center(&self, col: usize, y: usize) -> (isize, isize) {

@@ -500,40 +500,27 @@ impl Framebuffer {
     /// Fill the whole framebuffer with `sprite` scaled up, repeating edge
     /// pixels past the sprite's extent. Transparent pixels keep the
     /// framebuffer's existing content (e.g. a widget's see-through corners).
-    pub(crate) fn clear_scaled(&mut self, sprite: &Sprite, scale: usize, palette: &Palette) {
-        // Resolve each source row once into an index row, write it, and copy it
-        // to the remaining rows of the scaled band; rows with transparency
-        // fall back to per-pixel writes since they can't be blanket-copied.
+    /// Fill the framebuffer from `sprite`, clamping source coords at the
+    /// sprite's edges so pixels past its extent repeat the border row/column.
+    /// Transparent pixels leave the existing framebuffer content intact.
+    pub(crate) fn fill_from_sprite(&mut self, sprite: &Sprite, palette: &Palette) {
+        let sx_map: Vec<usize> = (0..self.width).map(|x| x.min(sprite.width - 1)).collect();
         let mut row = vec![TRANSPARENT; self.width];
-        let sx_map: Vec<usize> = (0..self.width)
-            .map(|x| (x / scale).min(sprite.width - 1))
-            .collect();
-        for band in 0..self.height.div_ceil(scale) {
-            let sy = band.min(sprite.height - 1);
+        for y in 0..self.height {
+            let sy = y.min(sprite.height - 1);
             let mut opaque_row = true;
-            for (x, &sx) in sx_map.iter().enumerate().take(self.width) {
+            for (x, &sx) in sx_map.iter().enumerate() {
                 match palette.resolve_index(sprite.at(sx, sy), sx, sy) {
                     Some(index) => row[x] = index,
                     None => opaque_row = false,
                 }
             }
-            let y0 = band * scale;
-            let band_end = (y0 + scale).min(self.height);
             if opaque_row {
-                self.row_indices_mut(y0, 0, self.width)
-                    .copy_from_slice(&row);
-                let first_row = self.pixel_offset(0, y0);
-                for y in y0 + 1..band_end {
-                    let dest = self.pixel_offset(0, y);
-                    self.pixels
-                        .copy_within(first_row..first_row + self.width, dest);
-                }
+                self.row_indices_mut(y, 0, self.width).copy_from_slice(&row);
             } else {
-                for y in y0..band_end {
-                    for (x, &sx) in sx_map.iter().enumerate().take(self.width) {
-                        if let Some(index) = palette.resolve_index(sprite.at(sx, sy), sx, sy) {
-                            self.set_pixel(x, y, index);
-                        }
+                for (x, &sx) in sx_map.iter().enumerate() {
+                    if let Some(index) = palette.resolve_index(sprite.at(sx, sy), sx, sy) {
+                        self.set_pixel(x, y, index);
                     }
                 }
             }
@@ -567,7 +554,6 @@ impl Framebuffer {
         sprite: &Sprite,
         dest_x: isize,
         dest_y: isize,
-        scale: usize,
         palette: &Palette,
     ) {
         self.draw_sprite_full(
@@ -575,7 +561,6 @@ impl Framebuffer {
             Rect::new(0, 0, sprite.width, sprite.height),
             dest_x,
             dest_y,
-            scale,
             None,
             palette,
             None,
@@ -587,7 +572,6 @@ impl Framebuffer {
         sprite: &Sprite,
         dest_x: isize,
         dest_y: isize,
-        scale: usize,
         palette: &Palette,
         swap: &Swap,
     ) {
@@ -596,7 +580,6 @@ impl Framebuffer {
             Rect::new(0, 0, sprite.width, sprite.height),
             dest_x,
             dest_y,
-            scale,
             None,
             palette,
             Some(swap),
@@ -609,18 +592,10 @@ impl Framebuffer {
         sprite: &Sprite,
         dest_x: isize,
         dest_y: isize,
-        scale: usize,
         palette: &Palette,
         paint: Paint,
     ) {
-        self.draw_sprite_swapped(
-            sprite,
-            dest_x,
-            dest_y,
-            scale,
-            palette,
-            &Swap::uniform(paint),
-        );
+        self.draw_sprite_swapped(sprite, dest_x, dest_y, palette, &Swap::uniform(paint));
     }
 
     pub(crate) fn draw_sprite_region(
@@ -629,10 +604,9 @@ impl Framebuffer {
         src: Rect,
         dest_x: isize,
         dest_y: isize,
-        scale: usize,
         palette: &Palette,
     ) {
-        self.draw_sprite_full(sprite, src, dest_x, dest_y, scale, None, palette, None);
+        self.draw_sprite_full(sprite, src, dest_x, dest_y, None, palette, None);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -642,7 +616,6 @@ impl Framebuffer {
         src: Rect,
         dest_x: isize,
         dest_y: isize,
-        scale: usize,
         clip: Option<Rect>,
         palette: &Palette,
         swap: Option<&Swap>,
@@ -650,10 +623,9 @@ impl Framebuffer {
         let width = src.w.min(sprite.width.saturating_sub(src.x));
         let height = src.h.min(sprite.height.saturating_sub(src.y));
 
-        // Unscaled, unswapped, unclipped draws write rows directly instead of
-        // going through fill_rect per pixel — the common case for full-size
-        // sprite blits.
-        if scale == 1 && swap.is_none() && clip.is_none() && dest_x >= 0 && dest_y >= 0 {
+        // Unswapped, unclipped draws write rows directly instead of going
+        // through set_pixel per pixel — the common case for full-size sprite blits.
+        if swap.is_none() && clip.is_none() && dest_x >= 0 && dest_y >= 0 {
             let dest_x = dest_x as usize;
             let dest_y = dest_y as usize;
             if dest_x >= self.width || dest_y >= self.height {
@@ -678,8 +650,8 @@ impl Framebuffer {
         for y in 0..height {
             for x in 0..width {
                 let index = sprite.at(src.x + x, src.y + y);
-                let dx = dest_x + (x * scale) as isize;
-                let dy = dest_y + (y * scale) as isize;
+                let dx = dest_x + x as isize;
+                let dy = dest_y + y as isize;
                 if dx < 0 || dy < 0 {
                     continue;
                 }
@@ -690,16 +662,14 @@ impl Framebuffer {
                     continue;
                 }
 
-                let cell_x = dx / scale.max(1);
-                let cell_y = dy / scale.max(1);
                 let resolved = swap.map_or_else(
-                    || palette.resolve_index(index, cell_x, cell_y),
-                    |swap| palette.resolve_paint_index(swap.paint(index), cell_x, cell_y),
+                    || palette.resolve_index(index, dx, dy),
+                    |swap| palette.resolve_paint_index(swap.paint(index), dx, dy),
                 );
                 let Some(resolved) = resolved else {
                     continue;
                 };
-                self.fill_rect(dx, dy, scale, scale, resolved);
+                self.set_pixel(dx, dy, resolved);
             }
         }
     }
@@ -830,7 +800,7 @@ mod bench {
 
         // warmup
         for _ in 0..50 {
-            fb.draw_sprite_full(&sprite, src, 0, 0, 1, None, &palette, None);
+            fb.draw_sprite_full(&sprite, src, 0, 0, None, &palette, None);
         }
 
         let start = Instant::now();
@@ -840,7 +810,6 @@ mod bench {
                 black_box(src),
                 0,
                 0,
-                1,
                 None,
                 black_box(&palette),
                 None,

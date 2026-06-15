@@ -12,8 +12,6 @@ use crate::text_edit::{TextEdit, TextEditOutcome};
 use crate::text_input::{EditKey, KeyInput, edit_key};
 use crate::{Framebuffer, Index, Paint, Palette, Rect, Sprite, Swap, TRANSPARENT};
 
-const SCALE: usize = 1;
-const GLYPH_SCALE: usize = 1;
 const LINE_COUNT: usize = 6;
 const CHECK_VARIANTS: usize = 4;
 
@@ -175,12 +173,11 @@ impl Toodle {
     }
 
     pub(crate) fn width(&self) -> usize {
-        (PAGE_OFFSET_X + self.pages[0].width + self.stack_offset()) * SCALE
-            + SHADOW_X_OFFSET as usize
+        (PAGE_OFFSET_X + self.pages[0].width + self.stack_offset()) + SHADOW_X_OFFSET as usize
     }
 
     pub(crate) fn height(&self) -> usize {
-        (self.pages[0].height + self.stack_offset()) * SCALE + SHADOW_Y_OFFSET as usize
+        (self.pages[0].height + self.stack_offset()) + SHADOW_Y_OFFSET as usize
     }
 
     #[allow(clippy::unused_self)]
@@ -245,13 +242,7 @@ impl Toodle {
                 page_x,
                 page_y,
             );
-            fb.draw_sprite(
-                &self.checkboxes,
-                (page_x * SCALE) as isize,
-                (page_y * SCALE) as isize,
-                SCALE,
-                palette,
-            );
+            fb.draw_sprite(&self.checkboxes, page_x as isize, page_y as isize, palette);
         }
     }
 
@@ -291,9 +282,8 @@ impl Toodle {
                 fb,
                 &self.font,
                 &todo.text,
-                (PAGE_OFFSET_X + TEXT_X) * SCALE,
-                (LINE_Y[line] - TEXT_Y_OFFSET) * SCALE,
-                GLYPH_SCALE * SCALE,
+                PAGE_OFFSET_X + TEXT_X,
+                LINE_Y[line] - TEXT_Y_OFFSET,
                 if todo.checked {
                     completed_text_color
                 } else {
@@ -303,13 +293,7 @@ impl Toodle {
             );
         }
 
-        fb.draw_sprite(
-            &self.eraser,
-            (ERASER_X * SCALE) as isize,
-            (ERASER_Y * SCALE) as isize,
-            SCALE,
-            palette,
-        );
+        fb.draw_sprite(&self.eraser, ERASER_X as isize, ERASER_Y as isize, palette);
         self.draw_priority_icon(fb, palette);
         self.draw_goldstar(fb, palette);
         self.draw_focused_pencil(fb, palette);
@@ -322,9 +306,8 @@ impl Toodle {
         let page_y = page_offset;
         fb.draw_sprite_silhouette(
             page_image,
-            (page_x * SCALE) as isize + SHADOW_X_OFFSET,
-            (page_y * SCALE) as isize + SHADOW_Y_OFFSET,
-            SCALE,
+            page_x as isize + SHADOW_X_OFFSET,
+            page_y as isize + SHADOW_Y_OFFSET,
             palette,
             Paint::Solid(app_color::BACKGROUND_SHADOW),
         );
@@ -338,8 +321,8 @@ impl Toodle {
             return Ok(false);
         }
 
-        let x = x.max(0) as usize / SCALE;
-        let y = y.max(0) as usize / SCALE;
+        let x = x.max(0) as usize;
+        let y = y.max(0) as usize;
         let Some(x) = x.checked_sub(PAGE_OFFSET_X) else {
             self.focused_line = None;
             return Ok(false);
@@ -380,8 +363,8 @@ impl Toodle {
         let Some(line) = self.focused_line else {
             return false;
         };
-        let x = x.max(0) as usize / SCALE;
-        let y = y.max(0) as usize / SCALE;
+        let x = x.max(0) as usize;
+        let y = y.max(0) as usize;
         let Some(x) = x.checked_sub(PAGE_OFFSET_X) else {
             return false;
         };
@@ -482,8 +465,8 @@ impl Toodle {
         page_offset: usize,
     ) {
         let src_x = (page + line) % CHECK_VARIANTS * CHECK_SPRITE_W;
-        let dest_x = (PAGE_OFFSET_X + page_offset + CHECK_X - 1) * SCALE;
-        let dest_y = (page_offset + CHECK_Y[line] - 4) * SCALE;
+        let dest_x = PAGE_OFFSET_X + page_offset + CHECK_X - 1;
+        let dest_y = page_offset + CHECK_Y[line] - 4;
         let src = Rect::new(src_x, 0, CHECK_SPRITE_W, CHECK_SPRITE_H);
 
         let swap = if self.eraser_hovered {
@@ -496,7 +479,6 @@ impl Toodle {
             src,
             dest_x as isize,
             dest_y as isize,
-            SCALE,
             None,
             palette,
             Some(&swap),
@@ -608,13 +590,7 @@ impl Toodle {
         };
         let icon_x = ERASER_X + self.eraser.width + PRIORITY_ICON_GAP + PRIORITY_ICON_OFFSET_X;
         let icon_y = ERASER_Y + PRIORITY_ICON_OFFSET_Y;
-        fb.draw_sprite(
-            icon,
-            (icon_x * SCALE) as isize,
-            (icon_y * SCALE) as isize,
-            SCALE,
-            palette,
-        );
+        fb.draw_sprite(icon, icon_x as isize, icon_y as isize, palette);
     }
 
     fn priority_icon(&self) -> Option<&Sprite> {
@@ -678,27 +654,22 @@ impl Toodle {
         let star_x = PAGE_OFFSET_X + self.pages[0].width - self.goldstar.width;
         fb.draw_sprite(
             &self.goldstar,
-            (star_x * SCALE) as isize,
-            (GOLDSTAR_Y * SCALE) as isize,
-            SCALE,
+            star_x as isize,
+            GOLDSTAR_Y as isize,
             palette,
         );
 
         let count = self.done_counts[self.current_page_ref().section].to_string();
-        let text_scale = GLYPH_SCALE * SCALE;
-        let text_w = self.font.text_width(&count) * text_scale;
-        let text_h = self.font.cell_h() * text_scale;
-        let star_w = self.goldstar.width * SCALE;
-        let star_h = self.goldstar.height * SCALE;
-        let text_x = star_x * SCALE + star_w.saturating_sub(text_w) / 2;
-        let text_y = GOLDSTAR_Y * SCALE + star_h.saturating_sub(text_h) / 2;
+        let text_w = self.font.text_width(&count);
+        let text_h = self.font.cell_h();
+        let text_x = star_x + self.goldstar.width.saturating_sub(text_w) / 2;
+        let text_y = GOLDSTAR_Y + self.goldstar.height.saturating_sub(text_h) / 2;
 
         self.font.draw_text_limited(
             fb,
             &count,
             text_x,
             text_y,
-            text_scale,
             palette_color::BLACK,
             count.chars().count(),
         );
@@ -713,8 +684,8 @@ impl Toodle {
         y: usize,
         pencil_on_second_line: bool,
     ) {
-        let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X) * SCALE;
-        let dest_y = y.saturating_sub(PENCIL_TIP_Y) * SCALE;
+        let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X);
+        let dest_y = y.saturating_sub(PENCIL_TIP_Y);
 
         if self.should_draw_pencil_shadow(line) {
             draw_pencil_shadow(
@@ -730,16 +701,10 @@ impl Toodle {
     }
 
     fn draw_pencil_cursor(&self, fb: &mut Framebuffer, palette: &Palette, x: usize, y: usize) {
-        let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X) * SCALE;
-        let dest_y = y.saturating_sub(PENCIL_TIP_Y) * SCALE;
+        let dest_x = (PAGE_OFFSET_X + x).saturating_sub(PENCIL_TIP_X);
+        let dest_y = y.saturating_sub(PENCIL_TIP_Y);
 
-        fb.draw_sprite(
-            &self.pencil,
-            dest_x as isize,
-            dest_y as isize,
-            SCALE,
-            palette,
-        );
+        fb.draw_sprite(&self.pencil, dest_x as isize, dest_y as isize, palette);
     }
 
     fn draw_focused_pencil_shadow(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -792,8 +757,8 @@ impl Toodle {
     }
 
     fn eraser_at(&self, x: i16, y: i16) -> bool {
-        let x = x.max(0) as usize / SCALE;
-        let y = y.max(0) as usize / SCALE;
+        let x = x.max(0) as usize;
+        let y = y.max(0) as usize;
         (ERASER_X..ERASER_X + self.eraser.width).contains(&x)
             && (ERASER_Y..ERASER_Y + self.eraser.height).contains(&y)
     }
@@ -812,10 +777,9 @@ impl Toodle {
             &self.font,
             text,
             self.text_edit.selection_range(),
-            x * SCALE,
-            y * SCALE,
+            x,
+            y,
             max_text_width(line),
-            SCALE,
             color,
         );
     }
@@ -1074,9 +1038,8 @@ fn draw_page_image(
 ) {
     fb.draw_sprite_swapped(
         image,
-        (x * SCALE) as isize,
-        (y * SCALE) as isize,
-        SCALE,
+        (x) as isize,
+        (y) as isize,
         palette,
         &page_swap(page_color, false),
     );
@@ -1095,7 +1058,6 @@ fn draw_pencil_shadow(
         image,
         dest_x as isize,
         dest_y as isize,
-        SCALE,
         palette,
         &page_swap(page_color, pencil_on_second_line),
     );
@@ -1187,40 +1149,24 @@ const BLUE_PAGE_REMAP: [Index; 16] = {
     remap
 };
 
-#[allow(clippy::too_many_arguments)]
 fn draw_todo_text(
     fb: &mut Framebuffer,
     font: &BitmapFont,
     text: &str,
     x: usize,
     y: usize,
-    scale: usize,
     color: Index,
     chars_per_row: usize,
 ) {
     let max_width = chars_per_row * 6;
     let lines = font.wrap_lines(text, max_width);
     if lines.len() <= 1 {
-        font.draw_text(fb, &lines[0], x, y, scale, color);
+        font.draw_text(fb, &lines[0], x, y, color);
         return;
     }
 
-    font.draw_text(
-        fb,
-        &lines[0],
-        x,
-        y - WRAPPED_FIRST_LINE_OFFSET_Y * SCALE,
-        scale,
-        color,
-    );
-    font.draw_text(
-        fb,
-        &lines[1],
-        x,
-        y + WRAPPED_SECOND_LINE_OFFSET_Y * SCALE,
-        scale,
-        color,
-    );
+    font.draw_text(fb, &lines[0], x, y - WRAPPED_FIRST_LINE_OFFSET_Y, color);
+    font.draw_text(fb, &lines[1], x, y + WRAPPED_SECOND_LINE_OFFSET_Y, color);
 }
 
 fn checkbox_at(x: usize, y: usize) -> Option<usize> {
@@ -1289,7 +1235,6 @@ fn todo_text_index_at(font: &BitmapFont, line: usize, text: &str, x: usize, y: u
     text_index_at(font, &lines, line_index, x.min(max_width))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_wrapped_selection(
     fb: &mut Framebuffer,
     font: &BitmapFont,
@@ -1298,7 +1243,6 @@ fn draw_wrapped_selection(
     x: usize,
     y: usize,
     max_width: usize,
-    scale: usize,
     color: Index,
 ) {
     let Some((selection_start, selection_end)) = selection else {
@@ -1314,19 +1258,18 @@ fn draw_wrapped_selection(
         if start < end {
             let prefix = prefix_chars(line, start - line_start);
             let selected_prefix = prefix_chars(line, end - line_start);
-            let sel_x = x + font.text_width(prefix) * scale;
+            let sel_x = x + font.text_width(prefix);
             let sel_w = font
                 .text_width(selected_prefix)
-                .saturating_sub(font.text_width(prefix))
-                * scale;
+                .saturating_sub(font.text_width(prefix));
             let line_y = if line_index == 0 && lines.len() > 1 {
-                y - WRAPPED_FIRST_LINE_OFFSET_Y * scale
+                y - WRAPPED_FIRST_LINE_OFFSET_Y
             } else if line_index == 1 {
-                y + WRAPPED_SECOND_LINE_OFFSET_Y * scale
+                y + WRAPPED_SECOND_LINE_OFFSET_Y
             } else {
                 y
             };
-            fb.fill_rect(sel_x, line_y, sel_w.max(1), font.cell_h() * scale, color);
+            fb.fill_rect(sel_x, line_y, sel_w.max(1), font.cell_h(), color);
         }
         line_start = line_end;
     }

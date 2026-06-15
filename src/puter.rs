@@ -23,16 +23,14 @@ use crate::{
     decode_png_with_size,
 };
 
-const BG_SCALE: usize = 1;
-const GLYPH_SCALE: usize = 1;
 const GLYPH_W: usize = 6;
 const GLYPH_H: usize = 12;
 const SHIFT_MASK: u16 = 1;
 
 const SCREEN_SOURCE_X: usize = 49;
 const SCREEN_SOURCE_Y: usize = 49;
-const SCREEN_W: usize = 205 * BG_SCALE;
-const SCREEN_H: usize = 158 * BG_SCALE;
+const SCREEN_W: usize = 205;
+const SCREEN_H: usize = 158;
 
 const GREEN_LOW_CONTRAST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/puter_g_lc.png");
 const ORANGE_LOW_CONTRAST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/puter_o_lc.png");
@@ -202,11 +200,11 @@ impl Puter {
     }
 
     pub(crate) const fn width(&self) -> usize {
-        self.mode_images.green_low_contrast.width * BG_SCALE
+        self.mode_images.green_low_contrast.width
     }
 
     pub(crate) const fn height(&self) -> usize {
-        self.mode_images.green_low_contrast.height * BG_SCALE
+        self.mode_images.green_low_contrast.height
     }
 
     #[allow(clippy::unused_self)]
@@ -297,8 +295,8 @@ impl Puter {
 
         self.render_chrome(fb, palette);
 
-        let cell_w = GLYPH_W * GLYPH_SCALE;
-        let cell_h = GLYPH_H * GLYPH_SCALE;
+        let cell_w = GLYPH_W;
+        let cell_h = GLYPH_H;
         let term = term.lock();
         let content = term.renderable_content();
 
@@ -343,7 +341,6 @@ impl Puter {
                     ),
                     art_x(button.x) as isize,
                     art_y(button.y) as isize,
-                    BG_SCALE,
                     palette,
                 );
             }
@@ -353,16 +350,12 @@ impl Puter {
     /// The static dressing around the screen: case art, control strip, mode
     /// buttons, lights, and the power/lock buttons.
     fn render_chrome(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.clear_scaled(
-            self.mode_images.for_settings(self.settings),
-            BG_SCALE,
-            palette,
-        );
+        fb.fill_from_sprite(self.mode_images.for_settings(self.settings), palette);
         fb.fill_rect(
             art_x(CONTROL_CLEAR_X),
             art_y(CONTROL_CLEAR_Y),
-            CONTROL_CLEAR_W * BG_SCALE,
-            CONTROL_CLEAR_H * BG_SCALE,
+            CONTROL_CLEAR_W,
+            CONTROL_CLEAR_H,
             palette_color::CREAM,
         );
         draw_mode_buttons(fb, &self.button_sprites, palette);
@@ -371,14 +364,12 @@ impl Puter {
             &self.power_button,
             art_x(POWER_BUTTON_X) as isize,
             art_y(ICON_BUTTON_Y) as isize,
-            BG_SCALE,
             palette,
         );
         fb.draw_sprite(
             &self.lock_button,
             art_x(LOCK_BUTTON_X) as isize,
             art_y(ICON_BUTTON_Y) as isize,
-            BG_SCALE,
             palette,
         );
     }
@@ -427,8 +418,8 @@ impl Puter {
     /// glyph, and the bold/underline/strikeout decorations.
     #[allow(clippy::needless_pass_by_value)]
     fn draw_cell(&self, fb: &mut Framebuffer, cell: &Cell, style: CellStyle, x: usize, y: usize) {
-        let cell_w = GLYPH_W * GLYPH_SCALE;
-        let cell_h = GLYPH_H * GLYPH_SCALE;
+        let cell_w = GLYPH_W;
+        let cell_h = GLYPH_H;
         if let Some(bg) = style.bg {
             fb.fill_rect(x, y, cell_w, cell_h, bg);
         }
@@ -438,15 +429,15 @@ impl Puter {
         if self.settings.high_brightness
             && let Some(glow) = style.glow
         {
-            draw_glyph(fb, &self.atlas, cell.c, x - 1, y, GLYPH_SCALE, glow);
-            draw_glyph(fb, &self.atlas, cell.c, x + 1, y, GLYPH_SCALE, glow);
-            draw_glyph(fb, &self.atlas, cell.c, x, y - 1, GLYPH_SCALE, glow);
-            draw_glyph(fb, &self.atlas, cell.c, x, y + 1, GLYPH_SCALE, glow);
+            draw_glyph(fb, &self.atlas, cell.c, x - 1, y, glow);
+            draw_glyph(fb, &self.atlas, cell.c, x + 1, y, glow);
+            draw_glyph(fb, &self.atlas, cell.c, x, y - 1, glow);
+            draw_glyph(fb, &self.atlas, cell.c, x, y + 1, glow);
         }
         let fg = style.fg;
-        draw_glyph(fb, &self.atlas, cell.c, x, y, GLYPH_SCALE, fg);
+        draw_glyph(fb, &self.atlas, cell.c, x, y, fg);
         if cell.flags.contains(Flags::BOLD) {
-            draw_glyph(fb, &self.atlas, cell.c, x + 1, y, GLYPH_SCALE, fg);
+            draw_glyph(fb, &self.atlas, cell.c, x + 1, y, fg);
         }
         if cell.flags.intersects(Flags::ALL_UNDERLINES) {
             fb.fill_rect(x, y + cell_h - 1, cell_w, 1, fg);
@@ -636,14 +627,14 @@ struct Terminal {
 impl Terminal {
     fn open(window_id: u64) -> Result<Self, Box<dyn Error>> {
         let size = TermSize {
-            columns: SCREEN_W / (GLYPH_W * GLYPH_SCALE) - 1,
-            lines: SCREEN_H / (GLYPH_H * GLYPH_SCALE),
+            columns: SCREEN_W / GLYPH_W - 1,
+            lines: SCREEN_H / GLYPH_H,
         };
         let window_size = WindowSize {
             num_lines: size.lines as u16,
             num_cols: size.columns as u16,
-            cell_width: (GLYPH_W * GLYPH_SCALE) as u16,
-            cell_height: (GLYPH_H * GLYPH_SCALE) as u16,
+            cell_width: GLYPH_W as u16,
+            cell_height: GLYPH_H as u16,
         };
 
         let (ui_tx, rx) = mpsc::channel();
@@ -971,7 +962,6 @@ fn draw_mode_buttons(fb: &mut Framebuffer, button_sprites: &Sprite, palette: &Pa
             ),
             art_x(button.x) as isize,
             art_y(button.y) as isize,
-            BG_SCALE,
             palette,
         );
     }
@@ -1223,13 +1213,7 @@ const SOURCE_PALETTE_RGB: [(u8, u8, u8); 16] = [
 ];
 
 fn fill_source_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize, color: Index) {
-    fb.fill_rect(
-        x * BG_SCALE,
-        y * BG_SCALE,
-        w * BG_SCALE,
-        h * BG_SCALE,
-        color,
-    );
+    fb.fill_rect(x, y, w, h, color);
 }
 
 fn draw_glyph(
@@ -1238,7 +1222,6 @@ fn draw_glyph(
     ch: char,
     x: usize,
     y: usize,
-    scale: usize,
     color: Index,
 ) {
     for gy in 0..GLYPH_H {
@@ -1246,9 +1229,7 @@ fn draw_glyph(
             if !atlas.is_on(ch, gx, gy) {
                 continue;
             }
-            let dx = x + gx * scale;
-            let dy = y + gy * scale;
-            fb.fill_rect(dx, dy, scale, scale, color);
+            fb.set_pixel(x + gx, y + gy, color);
         }
     }
 }
@@ -1259,8 +1240,8 @@ const fn is_glyph_ink(color: Rgba) -> bool {
 }
 
 fn button_at(x: i16, y: i16) -> Option<usize> {
-    let x = x.max(0) as usize / BG_SCALE;
-    let y = y.max(0) as usize / BG_SCALE;
+    let x = x.max(0) as usize;
+    let y = y.max(0) as usize;
     BUTTON_TARGETS.iter().position(|button| {
         let button_x = (button.x as isize - ART_CROP_X as isize + BUTTON_HIT_OFFSET_X) as usize;
         let button_y = button.y - ART_CROP_Y;
@@ -1269,11 +1250,11 @@ fn button_at(x: i16, y: i16) -> Option<usize> {
 }
 
 const fn art_x(x: usize) -> usize {
-    (x - ART_CROP_X) * BG_SCALE
+    x - ART_CROP_X
 }
 
 const fn art_y(y: usize) -> usize {
-    (y - ART_CROP_Y) * BG_SCALE
+    y - ART_CROP_Y
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

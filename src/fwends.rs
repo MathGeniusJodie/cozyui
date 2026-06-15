@@ -472,7 +472,6 @@ impl Fwends {
                     src,
                     icon_x as isize,
                     icon_y,
-                    1,
                     Some(clip),
                     palette,
                     None,
@@ -485,7 +484,7 @@ impl Fwends {
                     && text_y + self.font.cell_h() as isize <= viewport_bottom as isize
                 {
                     self.font
-                        .draw_text(fb, line, text_x, text_y as usize, 1, palette_color::BLACK);
+                        .draw_text(fb, line, text_x, text_y as usize, palette_color::BLACK);
                 }
                 text_y += LINE_H as isize;
             }
@@ -580,12 +579,12 @@ impl Fwends {
     fn draw_lamp(&self, fb: &mut Framebuffer, palette: &Palette) {
         let image = self.lamp_image();
         let (x, y) = self.lamp_position();
-        fb.draw_sprite(image, x as isize, y as isize, 1, palette);
+        fb.draw_sprite(image, x as isize, y as isize, palette);
     }
 
     fn draw_eraser(&self, fb: &mut Framebuffer, palette: &Palette) {
         let (x, y) = self.eraser_position();
-        fb.draw_sprite(&self.eraser, x as isize, y as isize, 1, palette);
+        fb.draw_sprite(&self.eraser, x as isize, y as isize, palette);
     }
 
     fn eraser_contains(&self, x: usize, y: usize) -> bool {
@@ -672,7 +671,6 @@ impl Fwends {
                 &line,
                 text_x,
                 text_y + index * LINE_H,
-                1,
                 palette_color::BLACK,
             );
         }
@@ -729,7 +727,7 @@ impl Fwends {
             lamp_x,
             lamp_y,
         );
-        fb.draw_sprite(avatar, avatar_x as isize, avatar_y as isize, 1, palette);
+        fb.draw_sprite(avatar, avatar_x as isize, avatar_y as isize, palette);
     }
 
     const fn selected_fwend_rect(&self) -> FwendRect {
@@ -756,7 +754,7 @@ impl Fwends {
             dest_y as isize,
             palette,
         );
-        fb.draw_sprite(&self.pencil, dest_x as isize, dest_y as isize, 1, palette);
+        fb.draw_sprite(&self.pencil, dest_x as isize, dest_y as isize, palette);
     }
 
     fn input_cursor_position(&self) -> (usize, usize) {
@@ -945,7 +943,6 @@ fn draw_yellow_pencil_shadow(
         image,
         dest_x,
         dest_y,
-        1,
         palette,
         &Swap::from_indices(&YELLOW_PAGE_REMAP),
     );

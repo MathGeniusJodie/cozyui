@@ -160,7 +160,7 @@ impl Wavey {
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.draw_sprite(&self.image, 0, 0, 1, palette);
+        fb.draw_sprite(&self.image, 0, 0, palette);
         self.draw_clock(fb, palette);
         self.draw_tuner(fb, palette);
         self.draw_knob(fb, palette);
@@ -449,7 +449,7 @@ impl Wavey {
                 LABEL_BELOW_Y
             };
             self.font
-                .draw_text(fb, &station.label, label_x, label_y, 1, text);
+                .draw_text(fb, &station.label, label_x, label_y, text);
         }
 
         let marker_x = if self.playing {
@@ -489,7 +489,7 @@ impl Wavey {
         let text_w = self.font.text_width(&self.current_title);
         if text_w <= TITLE_W {
             let x = TITLE_X + (TITLE_W - text_w) / 2;
-            self.font.draw_text(fb, &self.current_title, x, y, 1, cream);
+            self.font.draw_text(fb, &self.current_title, x, y, cream);
             return;
         }
 
@@ -501,7 +501,6 @@ impl Wavey {
             &looped,
             TITLE_X as isize - self.marquee_offset as isize,
             y,
-            1,
             cream,
             TITLE_X,
             TITLE_W,

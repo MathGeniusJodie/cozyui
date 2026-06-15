@@ -87,7 +87,6 @@ impl Twirl {
             &self.wheel,
             SHADOW_X_OFFSET,
             SHADOW_Y_OFFSET,
-            1,
             palette,
             Paint::Solid(app_color::BACKGROUND_SHADOW),
         );
@@ -186,14 +185,8 @@ impl Twirl {
             let text_h = self.font.cell_h();
             let x = angle.cos().mul_add(NUMBER_RADIUS, center_x) - text_w as f32 / 2.0;
             let y = angle.sin().mul_add(NUMBER_RADIUS, center_y) - text_h as f32 / 2.0;
-            self.font.draw_text(
-                fb,
-                number,
-                x.max(0.0) as usize,
-                y.max(0.0) as usize,
-                1,
-                color,
-            );
+            self.font
+                .draw_text(fb, number, x.max(0.0) as usize, y.max(0.0) as usize, color);
         }
     }
 
@@ -202,8 +195,7 @@ impl Twirl {
         let text_w = self.font.text_width(&total);
         let x = self.wheel.width.saturating_sub(text_w) / 2;
         let y = self.wheel.height + TOTAL_GAP;
-        self.font
-            .draw_text(fb, &total, x, y, 1, palette_color::CREAM);
+        self.font.draw_text(fb, &total, x, y, palette_color::CREAM);
     }
 
     fn add_landed_value(&mut self) -> Result<(), Box<dyn Error>> {

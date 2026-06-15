@@ -93,54 +93,49 @@ impl BitmapFont {
         text: &str,
         x: usize,
         y: usize,
-        scale: usize,
         color: Index,
     ) {
-        self.draw_text_limited(fb, text, x, y, scale, color, usize::MAX);
+        self.draw_text_limited(fb, text, x, y, color, usize::MAX);
     }
 
     /// Draw text whose origin may sit left of the visible area, keeping only
     /// pixels with x in `clip_x..clip_x + clip_w`: marquees, panning text.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_text_clipped(
         &self,
         fb: &mut Framebuffer,
         text: &str,
         x: isize,
         y: usize,
-        scale: usize,
         color: Index,
         clip_x: usize,
         clip_w: usize,
     ) {
         let mut cursor_x = x;
         for ch in text.chars() {
-            let advance = (self.advance(ch) * scale) as isize;
+            let advance = self.advance(ch) as isize;
             if cursor_x >= (clip_x + clip_w) as isize {
                 break;
             }
-            if cursor_x + (self.spec.cell_w * scale) as isize > clip_x as isize {
-                self.draw_glyph_clipped(fb, ch, cursor_x, y, scale, color, clip_x, clip_x + clip_w);
+            if cursor_x + self.spec.cell_w as isize > clip_x as isize {
+                self.draw_glyph_clipped(fb, ch, cursor_x, y, color, clip_x, clip_x + clip_w);
             }
             cursor_x += advance;
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_text_limited(
         &self,
         fb: &mut Framebuffer,
         text: &str,
         x: usize,
         y: usize,
-        scale: usize,
         color: Index,
         max_chars: usize,
     ) {
         let mut cursor_x = x;
         for ch in text.chars().take(max_chars) {
-            self.draw_glyph(fb, ch, cursor_x, y, scale, color);
-            cursor_x += self.advance(ch) * scale;
+            self.draw_glyph(fb, ch, cursor_x, y, color);
+            cursor_x += self.advance(ch);
         }
     }
 
@@ -151,26 +146,16 @@ impl BitmapFont {
         self.pixels[sy * self.width + sx]
     }
 
-    fn draw_glyph(
-        &self,
-        fb: &mut Framebuffer,
-        ch: char,
-        x: usize,
-        y: usize,
-        scale: usize,
-        color: Index,
-    ) {
-        self.draw_glyph_clipped(fb, ch, x as isize, y, scale, color, 0, usize::MAX);
+    fn draw_glyph(&self, fb: &mut Framebuffer, ch: char, x: usize, y: usize, color: Index) {
+        self.draw_glyph_clipped(fb, ch, x as isize, y, color, 0, usize::MAX);
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn draw_glyph_clipped(
         &self,
         fb: &mut Framebuffer,
         ch: char,
         x: isize,
         y: usize,
-        scale: usize,
         color: Index,
         clip_left: usize,
         clip_right: usize,
@@ -180,13 +165,11 @@ impl BitmapFont {
                 if !self.is_on(ch, gx, gy) {
                     continue;
                 }
-                let dest_x = x + (gx as isize - self.spec.x_origin as isize) * scale as isize;
-                if dest_x < clip_left as isize
-                    || (dest_x as usize).saturating_add(scale) > clip_right
-                {
+                let dest_x = x + (gx as isize - self.spec.x_origin as isize);
+                if dest_x < clip_left as isize || dest_x as usize >= clip_right {
                     continue;
                 }
-                fb.fill_rect(dest_x as usize, y + gy * scale, scale, scale, color);
+                fb.set_pixel(dest_x as usize, y + gy, color);
             }
         }
     }
