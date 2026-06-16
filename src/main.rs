@@ -18,6 +18,7 @@ mod day;
 mod emojimap;
 mod fwends;
 mod graphics;
+mod localtime;
 mod openrouter;
 mod peanut_money_font;
 #[allow(dead_code)]
@@ -908,16 +909,11 @@ fn sync_window_layout(
 }
 
 fn is_paste_shortcut(input: &text::KeyInput) -> bool {
-    input.ctrl()
-        && input.shift()
-        && (matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
-            || input.text().eq_ignore_ascii_case("v"))
+    input.ctrl() && input.shift() && input.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
 }
 
 fn is_plain_paste_shortcut(input: &text::KeyInput) -> bool {
-    input.ctrl()
-        && (matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
-            || input.text().eq_ignore_ascii_case("v"))
+    input.ctrl() && input.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
 }
 
 fn should_load_clipboard_for_paste(focus: WidgetId, input: &text::KeyInput) -> bool {

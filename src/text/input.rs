@@ -49,6 +49,12 @@ impl KeyInput {
     pub(crate) const fn sym_raw(&self) -> u32 {
         self.sym.raw()
     }
+
+    /// True when this key is the given ASCII letter, matched by keysym (lower
+    /// or upper) or by the produced text, case-insensitively.
+    pub(crate) fn is_letter(&self, lower: u32, upper: u32, letter: &str) -> bool {
+        self.sym_raw() == lower || self.sym_raw() == upper || self.text.eq_ignore_ascii_case(letter)
+    }
 }
 
 pub struct Keyboard {

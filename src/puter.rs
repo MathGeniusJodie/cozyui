@@ -1277,17 +1277,11 @@ fn screen_point(x: i16, y: i16, size: &WindowSize) -> Option<Point> {
 }
 
 fn is_copy_shortcut(input: &KeyInput) -> bool {
-    input.ctrl()
-        && input.shift()
-        && (matches!(input.sym_raw(), keysyms::KEY_c | keysyms::KEY_C)
-            || input.text().eq_ignore_ascii_case("c"))
+    input.ctrl() && input.shift() && input.is_letter(keysyms::KEY_c, keysyms::KEY_C, "c")
 }
 
 fn is_paste_shortcut(input: &KeyInput) -> bool {
-    input.ctrl()
-        && input.shift()
-        && (matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
-            || input.text().eq_ignore_ascii_case("v"))
+    input.ctrl() && input.shift() && input.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
 }
 
 fn key_bytes(input: &KeyInput) -> Option<String> {

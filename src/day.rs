@@ -1,7 +1,8 @@
 use std::error::Error;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::app_color;
+use crate::localtime::local_time;
 use crate::palette_color;
 use crate::pixolde_bold_font;
 use crate::poco_font;
@@ -321,33 +322,4 @@ const fn short_month_name(month_index: usize) -> &'static str {
         #[allow(clippy::match_same_arms)]
         _ => "JAN",
     }
-}
-
-fn local_time() -> Option<Tm> {
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as TimeT;
-    let mut out = Tm::default();
-    let result = unsafe { localtime_r(&raw const seconds, &raw mut out) };
-    (!result.is_null()).then_some(out)
-}
-
-type TimeT = i64;
-
-#[repr(C)]
-#[derive(Default)]
-struct Tm {
-    tm_sec: i32,
-    tm_min: i32,
-    tm_hour: i32,
-    tm_mday: i32,
-    tm_mon: i32,
-    tm_year: i32,
-    tm_wday: i32,
-    tm_yday: i32,
-    tm_isdst: i32,
-    tm_gmtoff: i64,
-    tm_zone: *const i8,
-}
-
-unsafe extern "C" {
-    fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm;
 }

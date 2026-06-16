@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
+use crate::localtime::local_time;
 use crate::palette_color;
 use crate::poco_font;
 use crate::text::BitmapFont;
@@ -1079,35 +1080,8 @@ fn clock_text(clock_24h: bool) -> String {
 }
 
 fn local_hour_minute() -> Option<(u8, u8)> {
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as TimeT;
-    let mut out = Tm::default();
-    let result = unsafe { localtime_r(&raw const seconds, &raw mut out) };
-    if result.is_null() {
-        return None;
-    }
-    Some((out.tm_hour as u8, out.tm_min as u8))
-}
-
-type TimeT = i64;
-
-#[repr(C)]
-#[derive(Default)]
-struct Tm {
-    tm_sec: i32,
-    tm_min: i32,
-    tm_hour: i32,
-    tm_mday: i32,
-    tm_mon: i32,
-    tm_year: i32,
-    tm_wday: i32,
-    tm_yday: i32,
-    tm_isdst: i32,
-    tm_gmtoff: i64,
-    tm_zone: *const i8,
-}
-
-unsafe extern "C" {
-    fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm;
+    let tm = local_time()?;
+    Some((tm.tm_hour as u8, tm.tm_min as u8))
 }
 
 #[cfg(test)]
