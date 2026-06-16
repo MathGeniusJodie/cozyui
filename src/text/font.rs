@@ -9,7 +9,7 @@ pub struct FontSpec {
     pub(crate) cell_h: usize,
     pub(crate) cols: usize,
     pub(crate) x_origin: usize,
-    pub(crate) advance: &'static [u8; 128],
+    pub(crate) advance: &'static [u8],
 }
 
 pub struct BitmapFont {

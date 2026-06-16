@@ -3,7 +3,7 @@
 use crate::text::FontSpec;
 
 pub const ROZHA_ONE_48_ATLAS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/rozha_one_48_ascii.png");
+    concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/rozha_one_48_ascii.png");
 pub const ROZHA_ONE_48_CELL_W: usize = 69;
 pub const ROZHA_ONE_48_CELL_H: usize = 85;
 pub const ROZHA_ONE_48_COLS: usize = 16;

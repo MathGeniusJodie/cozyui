@@ -1,6 +1,8 @@
 target/
 glyphs/
+fonts/
 toodle_*.txt
 *.ttf
 .scrooge/accounts.log
 .scrooge/ledger.json
+tools/__pycache__
