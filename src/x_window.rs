@@ -18,7 +18,7 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
 
 use crate::graphics::PresentLut;
-use crate::text_input;
+use crate::text::input as text_input;
 use crate::{Framebuffer, Palette, Rect};
 
 pub struct XWindow {

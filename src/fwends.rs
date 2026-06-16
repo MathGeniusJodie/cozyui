@@ -4,13 +4,13 @@ use std::fs;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::openrouter;
 use crate::palette_color;
 use crate::senpai;
-use crate::text_edit::{TextEdit, TextEditOutcome, char_len};
-use crate::text_input::{EditKey, KeyInput, edit_key};
+use crate::text::{
+    BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
+};
 use crate::{Framebuffer, Index, Palette, Rect, Sprite, Swap, TRANSPARENT};
 use serde_json::{Value, json};
 
@@ -122,8 +122,7 @@ pub struct Fwends {
     eraser: Sprite,
     font: BitmapFont,
     messages: Vec<Message>,
-    input: String,
-    input_edit: TextEdit,
+    input: TextField,
     selected_model: usize,
     lamp_on: bool,
     focused: bool,
@@ -176,8 +175,7 @@ impl Fwends {
             eraser: Sprite::load_native(ERASER_PATH, palette)?,
             font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
             messages: vec![intro_message()],
-            input: String::new(),
-            input_edit: TextEdit::default(),
+            input: TextField::new(MAX_INPUT_CHARS, INPUT_MAX_LINES),
             selected_model,
             lamp_on: false,
             focused: false,
@@ -237,7 +235,7 @@ impl Fwends {
 
     pub(crate) fn click(&mut self, x: i16, y: i16) {
         self.focused = false;
-        self.input_edit.end_drag();
+        self.input.end_drag();
         if x < 0 || y < 0 {
             return;
         }
@@ -270,27 +268,27 @@ impl Fwends {
             && y < self.input_y() + self.input_sticky_h()
         {
             self.focused = true;
-            let cursor = self.input_index_at(x, y);
-            self.input_edit.begin_drag(cursor, &self.input);
+            let cursor = self.input.index_at(&self.input_layout(&self.font), x, y);
+            self.input.begin_drag(cursor);
         }
     }
 
     pub(crate) fn drag_text(&mut self, x: i16, y: i16) -> bool {
-        if !self.input_edit.is_dragging() {
+        if !self.input.is_dragging() {
             return false;
         }
         let x = x.max(0) as usize;
         let y = y.max(0) as usize;
-        let cursor = self.input_index_at(x, y);
-        self.input_edit.drag_to(cursor, &self.input)
+        let cursor = self.input.index_at(&self.input_layout(&self.font), x, y);
+        self.input.drag_to(cursor)
     }
 
     pub(crate) const fn end_text_drag(&mut self) {
-        self.input_edit.end_drag();
+        self.input.end_drag();
     }
 
     pub(crate) const fn text_dragging(&self) -> bool {
-        self.input_edit.is_dragging()
+        self.input.is_dragging()
     }
 
     pub(crate) fn handle_key_press(
@@ -299,14 +297,8 @@ impl Fwends {
         clipboard_text: Option<&str>,
     ) -> Option<String> {
         if self.focused && self.pending.is_none() {
-            let max_width = self.input_text_width();
-            let font = &self.font;
-            let outcome =
-                self.input_edit
-                    .handle_key(input, &mut self.input, clipboard_text, |candidate| {
-                        char_len(candidate) <= MAX_INPUT_CHARS
-                            && font.wrap_lines(candidate, max_width).len() <= INPUT_MAX_LINES
-                    });
+            let layout = self.input_layout(&self.font);
+            let outcome = self.input.handle_key(input, clipboard_text, &layout);
             if let TextEditOutcome::Handled { changed: _, copy } = outcome {
                 return copy;
             }
@@ -383,13 +375,12 @@ impl Fwends {
             return;
         }
 
-        let text = self.input.trim().to_string();
+        let text = self.input.text().trim().to_string();
         if text.is_empty() {
             return;
         }
 
         self.input.clear();
-        self.input_edit.set_cursor(0, &self.input);
         self.messages
             .retain(|message| message.kind != MessageKind::Intro);
         let thinking = self.lamp_on;
@@ -536,7 +527,14 @@ impl Fwends {
         for message in &self.messages {
             let style = message.style();
             let max_text_w = BUBBLE_MAX_W - style.pad_left - style.pad_right;
-            let lines = self.font.wrap_lines(&message.text, max_text_w);
+            let layout = TextLayout::new(
+                &self.font,
+                0,
+                0,
+                max_text_w,
+                LinePlacement::Uniform { line_h: LINE_H },
+            );
+            let lines = layout.wrap(&message.text);
             let text_w = lines
                 .iter()
                 .map(|line| self.font.text_width(line))
@@ -656,61 +654,14 @@ impl Fwends {
             STICKY_BOTTOM_CAP,
         );
 
-        let label = if self.pending.is_some() {
-            "wait a sec..."
+        let layout = self.input_layout(&self.font);
+        if self.pending.is_some() {
+            layout.draw(fb, "wait a sec...", palette_color::BLACK);
         } else {
-            &self.input
-        };
-        let text_y = self.input_text_y();
-        let text_x = self.input_text_x();
-        let max_width = self.input_text_width();
-        let lines = self.font.wrap_lines(label, max_width);
-        if self.pending.is_none() {
-            self.draw_input_selection(fb, palette_color::LAVENDER);
-        }
-        for (index, line) in lines.into_iter().enumerate() {
-            self.font.draw_text(
-                fb,
-                &line,
-                text_x,
-                text_y + index * LINE_H,
-                palette_color::BLACK,
-            );
+            self.input
+                .draw(fb, &layout, palette_color::BLACK, palette_color::LAVENDER);
         }
         self.draw_focused_pencil(fb, palette);
-    }
-
-    fn draw_input_selection(&self, fb: &mut Framebuffer, color: Index) {
-        let Some((selection_start, selection_end)) = self.input_edit.selection_range() else {
-            return;
-        };
-        let x = self.input_text_x();
-        let y = self.input_text_y();
-        let lines = self.font.wrap_lines(&self.input, self.input_text_width());
-        let mut line_start = 0;
-        for (line_index, line) in lines.iter().enumerate() {
-            let line_len = line.chars().count();
-            let line_end = line_start + line_len;
-            let start = selection_start.max(line_start);
-            let end = selection_end.min(line_end);
-            if start < end {
-                let prefix = prefix_chars(line, start - line_start);
-                let selected = prefix_chars(line, end - line_start);
-                let sel_x = x + self.font.text_width(prefix);
-                let sel_w = self
-                    .font
-                    .text_width(selected)
-                    .saturating_sub(self.font.text_width(prefix));
-                fb.fill_rect(
-                    sel_x,
-                    y + line_index * LINE_H,
-                    sel_w.max(1),
-                    self.font.cell_h(),
-                    color,
-                );
-            }
-            line_start = line_end;
-        }
     }
 
     fn draw_selected_fwend(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -747,7 +698,7 @@ impl Fwends {
             return;
         }
 
-        let (cursor_x, cursor_y) = self.input_cursor_position();
+        let (cursor_x, cursor_y) = self.input.cursor_position(&self.input_layout(&self.font));
         let dest_x = cursor_x.saturating_sub(PENCIL_TIP_X);
         let dest_y = cursor_y.saturating_sub(PENCIL_TIP_Y);
         draw_yellow_pencil_shadow(
@@ -760,30 +711,14 @@ impl Fwends {
         fb.draw_sprite(&self.pencil, dest_x as isize, dest_y as isize, palette);
     }
 
-    fn input_cursor_position(&self) -> (usize, usize) {
-        let text_x = self.input_text_x();
-        let max_width = self.input_text_width();
-        let lines = self.font.wrap_lines(&self.input, max_width);
-        let (line_index, line_start, line) =
-            line_for_char_index(&lines, self.input_edit.cursor()).unwrap_or((0, 0, ""));
-        (
-            text_x
-                + self
-                    .font
-                    .text_width(prefix_chars(line, self.input_edit.cursor() - line_start))
-                    .min(max_width),
-            self.input_text_y() + line_index * LINE_H,
-        )
-    }
-
-    fn input_index_at(&self, x: usize, y: usize) -> usize {
-        let line_index = y.saturating_sub(self.input_text_y()) / LINE_H;
-        let lines = self.font.wrap_lines(&self.input, self.input_text_width());
-        text_index_at(
-            &self.font,
-            &lines,
-            line_index,
-            x.saturating_sub(self.input_text_x()),
+    /// The text layout for the single-line-stacked input sticky.
+    const fn input_layout<'a>(&self, font: &'a BitmapFont) -> TextLayout<'a> {
+        TextLayout::new(
+            font,
+            self.input_text_x(),
+            self.input_text_y(),
+            self.input_text_width(),
+            LinePlacement::Uniform { line_h: LINE_H },
         )
     }
 
@@ -938,57 +873,6 @@ const YELLOW_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = {
     remap[palette_color::ROSE as usize] = palette_color::PEACH;
     remap
 };
-
-// The index accounting here and in text_index_at assumes the wrapped lines
-// concatenate back to the source text. wrap_lines drops '\n' characters at
-// paragraph splits, so this only holds because TextEdit filters newlines out
-// of the input buffer.
-fn line_for_char_index(lines: &[String], index: usize) -> Option<(usize, usize, &str)> {
-    let mut line_start = 0;
-    for (line_index, line) in lines.iter().enumerate() {
-        let line_len = line.chars().count();
-        let line_end = line_start + line_len;
-        if index <= line_end {
-            return Some((line_index, line_start, line));
-        }
-        line_start = line_end;
-    }
-    lines
-        .last()
-        .map(|line| (lines.len().saturating_sub(1), line_start, line.as_str()))
-}
-
-fn text_index_at(font: &BitmapFont, lines: &[String], line_index: usize, x: usize) -> usize {
-    let mut line_start = 0;
-    for (index, line) in lines.iter().enumerate() {
-        let line_len = line.chars().count();
-        if index == line_index.min(lines.len().saturating_sub(1)) {
-            return line_start + char_index_at_x(font, line, x);
-        }
-        line_start += line_len;
-    }
-    line_start
-}
-
-fn char_index_at_x(font: &BitmapFont, text: &str, x: usize) -> usize {
-    let mut cursor_x = 0;
-    for (index, ch) in text.chars().enumerate() {
-        let width = font.advance(ch);
-        if x < cursor_x + width / 2 {
-            return index;
-        }
-        cursor_x += width;
-    }
-    text.chars().count()
-}
-
-fn prefix_chars(text: &str, len: usize) -> &str {
-    let byte = text
-        .char_indices()
-        .nth(len)
-        .map_or(text.len(), |(index, _)| index);
-    &text[..byte]
-}
 
 #[derive(Clone, Copy)]
 struct Model {

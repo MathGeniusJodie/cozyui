@@ -2,11 +2,11 @@ use std::error::Error;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::app_color;
-use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::pixolde_bold_font;
 use crate::poco_font;
 use crate::rozha_one_48_font;
+use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Paint, Palette, Sprite, TRANSPARENT, draw_filled_circle};
 
 const WIDTH: usize = 116;

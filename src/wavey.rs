@@ -9,9 +9,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::bitmap_font::BitmapFont;
 use crate::palette_color;
 use crate::poco_font;
+use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
 const WAVEY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wavey.png");

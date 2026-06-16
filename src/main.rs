@@ -13,7 +13,6 @@ use xkbcommon::xkb::keysyms;
 
 #[cfg(test)]
 mod bench;
-mod bitmap_font;
 mod comicoro_font;
 mod day;
 mod emojimap;
@@ -33,9 +32,7 @@ mod puter;
 #[allow(dead_code)]
 mod rozha_one_48_font;
 mod senpai;
-mod text_edit;
-mod text_input;
-mod text_wrap;
+mod text;
 mod toodle;
 mod twirl;
 mod wavey;
@@ -402,7 +399,7 @@ impl App {
 
     fn handle_key_press(
         &mut self,
-        input: &text_input::KeyInput,
+        input: &text::KeyInput,
         clipboard_text: Option<&str>,
     ) -> Result<Option<String>, Box<dyn Error>> {
         match self.focus {
@@ -910,20 +907,20 @@ fn sync_window_layout(
     Ok(true)
 }
 
-fn is_paste_shortcut(input: &text_input::KeyInput) -> bool {
+fn is_paste_shortcut(input: &text::KeyInput) -> bool {
     input.ctrl()
         && input.shift()
         && (matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
             || input.text().eq_ignore_ascii_case("v"))
 }
 
-fn is_plain_paste_shortcut(input: &text_input::KeyInput) -> bool {
+fn is_plain_paste_shortcut(input: &text::KeyInput) -> bool {
     input.ctrl()
         && (matches!(input.sym_raw(), keysyms::KEY_v | keysyms::KEY_V)
             || input.text().eq_ignore_ascii_case("v"))
 }
 
-fn should_load_clipboard_for_paste(focus: WidgetId, input: &text_input::KeyInput) -> bool {
+fn should_load_clipboard_for_paste(focus: WidgetId, input: &text::KeyInput) -> bool {
     match focus {
         WidgetId::Puter => is_paste_shortcut(input),
         WidgetId::Toodle | WidgetId::Fwends => is_plain_paste_shortcut(input),

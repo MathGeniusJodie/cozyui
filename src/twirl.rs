@@ -5,9 +5,9 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::app_color;
-use crate::bitmap_font::BitmapFont;
 use crate::comicoro_font;
 use crate::palette_color;
+use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Paint, Palette, Sprite, TRANSPARENT};
 
 const WHEEL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/wheel.png");

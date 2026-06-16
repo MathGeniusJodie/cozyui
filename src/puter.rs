@@ -17,7 +17,7 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use xkbcommon::xkb::keysyms;
 
 use crate::palette_color;
-use crate::text_input::KeyInput;
+use crate::text::KeyInput;
 use crate::{
     Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Rgba, Sprite, TRANSPARENT,
     decode_png_with_size,

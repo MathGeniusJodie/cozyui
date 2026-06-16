@@ -1,6 +1,6 @@
 use xkbcommon::xkb::keysyms;
 
-use crate::text_input::{EditKey, KeyInput, edit_key};
+use super::input::{EditKey, KeyInput, edit_key};
 
 #[derive(Clone, Default)]
 pub struct TextEdit {

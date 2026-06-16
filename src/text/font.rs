@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::text_wrap;
+use super::wrap;
 use crate::{Framebuffer, Index, Rgba, decode_png_with_size};
 
 pub struct FontSpec {
@@ -84,7 +84,7 @@ impl BitmapFont {
     }
 
     pub(crate) fn wrap_lines(&self, text: &str, max_width: usize) -> Vec<String> {
-        text_wrap::wrap_lines(text, max_width, |ch| self.advance(ch))
+        wrap::wrap_lines(text, max_width, |ch| self.advance(ch))
     }
 
     pub(crate) fn draw_text(
