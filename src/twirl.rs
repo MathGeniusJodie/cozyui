@@ -60,7 +60,10 @@ impl Twirl {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             wheel: Sprite::load_native(WHEEL_PATH, palette)?,
-            font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
+            font: BitmapFont::load_with_fallback(
+                &comicoro_font::COMICORO_SPEC,
+                &crate::fusion_pixel_10_font::FUSION_PIXEL_10_SPEC,
+            )?,
             angle: 0.0,
             speed: 0.0,
             last_update: Instant::now(),

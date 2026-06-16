@@ -173,7 +173,10 @@ impl Fwends {
             lamp_on_image: Sprite::load_native(LAMP_ON_PATH, palette)?,
             lamp_off_image: Sprite::load_native(LAMP_OFF_PATH, palette)?,
             eraser: Sprite::load_native(ERASER_PATH, palette)?,
-            font: BitmapFont::load(&comicoro_font::COMICORO_SPEC)?,
+            font: BitmapFont::load_with_fallback(
+                &comicoro_font::COMICORO_SPEC,
+                &crate::fusion_pixel_10_font::FUSION_PIXEL_10_SPEC,
+            )?,
             messages: vec![intro_message()],
             input: TextField::new(MAX_INPUT_CHARS, INPUT_MAX_LINES),
             selected_model,

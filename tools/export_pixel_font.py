@@ -90,29 +90,39 @@ def cmap_format_4(font, font_path):
     return fallback
 
 
-def glyph_id(cmap, codepoint):
+def cmap_dict(cmap):
+    """Decode a cmap format 4 subtable into a {codepoint: glyph_id} map once,
+    so per-codepoint lookups during a full-Unicode export are O(1) instead of
+    a linear segment scan per character."""
     seg_count = u16(cmap, 6) // 2
     end_offset = 14
     start_offset = end_offset + seg_count * 2 + 2
     delta_offset = start_offset + seg_count * 2
     range_offset = delta_offset + seg_count * 2
 
+    mapping = {}
     for index in range(seg_count):
         end_code = u16(cmap, end_offset + index * 2)
         start_code = u16(cmap, start_offset + index * 2)
-        if not start_code <= codepoint <= end_code:
+        if start_code == 0xFFFF:
             continue
-
         delta = i16(cmap, delta_offset + index * 2)
         glyph_range_offset = u16(cmap, range_offset + index * 2)
-        if glyph_range_offset == 0:
-            return (codepoint + delta) & 0xFFFF
-
-        glyph_offset = range_offset + index * 2 + glyph_range_offset + (codepoint - start_code) * 2
-        glyph = u16(cmap, glyph_offset)
-        return 0 if glyph == 0 else (glyph + delta) & 0xFFFF
-
-    return 0
+        for codepoint in range(start_code, end_code + 1):
+            if glyph_range_offset == 0:
+                glyph = (codepoint + delta) & 0xFFFF
+            else:
+                glyph_offset = (
+                    range_offset
+                    + index * 2
+                    + glyph_range_offset
+                    + (codepoint - start_code) * 2
+                )
+                raw = u16(cmap, glyph_offset)
+                glyph = 0 if raw == 0 else (raw + delta) & 0xFFFF
+            if glyph != 0:
+                mapping[codepoint] = glyph
+    return mapping
 
 
 def glyph_offsets(font):
@@ -211,7 +221,7 @@ def infer_units_per_pixel(font, cmap, glyf, offsets, codepoints):
     hhea = table(font, "hhea")
     values = [abs(i16(hhea, 4)), abs(i16(hhea, 6))]
     for codepoint in codepoints:
-        glyph = glyph_id(cmap, codepoint)
+        glyph = cmap.get(codepoint, 0)
         advance, lsb = glyph_metric_units(font, glyph)
         values.extend([abs(advance), abs(lsb)])
 
@@ -272,7 +282,15 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Export boxy pixel TTF glyphs to an RGB bitmap atlas and Rust metrics."
     )
-    parser.add_argument("--font", type=Path, default=DEFAULT_FONT, help="TTF file to export")
+    parser.add_argument(
+        "--font",
+        type=Path,
+        action="append",
+        dest="fonts",
+        help="TTF file to export; repeat to merge several fonts into one, "
+        "where each codepoint is taken from the first --font that has a glyph "
+        "for it (priority decreases with each later --font)",
+    )
     parser.add_argument("--atlas", type=Path, default=DEFAULT_ATLAS, help="output PNG atlas path")
     parser.add_argument(
         "--metrics",
@@ -312,7 +330,7 @@ def build_arg_parser():
 
 def main():
     args = build_arg_parser().parse_args()
-    font_path = args.font.resolve()
+    font_paths = [path.resolve() for path in (args.fonts or [DEFAULT_FONT])]
     atlas_path = args.atlas.resolve()
     metrics_path = args.metrics.resolve()
     prefix = const_name(args.const_prefix)
@@ -325,20 +343,37 @@ def main():
     if args.block <= 0 or args.block % args.cols != 0:
         raise ValueError("--block must be positive and a multiple of --cols")
 
-    font = font_path.read_bytes()
-    cmap = cmap_format_4(font, font_path)
-    glyf = table(font, "glyf")
-    offsets = glyph_offsets(font)
-    hhea = table(font, "hhea")
+    # Load each source font once. Listed first means highest priority: when
+    # several fonts cover the same codepoint, the earliest one wins. Metrics
+    # (units-per-pixel, ascent, descent) are resolved per font so fonts whose
+    # outlines use different grids still rasterize onto the same pixel cell.
     codepoints = list(range(first, last + 1))
-    units_per_pixel = args.units_per_pixel or infer_units_per_pixel(
-        font, cmap, glyf, offsets, codepoints
-    )
-    if units_per_pixel <= 0:
-        raise ValueError("--units-per-pixel must be positive")
+    sources = []
+    for font_path in font_paths:
+        font = font_path.read_bytes()
+        cmap = cmap_dict(cmap_format_4(font, font_path))
+        glyf = table(font, "glyf")
+        offsets = glyph_offsets(font)
+        hhea = table(font, "hhea")
+        units_per_pixel = args.units_per_pixel or infer_units_per_pixel(
+            font, cmap, glyf, offsets, range(0x20, 0x7F)
+        )
+        if units_per_pixel <= 0:
+            raise ValueError("--units-per-pixel must be positive")
+        sources.append(
+            {
+                "font": font,
+                "glyf": glyf,
+                "offsets": offsets,
+                "cmap": cmap,
+                "units_per_pixel": units_per_pixel,
+                "ascent": round(i16(hhea, 4) / units_per_pixel),
+                "descent": round(-i16(hhea, 6) / units_per_pixel),
+            }
+        )
 
-    ascent = round(i16(hhea, 4) / units_per_pixel)
-    descent = round(-i16(hhea, 6) / units_per_pixel)
+    ascent = max(source["ascent"] for source in sources)
+    descent = max(source["descent"] for source in sources)
     x_origin = 0
 
     glyphs = {}
@@ -346,11 +381,19 @@ def main():
     advances = [0] * table_len
     max_w = 0
     for code in codepoints:
-        glyph = glyph_id(cmap, code)
-        # glyph 0 is .notdef: the codepoint is not in the font, so leave it
-        # blank rather than baking the missing-glyph box into the atlas.
-        if glyph == 0:
+        # Take the codepoint from the first (highest-priority) font that has a
+        # glyph for it; glyph 0 is .notdef, meaning the font lacks the
+        # codepoint, so we fall through to the next font instead of baking the
+        # missing-glyph box into the atlas.
+        source, glyph = next(
+            ((s, g) for s in sources if (g := s["cmap"].get(code))), (None, 0)
+        )
+        if source is None:
             continue
+        font = source["font"]
+        glyf = source["glyf"]
+        offsets = source["offsets"]
+        units_per_pixel = source["units_per_pixel"]
         start, end = offsets[glyph], offsets[glyph + 1]
         advance, lsb = glyph_metric(font, glyph, units_per_pixel)
         advances[code] = advance
@@ -451,7 +494,8 @@ def main():
     metrics_path.write_text(
         "\n".join(
             [
-                f"// Generated by tools/export_pixel_font.py from {font_path.name}.",
+                f"// Generated by tools/export_pixel_font.py from "
+                f"{', '.join(path.name for path in font_paths)}.",
                 f"// units_per_pixel={units_per_pixel}, range=U+{first:04X}..U+{last:04X}",
                 f"// {len(written)} atlas block(s), {args.block} codepoints each:",
                 block_list,
@@ -467,7 +511,7 @@ def main():
                 f"pub const {prefix}_COLS: usize = {args.cols};",
                 f"pub const {prefix}_X_ORIGIN: usize = {x_origin};",
                 "#[rustfmt::skip]",
-                f"pub const {prefix}_ADVANCE: [u8; {table_len}] = [{metrics_body}];",
+                f"pub static {prefix}_ADVANCE: [u8; {table_len}] = [{metrics_body}];",
                 "",
                 f"pub const {spec_name}: FontSpec = FontSpec {{",
                 f"    atlases: {prefix}_ATLASES,",

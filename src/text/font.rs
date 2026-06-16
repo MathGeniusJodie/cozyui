@@ -30,12 +30,17 @@ struct LoadedAtlas {
 }
 
 /// A character resolved to a concrete atlas cell and its advance width: `ch`
-/// itself when a loaded block covers it, otherwise the `?` fallback. Resolving
-/// once per glyph keeps `is_on` a plain array index in the per-pixel loops.
+/// itself when a loaded block covers it, otherwise a fallback font's glyph, or
+/// finally the `?` fallback. Resolving once per glyph keeps `is_on` a plain
+/// array index in the per-pixel loops. The cell geometry travels with the
+/// glyph because a fallback glyph comes from a font with its own cell size.
 struct Glyph<'a> {
     atlas: &'a LoadedAtlas,
     cell_x: usize,
     cell_y: usize,
+    cell_w: usize,
+    cell_h: usize,
+    x_origin: usize,
     advance: usize,
 }
 
@@ -48,10 +53,28 @@ impl Glyph<'_> {
 pub struct BitmapFont {
     spec: &'static FontSpec,
     atlases: Vec<LoadedAtlas>,
+    /// Consulted for codepoints this font lacks, before giving up on `?`.
+    fallback: Option<Box<Self>>,
 }
 
 impl BitmapFont {
     pub(crate) fn load(spec: &'static FontSpec) -> Result<Self, Box<dyn Error>> {
+        Self::load_inner(spec, None)
+    }
+
+    /// Load `spec`, resolving any codepoint it lacks against `fallback` (itself
+    /// a full font, so it may chain its own fallback) before the `?` glyph.
+    pub(crate) fn load_with_fallback(
+        spec: &'static FontSpec,
+        fallback: &'static FontSpec,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::load_inner(spec, Some(Box::new(Self::load(fallback)?)))
+    }
+
+    fn load_inner(
+        spec: &'static FontSpec,
+        fallback: Option<Box<Self>>,
+    ) -> Result<Self, Box<dyn Error>> {
         let block_rows = spec.block.div_ceil(spec.cols);
         let mut atlases = Vec::with_capacity(spec.atlases.len());
         for atlas in spec.atlases {
@@ -69,16 +92,28 @@ impl BitmapFont {
                 pixels: pixels.into_iter().map(is_glyph_ink).collect(),
             });
         }
-        Ok(Self { spec, atlases })
+        Ok(Self {
+            spec,
+            atlases,
+            fallback,
+        })
     }
 
-    /// Resolve `ch` to its atlas cell and advance, falling back to `?` when no
-    /// loaded block covers the codepoint. `?` always lives in the first block,
-    /// so resolution never fails.
+    /// Resolve `ch` to its atlas cell and advance: this font first, then the
+    /// fallback chain, finally the `?` glyph. `?` always lives in the first
+    /// block, so resolution never fails.
     fn glyph(&self, ch: char) -> Glyph<'_> {
-        self.locate(ch as usize)
+        self.resolve(ch as usize)
             .or_else(|| self.locate('?' as usize))
             .expect("'?' fallback glyph must be present in the first atlas block")
+    }
+
+    /// This font's glyph for `code` if it has one, otherwise the fallback
+    /// chain's. Does not apply the `?` substitution so callers can distinguish
+    /// "no font covers this" from a deliberate fallback.
+    fn resolve(&self, code: usize) -> Option<Glyph<'_>> {
+        self.locate(code)
+            .or_else(|| self.fallback.as_deref().and_then(|f| f.resolve(code)))
     }
 
     fn locate(&self, code: usize) -> Option<Glyph<'_>> {
@@ -90,6 +125,9 @@ impl BitmapFont {
                 atlas,
                 cell_x: (local % self.spec.cols) * self.spec.cell_w,
                 cell_y: (local / self.spec.cols) * self.spec.cell_h,
+                cell_w: self.spec.cell_w,
+                cell_h: self.spec.cell_h,
+                x_origin: self.spec.x_origin,
                 advance: self.spec.advance[code] as usize,
             })
         })
@@ -112,13 +150,13 @@ impl BitmapFont {
         let mut cursor_x = 0_isize;
         for ch in text.chars() {
             let glyph = self.glyph(ch);
-            for gy in 0..self.spec.cell_h {
-                for gx in 0..self.spec.cell_w {
+            for gy in 0..glyph.cell_h {
+                for gx in 0..glyph.cell_w {
                     if !glyph.is_on(gx, gy) {
                         continue;
                     }
 
-                    let x = cursor_x + gx as isize - self.spec.x_origin as isize;
+                    let x = cursor_x + gx as isize - glyph.x_origin as isize;
                     let y = gy;
                     bounds = Some(bounds.map_or(
                         TextInkBounds {
@@ -174,8 +212,8 @@ impl BitmapFont {
                 break;
             }
             let glyph = self.glyph(ch);
-            if cursor_x + self.spec.cell_w as isize > clip_x as isize {
-                self.draw_glyph(fb, &glyph, cursor_x, y, color, clip_x, clip_x + clip_w);
+            if cursor_x + glyph.cell_w as isize > clip_x as isize {
+                Self::draw_glyph(fb, &glyph, cursor_x, y, color, clip_x, clip_x + clip_w);
             }
             cursor_x += glyph.advance as isize;
         }
@@ -193,13 +231,12 @@ impl BitmapFont {
         let mut cursor_x = x;
         for ch in text.chars().take(max_chars) {
             let glyph = self.glyph(ch);
-            self.draw_glyph(fb, &glyph, cursor_x as isize, y, color, 0, usize::MAX);
+            Self::draw_glyph(fb, &glyph, cursor_x as isize, y, color, 0, usize::MAX);
             cursor_x += glyph.advance;
         }
     }
 
     fn draw_glyph(
-        &self,
         fb: &mut Framebuffer,
         glyph: &Glyph<'_>,
         x: isize,
@@ -208,12 +245,12 @@ impl BitmapFont {
         clip_left: usize,
         clip_right: usize,
     ) {
-        for gy in 0..self.spec.cell_h {
-            for gx in 0..self.spec.cell_w {
+        for gy in 0..glyph.cell_h {
+            for gx in 0..glyph.cell_w {
                 if !glyph.is_on(gx, gy) {
                     continue;
                 }
-                let dest_x = x + (gx as isize - self.spec.x_origin as isize);
+                let dest_x = x + (gx as isize - glyph.x_origin as isize);
                 if dest_x < clip_left as isize || dest_x as usize >= clip_right {
                     continue;
                 }
@@ -257,8 +294,8 @@ mod tests {
     fn glyph_ink(font: &BitmapFont, ch: char) -> Vec<(usize, usize)> {
         let glyph = font.glyph(ch);
         let mut ink = Vec::new();
-        for y in 0..font.spec.cell_h {
-            for x in 0..font.spec.cell_w {
+        for y in 0..glyph.cell_h {
+            for x in 0..glyph.cell_w {
                 if glyph.is_on(x, y) {
                     ink.push((x, y));
                 }
@@ -278,6 +315,24 @@ mod tests {
             !ink.is_empty() && ink != fallback && font.advance(ch) > 0
         });
         assert!(found, "no non-ascii glyph rendered distinct ink");
+    }
+
+    #[test]
+    fn missing_glyph_resolves_through_fallback_font() {
+        // peanut_money lacks CJK, so a fallback font must supply U+4E00's ink
+        // and advance instead of the bare '?' glyph the chain ends on.
+        use crate::fusion_pixel_10_font::FUSION_PIXEL_10_SPEC;
+        let font =
+            BitmapFont::load_with_fallback(&PEANUT_MONEY_SPEC, &FUSION_PIXEL_10_SPEC).unwrap();
+        let cjk = '\u{4E00}';
+        let ink = glyph_ink(&font, cjk);
+        assert!(!ink.is_empty(), "fallback glyph rendered no ink");
+        assert_ne!(
+            ink,
+            glyph_ink(&font, '?'),
+            "fell back to '?' instead of font"
+        );
+        assert!(font.advance(cjk) > 0, "fallback glyph reported no advance");
     }
 
     #[test]

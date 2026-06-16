@@ -156,7 +156,10 @@ impl Toodle {
             goldstar: Sprite::load_native(GOLDSTAR_PATH, palette)?,
             pencil: Sprite::load_native(PENCIL_PATH, palette)?,
             pencil_shadow: Sprite::load_native(PENCIL_SHADOW_PATH, palette)?,
-            font: BitmapFont::load(&peanut_money_font::PEANUT_MONEY_SPEC)?,
+            font: BitmapFont::load_with_fallback(
+                &peanut_money_font::PEANUT_MONEY_SPEC,
+                &crate::fusion_pixel_10_font::FUSION_PIXEL_10_SPEC,
+            )?,
             todos: [
                 TodoList::load(TODO_FILES[0])?,
                 TodoList::load(TODO_FILES[1])?,

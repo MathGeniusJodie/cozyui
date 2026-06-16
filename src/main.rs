@@ -16,6 +16,12 @@ mod bench;
 mod comicoro_font;
 mod day;
 mod emojimap;
+#[allow(dead_code)]
+mod fusion_pixel_10_font;
+#[allow(dead_code)]
+mod fusion_pixel_12_font;
+#[allow(dead_code)]
+mod fusion_pixel_8_font;
 mod fwends;
 mod graphics;
 mod localtime;

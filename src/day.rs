@@ -81,9 +81,15 @@ impl Day {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             background: Sprite::load_native(BACKGROUND_PATH, palette)?,
-            label_font: BitmapFont::load(&pixolde_bold_font::PIXOLDE_BOLD_SPEC)?,
+            label_font: BitmapFont::load_with_fallback(
+                &pixolde_bold_font::PIXOLDE_BOLD_SPEC,
+                &crate::fusion_pixel_12_font::FUSION_PIXEL_12_SPEC,
+            )?,
             number_font: BitmapFont::load(&rozha_one_48_font::ROZHA_ONE_48_SPEC)?,
-            calendar_font: BitmapFont::load(&poco_font::POCO_SPEC)?,
+            calendar_font: BitmapFont::load_with_fallback(
+                &poco_font::POCO_SPEC,
+                &crate::fusion_pixel_8_font::FUSION_PIXEL_8_SPEC,
+            )?,
             date: current_date_parts(),
             last_check: Instant::now(),
             calendar_mode: false,

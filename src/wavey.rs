@@ -109,7 +109,10 @@ impl Wavey {
         let volume = read_system_volume().unwrap_or(50);
         let mut wavey = Self {
             image: Sprite::load_native(WAVEY_PATH, palette)?,
-            font: BitmapFont::load(&poco_font::POCO_SPEC)?,
+            font: BitmapFont::load_with_fallback(
+                &poco_font::POCO_SPEC,
+                &crate::fusion_pixel_8_font::FUSION_PIXEL_8_SPEC,
+            )?,
             stations: load_stations(STATIONS_PATH),
             station: 0,
             volume,
