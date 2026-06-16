@@ -433,14 +433,21 @@ def main():
         block[: len(rows_slice)] = rows_slice
         block_path = atlas_path.with_name(f"{stem}_{block_start:04X}-{block_end:04X}.png")
         write_rgb_png(block_path, atlas_w, block_h, block)
-        written.append(block_path)
+        written.append((block_start, block_path))
 
     if not written:
         raise ValueError("no glyphs had ink; nothing was exported")
 
     metrics_body = ", ".join(str(width) for width in advances)
     spec_name = f"{prefix}_SPEC"
-    block_list = "\n".join(f"//   {repo_relative(path)}" for path in written)
+    block_list = "\n".join(f"//   {repo_relative(path)}" for _, path in written)
+    atlas_entries = "\n".join(
+        f"    FontAtlas {{\n"
+        f"        first_codepoint: 0x{block_start:04X},\n"
+        f"        path: concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{repo_relative(path)}\"),\n"
+        f"    }},"
+        for block_start, path in written
+    )
     metrics_path.write_text(
         "\n".join(
             [
@@ -448,10 +455,13 @@ def main():
                 f"// units_per_pixel={units_per_pixel}, range=U+{first:04X}..U+{last:04X}",
                 f"// {len(written)} atlas block(s), {args.block} codepoints each:",
                 block_list,
-                "use crate::text::FontSpec;",
+                "use crate::text::{FontAtlas, FontSpec};",
                 "",
-                f"pub const {prefix}_ATLAS_PATH: &str =",
-                f"    concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{repo_relative(written[0])}\");",
+                "#[rustfmt::skip]",
+                f"pub const {prefix}_ATLASES: &[FontAtlas] = &[",
+                atlas_entries,
+                "];",
+                f"pub const {prefix}_BLOCK: usize = {args.block};",
                 f"pub const {prefix}_CELL_W: usize = {cell_w};",
                 f"pub const {prefix}_CELL_H: usize = {cell_h};",
                 f"pub const {prefix}_COLS: usize = {args.cols};",
@@ -460,7 +470,8 @@ def main():
                 f"pub const {prefix}_ADVANCE: [u8; {table_len}] = [{metrics_body}];",
                 "",
                 f"pub const {spec_name}: FontSpec = FontSpec {{",
-                f"    atlas_path: {prefix}_ATLAS_PATH,",
+                f"    atlases: {prefix}_ATLASES,",
+                f"    block: {prefix}_BLOCK,",
                 f"    cell_w: {prefix}_CELL_W,",
                 f"    cell_h: {prefix}_CELL_H,",
                 f"    cols: {prefix}_COLS,",

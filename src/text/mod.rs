@@ -11,5 +11,5 @@ mod wrap;
 
 pub use edit::TextEditOutcome;
 pub use field::{LinePlacement, TextField, TextLayout};
-pub use font::{BitmapFont, FontSpec};
+pub use font::{BitmapFont, FontAtlas, FontSpec};
 pub use input::{EditKey, KeyInput, edit_key};
