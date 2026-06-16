@@ -95,7 +95,10 @@ impl<'a> TextLayout<'a> {
     }
 
     pub(crate) fn draw(&self, fb: &mut Framebuffer, text: &str, color: Index) {
-        let lines = self.wrap(text);
+        self.draw_lines(fb, &self.wrap(text), color);
+    }
+
+    pub(crate) fn draw_lines(&self, fb: &mut Framebuffer, lines: &[String], color: Index) {
         let count = lines.len();
         for (index, line) in lines.iter().enumerate() {
             self.font
@@ -103,17 +106,16 @@ impl<'a> TextLayout<'a> {
         }
     }
 
-    pub(crate) fn draw_selection(
+    pub(crate) fn draw_selection_lines(
         &self,
         fb: &mut Framebuffer,
-        text: &str,
+        lines: &[String],
         selection: Option<(usize, usize)>,
         color: Index,
     ) {
         let Some((selection_start, selection_end)) = selection else {
             return;
         };
-        let lines = self.wrap(text);
         let count = lines.len();
         let mut line_start = 0;
         for (index, line) in lines.iter().enumerate() {
@@ -227,12 +229,9 @@ impl TextField {
     ) -> TextEditOutcome {
         let max_chars = self.max_chars;
         let max_lines = self.max_lines;
-        let max_width = layout.max_width;
-        let font = layout.font;
         self.edit
             .handle_key(input, &mut self.text, clipboard_text, |candidate| {
-                char_len(candidate) <= max_chars
-                    && font.wrap_lines(candidate, max_width).len() <= max_lines
+                char_len(candidate) <= max_chars && layout.wrap(candidate).len() <= max_lines
             })
     }
 
@@ -268,8 +267,9 @@ impl TextField {
         text_color: Index,
         selection_color: Index,
     ) {
-        layout.draw_selection(fb, &self.text, self.edit.selection_range(), selection_color);
-        layout.draw(fb, &self.text, text_color);
+        let lines = layout.wrap(&self.text);
+        layout.draw_selection_lines(fb, &lines, self.edit.selection_range(), selection_color);
+        layout.draw_lines(fb, &lines, text_color);
     }
 }
 

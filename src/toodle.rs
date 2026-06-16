@@ -279,17 +279,18 @@ impl Toodle {
             }
 
             let layout = Self::line_layout(&self.font, line);
+            let lines = layout.wrap(&todo.text);
             if self.focused_line == Some(line) {
-                layout.draw_selection(
+                layout.draw_selection_lines(
                     fb,
-                    &todo.text,
+                    &lines,
                     self.field.selection_range(),
                     palette_color::LAVENDER,
                 );
             }
-            layout.draw(
+            layout.draw_lines(
                 fb,
-                &todo.text,
+                &lines,
                 if todo.checked {
                     completed_text_color
                 } else {
