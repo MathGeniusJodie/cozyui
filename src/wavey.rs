@@ -32,14 +32,14 @@ const CLOCK_COLON_SRC_Y: usize = 26;
 const CLOCK_COLON_H: usize = 22;
 
 const TUNER_ALL_Y: usize = 5;
-const TUNER_X: usize = 98;
+const TUNER_X: usize = 100;
 const TUNER_Y: usize = TUNER_ALL_Y + 12;
 const TUNER_W: usize = 94;
 const TUNER_H: usize = 26;
 const TUNER_MARK_Y: usize = TUNER_ALL_Y + 23;
 const TUNER_MARK_SIZE: usize = 5;
-const LABEL_ABOVE_Y: usize = TUNER_ALL_Y + 14;
-const LABEL_BELOW_Y: usize = TUNER_ALL_Y + 30;
+const LABEL_ABOVE_Y: usize = TUNER_ALL_Y + 12;
+const LABEL_BELOW_Y: usize = TUNER_ALL_Y + 27;
 
 const MEDIA_BUTTON_X: usize = 185;
 const MEDIA_BUTTON_Y: usize = 4;
