@@ -11,8 +11,7 @@
 //   fonts/poco_2100-217F.png
 use crate::text::FontSpec;
 
-pub const POCO_ATLAS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/poco_0000-007F.png");
+pub const POCO_ATLAS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/poco_0000-007F.png");
 pub const POCO_CELL_W: usize = 17;
 pub const POCO_CELL_H: usize = 9;
 pub const POCO_COLS: usize = 16;

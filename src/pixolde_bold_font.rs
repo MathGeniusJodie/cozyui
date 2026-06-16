@@ -11,8 +11,10 @@
 //   fonts/pixolde_bold_2100-217F.png
 use crate::text::FontSpec;
 
-pub const PIXOLDE_BOLD_ATLAS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/pixolde_bold_0000-007F.png");
+pub const PIXOLDE_BOLD_ATLAS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fonts/pixolde_bold_0000-007F.png"
+);
 pub const PIXOLDE_BOLD_CELL_W: usize = 17;
 pub const PIXOLDE_BOLD_CELL_H: usize = 15;
 pub const PIXOLDE_BOLD_COLS: usize = 16;

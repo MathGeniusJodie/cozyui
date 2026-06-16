@@ -12,8 +12,10 @@
 //   fonts/peanut_money_2200-227F.png
 use crate::text::FontSpec;
 
-pub const PEANUT_MONEY_ATLAS_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/peanut_money_0000-007F.png");
+pub const PEANUT_MONEY_ATLAS_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fonts/peanut_money_0000-007F.png"
+);
 pub const PEANUT_MONEY_CELL_W: usize = 18;
 pub const PEANUT_MONEY_CELL_H: usize = 14;
 pub const PEANUT_MONEY_COLS: usize = 16;
