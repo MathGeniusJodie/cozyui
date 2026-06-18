@@ -8,7 +8,7 @@ use crate::app_color;
 use crate::comicoro_font;
 use crate::palette_color;
 use crate::text::BitmapFont;
-use crate::{Framebuffer, Index, Paint, Palette, Sprite, TRANSPARENT};
+use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
 const WHEEL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/wheel.png");
 const TOTAL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/twirl_total.txt");
@@ -91,7 +91,7 @@ impl Twirl {
             SHADOW_X_OFFSET,
             SHADOW_Y_OFFSET,
             palette,
-            Paint::Solid(app_color::BACKGROUND_SHADOW),
+            app_color::BACKGROUND_SHADOW_PAINT,
         );
 
         for y in 0..self.wheel.height {

@@ -79,11 +79,18 @@ pub(crate) mod palette_color {
 
 #[allow(dead_code)]
 pub(crate) mod app_color {
-    use crate::Index;
     use crate::palette_color;
+    use crate::{Index, Paint};
 
+    /// Solid under-paint color for the root/widget framebuffers; the desk
+    /// background checker is drawn over it.
     pub const BACKGROUND: Index = palette_color::CYAN;
-    pub const BACKGROUND_SHADOW: Index = palette_color::BLUE;
+
+    /// The background and its cast shadows are the only thing that paints with
+    /// these checkers. Everything else uses literal palette colors.
+    pub const BACKGROUND_PAINT: Paint = Paint::Checker(palette_color::LIME, palette_color::CYAN);
+    pub const BACKGROUND_SHADOW_PAINT: Paint =
+        Paint::Checker(palette_color::BLUE, palette_color::GREEN);
 }
 
 const WHEEL_UP: u8 = 4;
@@ -271,13 +278,18 @@ impl App {
     }
 
     fn render_background(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.clear(self.fill_color(palette));
-        let full = Rect::new(0, 0, fb.width, fb.height);
-        draw_stretched_desk_region(fb, &self.desk, palette, full);
+        self.render_background_rect(fb, palette, Rect::new(0, 0, fb.width, fb.height));
     }
 
     fn render_background_rect(&self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
-        fb.fill_rect(rect.x, rect.y, rect.w, rect.h, self.fill_color(palette));
+        fb.fill_rect_paint(
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            palette,
+            app_color::BACKGROUND_PAINT,
+        );
         draw_stretched_desk_region(fb, &self.desk, palette, rect);
     }
 
@@ -696,8 +708,8 @@ fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Pal
     for y in y0..y1 {
         let source_y = y - desk_y;
         for x in x0..x1 {
-            let index = desk_background_index(desk.at(source_x[x - x0], source_y));
-            if let Some(color) = palette.resolve_index(index, x, y) {
+            let paint = desk_background_paint(desk.at(source_x[x - x0], source_y));
+            if let Some(color) = palette.resolve_paint_index(paint, x, y) {
                 fb.set_pixel(x, y, color);
             }
         }
@@ -723,11 +735,11 @@ fn stretched_desk_source_x(x: usize, target_w: usize, source_w: usize) -> usize 
     }
 }
 
-const fn desk_background_index(index: Index) -> Index {
+const fn desk_background_paint(index: Index) -> Paint {
     match index {
-        palette_color::ROSE => app_color::BACKGROUND,
-        palette_color::CRIMSON => app_color::BACKGROUND_SHADOW,
-        other => other,
+        palette_color::ROSE => app_color::BACKGROUND_PAINT,
+        palette_color::CRIMSON => app_color::BACKGROUND_SHADOW_PAINT,
+        other => Paint::Solid(other),
     }
 }
 

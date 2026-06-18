@@ -8,7 +8,7 @@ use crate::pixolde_bold_font;
 use crate::poco_font;
 use crate::rozha_one_48_font;
 use crate::text::BitmapFont;
-use crate::{Framebuffer, Index, Paint, Palette, Sprite, TRANSPARENT, draw_filled_circle};
+use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT, draw_filled_circle};
 
 const WIDTH: usize = 116;
 const HEIGHT: usize = 116;
@@ -117,7 +117,7 @@ impl Day {
             SHADOW_X_OFFSET,
             SHADOW_Y_OFFSET,
             palette,
-            Paint::Solid(app_color::BACKGROUND_SHADOW),
+            app_color::BACKGROUND_SHADOW_PAINT,
         );
         fb.draw_sprite(&self.background, 0, 0, palette);
 

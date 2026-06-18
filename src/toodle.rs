@@ -318,7 +318,7 @@ impl Toodle {
             page_x as isize + SHADOW_X_OFFSET,
             page_y as isize + SHADOW_Y_OFFSET,
             palette,
-            Paint::Solid(app_color::BACKGROUND_SHADOW),
+            app_color::BACKGROUND_SHADOW_PAINT,
         );
     }
 

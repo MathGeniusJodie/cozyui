@@ -127,7 +127,6 @@ pub type PresentLut = [[u8; Framebuffer::BYTES_PER_PIXEL]; 256];
 
 pub struct Palette {
     colors: Vec<Rgb>,
-    remap: Vec<Paint>,
 }
 
 impl Palette {
@@ -142,11 +141,8 @@ impl Palette {
         Ok(Self::from_colors(colors))
     }
 
-    pub(crate) fn from_colors(colors: Vec<Rgb>) -> Self {
-        let remap = (0..colors.len())
-            .map(|index| Paint::Solid(index as Index))
-            .collect();
-        Self { colors, remap }
+    pub(crate) const fn from_colors(colors: Vec<Rgb>) -> Self {
+        Self { colors }
     }
 
     #[allow(dead_code)]
@@ -164,39 +160,33 @@ impl Palette {
         if index < len { index } else { index % len }
     }
 
-    /// Global theme layer: every slot can become another color or checker.
-    /// Applied when sprites and paints are resolved at draw time.
-    #[allow(dead_code)]
-    pub(crate) fn set_remap(&mut self, index: Index, paint: Paint) {
-        let slot = index as usize % self.colors.len();
-        self.remap[slot] = paint;
-    }
-
-    /// Resolve an index through the global remap to a final *palette index*
-    /// (remap + checker pick applied), deferring the index->color step to
-    /// present time. This is what the indexed framebuffer stores.
-    pub(crate) fn resolve_index(
+    /// Resolve an index to a final *palette index*, deferring the
+    /// index->color step to present time. This is what the indexed
+    /// framebuffer stores. Indices pass through literally — the only theme
+    /// layer is the background, which is painted with an explicit `Paint`
+    /// at draw time rather than by hijacking palette slots.
+    #[allow(clippy::unused_self)]
+    pub(crate) const fn resolve_index(
         &self,
         index: Index,
-        cell_x: usize,
-        cell_y: usize,
+        _cell_x: usize,
+        _cell_y: usize,
     ) -> Option<Index> {
         if index == TRANSPARENT {
             return None;
         }
-        let paint = self.remap[Self::wrap(index as usize, self.colors.len())];
-        paint.pick(cell_x, cell_y)
+        Some(index)
     }
 
-    /// Per-draw paint -> global remap, to a final palette index.
-    pub(crate) fn resolve_paint_index(
+    /// Per-draw paint -> a final palette index (checker pick applied).
+    #[allow(clippy::unused_self)]
+    pub(crate) const fn resolve_paint_index(
         &self,
         paint: Paint,
         cell_x: usize,
         cell_y: usize,
     ) -> Option<Index> {
-        let index = paint.pick(cell_x, cell_y)?;
-        self.resolve_index(index, cell_x, cell_y)
+        paint.pick(cell_x, cell_y)
     }
 
     /// Precompute a 256-entry index -> output BGRA table for the present pass.
@@ -549,6 +539,31 @@ impl Framebuffer {
         }
     }
 
+    /// Fill a rect with `paint`, so checkerboards land with their phase
+    /// anchored to framebuffer coords.
+    pub(crate) fn fill_rect_paint(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        palette: &Palette,
+        paint: Paint,
+    ) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let width = w.min(self.width - x);
+        let height = h.min(self.height - y);
+        for py in y..y + height {
+            for px in x..x + width {
+                if let Some(index) = palette.resolve_paint_index(paint, px, py) {
+                    self.set_pixel(px, py, index);
+                }
+            }
+        }
+    }
+
     pub(crate) fn draw_sprite(
         &mut self,
         sprite: &Sprite,
@@ -876,7 +891,7 @@ mod bench {
         const H: usize = 256;
         const ITERS: usize = 2000;
 
-        // 32-color palette, identity remap.
+        // 32-color palette.
         let colors: Vec<Rgb> = (0..32)
             .map(|i| Rgb {
                 r: (i * 8) as u8,
