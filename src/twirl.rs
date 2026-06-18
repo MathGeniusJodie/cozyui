@@ -198,7 +198,7 @@ impl Twirl {
         let text_w = self.font.text_width(&total);
         let x = self.wheel.width.saturating_sub(text_w) / 2;
         let y = self.wheel.height + TOTAL_GAP;
-        self.font.draw_text(fb, &total, x, y, palette_color::CREAM);
+        self.font.draw_text(fb, &total, x, y, palette_color::BLACK);
     }
 
     fn add_landed_value(&mut self) -> Result<(), Box<dyn Error>> {
