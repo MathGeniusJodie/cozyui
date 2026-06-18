@@ -37,7 +37,7 @@ const SEGMENT_DARK_COLORS: [Index; SEGMENT_COUNT] = [
 
 const START_SPEED_MIN: f32 = 11.0;
 const START_SPEED_RANGE: f32 = 5.0;
-const FRICTION_PER_SECOND: f32 = 0.78;
+const FRICTION_PER_SECOND: f32 = 0.4;
 const STOP_SPEED: f32 = 0.28;
 const NUMBER_RADIUS: f32 = 55.0;
 const POINTER_ANGLE: f32 = -std::f32::consts::FRAC_PI_2;
