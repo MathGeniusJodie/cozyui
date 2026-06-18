@@ -16,6 +16,7 @@ mod bench;
 mod comicoro_font;
 mod day;
 mod emojimap;
+mod fizzle;
 #[allow(dead_code)]
 mod fusion_pixel_10_font;
 #[allow(dead_code)]
@@ -89,7 +90,7 @@ const WHEEL_UP: u8 = 4;
 const WHEEL_DOWN: u8 = 5;
 
 const WIDGET_GAP: usize = 16;
-const APP_LEFT_PADDING: usize = 54;
+const APP_LEFT_PADDING: usize = 144;
 const APP_BOTTOM_PADDING: usize = 74;
 const SHOW_FWENDS: bool = true;
 const FWENDS_LEFT_APRON: usize = 60;
@@ -101,10 +102,11 @@ enum WidgetId {
     Fwends,
     Twirl,
     Wavey,
+    Fizzle,
     Day,
 }
 
-const WIDGET_COUNT: usize = 6;
+const WIDGET_COUNT: usize = 7;
 
 impl WidgetId {
     const fn index(self) -> usize {
@@ -113,21 +115,23 @@ impl WidgetId {
 }
 
 impl WidgetId {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Wavey,
         Self::Puter,
         Self::Toodle,
         Self::Fwends,
         Self::Twirl,
+        Self::Fizzle,
         Self::Day,
     ];
 
-    const VISIBLE_WITH_FWENDS: [Self; 6] = Self::ALL;
-    const VISIBLE_WITHOUT_FWENDS: [Self; 5] = [
+    const VISIBLE_WITH_FWENDS: [Self; 7] = Self::ALL;
+    const VISIBLE_WITHOUT_FWENDS: [Self; 6] = [
         Self::Wavey,
         Self::Puter,
         Self::Toodle,
         Self::Twirl,
+        Self::Fizzle,
         Self::Day,
     ];
 
@@ -150,6 +154,7 @@ struct App {
     fwends: fwends::Fwends,
     twirl: twirl::Twirl,
     wavey: wavey::Wavey,
+    fizzle: fizzle::Fizzle,
     day: day::Day,
     desk: Sprite,
     // Indexed by WidgetId::index().
@@ -167,15 +172,17 @@ impl App {
         let fwends = fwends::Fwends::load(palette)?;
         let twirl = twirl::Twirl::load(palette)?;
         let wavey = wavey::Wavey::load(palette)?;
+        let fizzle = fizzle::Fizzle::load(palette)?;
         let day = day::Day::load(palette)?;
         let desk = Sprite::load_native(DESK_PATH, palette)?;
-        let positions = widget_positions(&puter, &toodle, &twirl, &wavey, &day);
+        let positions = widget_positions(&puter, &toodle, &twirl, &wavey, &fizzle, &day);
         let sizes: [(usize, usize); WIDGET_COUNT] = [
             (puter.width(), puter.height()),
             (toodle.width(), toodle.height()),
             (fwends.width(), fwends.height()),
             (twirl.width(), twirl.height()),
             (wavey.width(), wavey.height()),
+            (fizzle.width(), fizzle.height()),
             (day.width(), day.height()),
         ];
         let fills: [Index; WIDGET_COUNT] = [
@@ -184,6 +191,7 @@ impl App {
             fwends.fill_color(palette),
             twirl.fill_color(palette),
             wavey.fill_color(palette),
+            fizzle.fill_color(palette),
             day.fill_color(palette),
         ];
         let rects = std::array::from_fn(|i| {
@@ -202,6 +210,7 @@ impl App {
             fwends,
             twirl,
             wavey,
+            fizzle,
             day,
             desk,
             fbs,
@@ -306,6 +315,10 @@ impl App {
                 widget_fb.clear(self.wavey.fill_color(palette));
                 self.wavey.render(widget_fb, palette);
             }
+            WidgetId::Fizzle => {
+                widget_fb.clear(self.fizzle.fill_color(palette));
+                self.fizzle.render(widget_fb, palette);
+            }
             WidgetId::Day => {
                 widget_fb.clear(self.day.fill_color(palette));
                 self.day.render(widget_fb, palette);
@@ -362,6 +375,7 @@ impl App {
             &self.toodle,
             &self.twirl,
             &self.wavey,
+            &self.fizzle,
             &self.day,
         );
         for (rect, (x, y)) in self.rects.iter_mut().zip(positions) {
@@ -417,7 +431,7 @@ impl App {
             }
             #[allow(clippy::match_same_arms)]
             WidgetId::Fwends => Ok(None),
-            WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => Ok(None),
+            WidgetId::Twirl | WidgetId::Wavey | WidgetId::Fizzle | WidgetId::Day => Ok(None),
         }
     }
 
@@ -452,6 +466,7 @@ impl App {
             WidgetId::Wavey => {
                 return Ok(self.wavey.click(x, y));
             }
+            WidgetId::Fizzle => {}
             WidgetId::Day => self.day.toggle_mode(),
         }
         Ok(None)
@@ -462,7 +477,11 @@ impl App {
             match widget {
                 WidgetId::Toodle => self.toodle.end_text_drag(),
                 WidgetId::Fwends => self.fwends.end_text_drag(),
-                WidgetId::Puter | WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => {}
+                WidgetId::Puter
+                | WidgetId::Twirl
+                | WidgetId::Wavey
+                | WidgetId::Fizzle
+                | WidgetId::Day => {}
             }
             return Some(widget);
         }
@@ -492,7 +511,11 @@ impl App {
                     let (local_x, local_y) = self.rect_for(WidgetId::Fwends).local(x, y);
                     self.fwends.drag_text(local_x, local_y)
                 }
-                WidgetId::Puter | WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => false,
+                WidgetId::Puter
+                | WidgetId::Twirl
+                | WidgetId::Wavey
+                | WidgetId::Fizzle
+                | WidgetId::Day => false,
             };
             return changed.then_some(widget);
         }
@@ -548,7 +571,9 @@ impl App {
             }
             (WidgetId::Wavey, ScrollDirection::Up) => self.wavey.scroll_up(x, y),
             (WidgetId::Wavey, ScrollDirection::Down) => self.wavey.scroll_down(x, y),
-            (WidgetId::Toodle | WidgetId::Twirl | WidgetId::Day, _) => return None,
+            (WidgetId::Toodle | WidgetId::Twirl | WidgetId::Fizzle | WidgetId::Day, _) => {
+                return None;
+            }
         };
         handled.then_some(widget)
     }
@@ -556,6 +581,7 @@ impl App {
     fn widget_at(&self, x: i16, y: i16) -> Option<(WidgetId, i16, i16)> {
         [
             WidgetId::Wavey,
+            WidgetId::Fizzle,
             WidgetId::Day,
             WidgetId::Twirl,
             WidgetId::Fwends,
@@ -590,6 +616,7 @@ fn widget_positions(
     toodle: &toodle::Toodle,
     twirl: &twirl::Twirl,
     wavey: &wavey::Wavey,
+    fizzle: &fizzle::Fizzle,
     day: &day::Day,
 ) -> [(usize, usize); WIDGET_COUNT] {
     let left_w = day.width().max(wavey.width());
@@ -615,12 +642,18 @@ fn widget_positions(
     let fwends_x = middle_x + middle_w + WIDGET_GAP + APP_LEFT_PADDING - FWENDS_LEFT_APRON;
     let fwends_y = 0;
 
+    // Fizzle sits to the left of wavey, with the candle holder bottom-aligned to
+    // wavey so the flame grows upward as the battery charges.
+    let fizzle_x = wavey_x.saturating_sub(WIDGET_GAP + fizzle.width());
+    let fizzle_y = (wavey_y + wavey.height()).saturating_sub(fizzle.height());
+
     [
         (puter_x, puter_y),
         (toodle_x, toodle_y),
         (fwends_x, fwends_y),
         (twirl_x, twirl_y),
         (wavey_x, wavey_y),
+        (fizzle_x, fizzle_y),
         (day_x, day_y),
     ]
 }
@@ -783,6 +816,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
+        if app.fizzle.update() {
+            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Fizzle)?;
+            drew_frame = true;
+        }
+
         if app.day.update() {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Day)?;
             drew_frame = true;
@@ -926,6 +964,6 @@ fn should_load_clipboard_for_paste(focus: WidgetId, input: &text::KeyInput) -> b
     match focus {
         WidgetId::Puter => is_paste_shortcut(input),
         WidgetId::Toodle | WidgetId::Fwends => is_plain_paste_shortcut(input),
-        WidgetId::Twirl | WidgetId::Wavey | WidgetId::Day => false,
+        WidgetId::Twirl | WidgetId::Wavey | WidgetId::Fizzle | WidgetId::Day => false,
     }
 }
