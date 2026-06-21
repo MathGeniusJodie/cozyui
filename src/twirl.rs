@@ -54,12 +54,19 @@ pub struct Twirl {
     last_update: Instant,
     last_click_segment: usize,
     total: u64,
+    /// Per-pixel `atan2(dy, dx)` of each wheel pixel relative to the wheel
+    /// center, precomputed once. The center angle never changes, so the
+    /// render hot loop only needs to add `self.angle` instead of calling
+    /// `atan2` per pixel per frame.
+    pixel_base_angle: Vec<f32>,
 }
 
 impl Twirl {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
+        let wheel = Sprite::load_native(WHEEL_PATH, palette)?;
+        let pixel_base_angle = Self::compute_pixel_base_angles(&wheel);
         Ok(Self {
-            wheel: Sprite::load_native(WHEEL_PATH, palette)?,
+            wheel,
             font: BitmapFont::load_with_fallback(
                 &comicoro_font::COMICORO_SPEC,
                 &crate::fusion_pixel_10_font::FUSION_PIXEL_10_SPEC,
@@ -69,7 +76,22 @@ impl Twirl {
             last_update: Instant::now(),
             last_click_segment: 0,
             total: load_total(TOTAL_PATH)?,
+            pixel_base_angle,
         })
+    }
+
+    fn compute_pixel_base_angles(wheel: &Sprite) -> Vec<f32> {
+        let radius = wheel.width as f32 / 2.0;
+        let (center_x, center_y) = (radius, radius);
+        let mut angles = Vec::with_capacity(wheel.width * wheel.height);
+        for y in 0..wheel.height {
+            for x in 0..wheel.width {
+                let dx = x as f32 + 0.5 - center_x;
+                let dy = y as f32 + 0.5 - center_y;
+                angles.push(dy.atan2(dx));
+            }
+        }
+        angles
     }
 
     pub(crate) const fn width(&self) -> usize {
@@ -219,10 +241,8 @@ impl Twirl {
     }
 
     fn segment_at(&self, x: usize, y: usize) -> usize {
-        let (center_x, center_y) = self.wheel_center();
-        let dx = x as f32 + 0.5 - center_x;
-        let dy = y as f32 + 0.5 - center_y;
-        segment_for_angle(dy.atan2(dx) + self.angle)
+        let base = self.pixel_base_angle[y * self.wheel.width + x];
+        segment_for_angle(base + self.angle)
     }
 }
 

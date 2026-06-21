@@ -7,3 +7,5 @@ toodle_*.txt
 .scrooge/ledger.json
 tools/__pycache__
 toodle_done/*
+/perf.data
+/perf.data.old
