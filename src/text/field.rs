@@ -106,6 +106,17 @@ impl<'a> TextLayout<'a> {
         }
     }
 
+    /// Like [`draw_lines`](Self::draw_lines), but fakes a bold weight by drawing
+    /// each line a second time one pixel to the right.
+    pub(crate) fn draw_lines_bold(&self, fb: &mut Framebuffer, lines: &[String], color: Index) {
+        let count = lines.len();
+        for (index, line) in lines.iter().enumerate() {
+            let y = self.line_y(index, count);
+            self.font.draw_text(fb, line, self.origin_x, y, color);
+            self.font.draw_text(fb, line, self.origin_x + 1, y, color);
+        }
+    }
+
     pub(crate) fn draw_selection_lines(
         &self,
         fb: &mut Framebuffer,

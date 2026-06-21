@@ -77,7 +77,15 @@ impl Twirl {
     }
 
     pub(crate) const fn height(&self) -> usize {
-        self.wheel.height + TOTAL_GAP + self.font.cell_h() + SHADOW_Y_OFFSET as usize
+        self.wheel.height + SHADOW_Y_OFFSET as usize
+    }
+
+    /// Center of the wheel's circular face. The face is a `wheel.width`-diameter
+    /// circle anchored at the top of the (taller) sprite, so its center sits at
+    /// `wheel.width / 2` from the top rather than at the sprite's mid-height.
+    fn wheel_center(&self) -> (f32, f32) {
+        let radius = self.wheel.width as f32 / 2.0;
+        (radius, radius)
     }
 
     #[allow(clippy::unused_self)]
@@ -151,8 +159,7 @@ impl Twirl {
             return;
         }
 
-        let center_x = self.wheel.width as f32 / 2.0;
-        let center_y = self.wheel.height as f32 / 2.0;
+        let (center_x, center_y) = self.wheel_center();
         let dx = x as f32 + 0.5 - center_x;
         let dy = y as f32 + 0.5 - center_y;
         if dx * dx + dy * dy > center_x.min(center_y).powi(2) {
@@ -179,8 +186,7 @@ impl Twirl {
     }
 
     fn draw_numbers(&self, fb: &mut Framebuffer, _palette: &Palette) {
-        let center_x = self.wheel.width as f32 / 2.0;
-        let center_y = self.wheel.height as f32 / 2.0;
+        let (center_x, center_y) = self.wheel_center();
         let color = palette_color::BLACK;
         for (segment, number) in SEGMENT_NUMBERS.iter().enumerate() {
             let angle = segment_center_angle(segment) - self.angle;
@@ -196,9 +202,9 @@ impl Twirl {
     fn draw_total(&self, fb: &mut Framebuffer, _palette: &Palette) {
         let total = self.total.to_string();
         let text_w = self.font.text_width(&total);
-        let x = self.wheel.width.saturating_sub(text_w) / 2;
-        let y = self.wheel.height + TOTAL_GAP;
-        self.font.draw_text(fb, &total, x, y, palette_color::BLACK);
+        let x = (self.wheel.width.saturating_sub(text_w) / 2).saturating_sub(5);
+        let y = self.wheel.width + TOTAL_GAP + 2;
+        self.font.draw_text(fb, &total, x, y, palette_color::CREAM);
     }
 
     fn add_landed_value(&mut self) -> Result<(), Box<dyn Error>> {
@@ -213,8 +219,7 @@ impl Twirl {
     }
 
     fn segment_at(&self, x: usize, y: usize) -> usize {
-        let center_x = self.wheel.width as f32 / 2.0;
-        let center_y = self.wheel.height as f32 / 2.0;
+        let (center_x, center_y) = self.wheel_center();
         let dx = x as f32 + 0.5 - center_x;
         let dy = y as f32 + 0.5 - center_y;
         segment_for_angle(dy.atan2(dx) + self.angle)

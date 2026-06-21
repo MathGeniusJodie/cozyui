@@ -39,6 +39,7 @@ const PENCIL_SHADOW_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/toodle_pencil_shadow.png"
 );
+const DICE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/dice.png");
 
 const SECTION_COUNT: usize = 4;
 const VISIBLE_PAGE_COUNT: usize = 4;
@@ -55,6 +56,8 @@ const ARCHIVE_TRANSACTION_PATH: &str = concat!(
     "/toodle_archive_transaction.json"
 );
 const PAGE_OFFSET_X: usize = 14;
+/// Gap between the front page's right edge and the dice button.
+const DICE_GAP: usize = 8;
 const PAGE_STACK_OFFSET: usize = 4;
 const SHADOW_X_OFFSET: isize = 1;
 const SHADOW_Y_OFFSET: isize = 4;
@@ -106,6 +109,7 @@ pub struct Toodle {
     goldstar: Sprite,
     pencil: Sprite,
     pencil_shadow: Sprite,
+    dice: Sprite,
     font: BitmapFont,
     todos: [TodoList; SECTION_COUNT],
     // Per-priority count of todos archived into today's done files, used for
@@ -113,6 +117,9 @@ pub struct Toodle {
     today_done_counts: [usize; SECTION_COUNT],
     page: usize,
     focused_line: Option<usize>,
+    // The todo the dice last landed on, as (section, page, line). Drawn crimson
+    // and fake-bolded until the dice is rolled again or no todo is eligible.
+    highlighted: Option<(usize, usize, usize)>,
     field: TextField,
     eraser_hovered: bool,
     // Per-keystroke saves fsync and made typing lag; edits are saved after a
@@ -154,6 +161,7 @@ impl Toodle {
             goldstar: Sprite::load_native(GOLDSTAR_PATH, palette)?,
             pencil: Sprite::load_native(PENCIL_PATH, palette)?,
             pencil_shadow: Sprite::load_native(PENCIL_SHADOW_PATH, palette)?,
+            dice: Sprite::load_native(DICE_PATH, palette)?,
             font: BitmapFont::load_with_fallback(
                 &peanut_money_font::PEANUT_MONEY_SPEC,
                 &crate::fusion_pixel_10_font::FUSION_PIXEL_10_SPEC,
@@ -167,6 +175,7 @@ impl Toodle {
             today_done_counts: today_done_counts()?,
             page: 0,
             focused_line: None,
+            highlighted: None,
             // The fits predicate is governed entirely by the two-line wrap, so
             // there is no separate character cap.
             field: TextField::new(usize::MAX, 2),
@@ -179,7 +188,10 @@ impl Toodle {
     }
 
     pub(crate) fn width(&self) -> usize {
-        (PAGE_OFFSET_X + self.pages[0].width + self.stack_offset()) + SHADOW_X_OFFSET as usize
+        let stack_right =
+            (PAGE_OFFSET_X + self.pages[0].width + self.stack_offset()) + SHADOW_X_OFFSET as usize;
+        let dice_right = PAGE_OFFSET_X + self.pages[0].width + DICE_GAP + self.dice.width;
+        stack_right.max(dice_right)
     }
 
     pub(crate) fn height(&self) -> usize {
@@ -284,18 +296,24 @@ impl Toodle {
                     palette_color::LAVENDER,
                 );
             }
-            layout.draw_lines(
-                fb,
-                &lines,
-                if todo.checked {
-                    completed_text_color
-                } else {
-                    text_color
-                },
-            );
+            if self.highlighted == Some((section, page, line)) {
+                layout.draw_lines_bold(fb, &lines, palette_color::CRIMSON);
+            } else {
+                layout.draw_lines(
+                    fb,
+                    &lines,
+                    if todo.checked {
+                        completed_text_color
+                    } else {
+                        text_color
+                    },
+                );
+            }
         }
 
         fb.draw_sprite(&self.eraser, ERASER_X as isize, ERASER_Y as isize, palette);
+        let (dice_x, dice_y) = self.dice_pos();
+        fb.draw_sprite(&self.dice, dice_x as isize, dice_y as isize, palette);
         self.draw_priority_icon(fb, palette);
         self.draw_goldstar(fb, palette);
         self.draw_focused_pencil(fb, palette);
@@ -323,6 +341,12 @@ impl Toodle {
             return Ok(false);
         }
 
+        if self.dice_at(x, y) {
+            self.roll_highlight();
+            self.focused_line = None;
+            return Ok(false);
+        }
+
         let abs_x = x.max(0) as usize;
         let abs_y = y.max(0) as usize;
         let Some(page_x) = abs_x.checked_sub(PAGE_OFFSET_X) else {
@@ -343,6 +367,9 @@ impl Toodle {
                 item.checked = !item.checked;
                 item.checked
             };
+            if checked && self.highlighted == Some((section, page, line)) {
+                self.highlighted = None;
+            }
             self.save_current_section()?;
             return Ok(checked && self.twirl_on_check_page());
         }
@@ -781,11 +808,44 @@ impl Toodle {
         }
     }
 
+    /// Top-left corner of the dice button: just past the front page's right
+    /// edge (clear of the page-curl hotspot), aligned to the page's bottom.
+    const fn dice_pos(&self) -> (usize, usize) {
+        let page = &self.pages[0];
+        let x = PAGE_OFFSET_X + page.width + DICE_GAP;
+        let y = page.height - self.dice.height;
+        (x, y)
+    }
+
+    fn dice_at(&self, x: i16, y: i16) -> bool {
+        let (dice_x, dice_y) = self.dice_pos();
+        point_in_rect(x, y, dice_x, dice_y, self.dice.width, self.dice.height)
+    }
+
+    /// Highlight a random non-blank todo on the current page; clears the
+    /// highlight if the page has no eligible todos.
+    fn roll_highlight(&mut self) {
+        let PageRef { section, page } = self.current_page_ref();
+        let candidates: Vec<usize> = (0..LINE_COUNT)
+            .filter(|&line| {
+                let item = self.todos[section].item(page, line);
+                !item.checked && !item.text.trim().is_empty()
+            })
+            .collect();
+        self.highlighted = candidates
+            .get(random_index(candidates.len()))
+            .map(|&line| (section, page, line));
+    }
+
     fn eraser_at(&self, x: i16, y: i16) -> bool {
-        let x = x.max(0) as usize;
-        let y = y.max(0) as usize;
-        (ERASER_X..ERASER_X + self.eraser.width).contains(&x)
-            && (ERASER_Y..ERASER_Y + self.eraser.height).contains(&y)
+        point_in_rect(
+            x,
+            y,
+            ERASER_X,
+            ERASER_Y,
+            self.eraser.width,
+            self.eraser.height,
+        )
     }
 }
 
@@ -1191,6 +1251,23 @@ const BLUE_PAGE_REMAP: [Index; 16] = {
     remap[palette_color::PINE as usize] = palette_color::GUNMETAL;
     remap
 };
+
+/// A pseudo-random index in `0..len` (returns 0 when `len` is 0).
+fn random_index(len: usize) -> usize {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .subsec_nanos() as usize;
+    nanos % len.max(1)
+}
+
+/// Whether `(x, y)` (negative values clamped to 0) falls inside the rectangle at
+/// `(left, top)` of the given size.
+fn point_in_rect(x: i16, y: i16, left: usize, top: usize, width: usize, height: usize) -> bool {
+    let x = x.max(0) as usize;
+    let y = y.max(0) as usize;
+    (left..left + width).contains(&x) && (top..top + height).contains(&y)
+}
 
 fn checkbox_at(x: usize, y: usize) -> Option<usize> {
     CHECK_Y.iter().position(|&check_y| {
