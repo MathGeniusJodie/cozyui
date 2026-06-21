@@ -547,7 +547,6 @@ impl Framebuffer {
         y: usize,
         w: usize,
         h: usize,
-        palette: &Palette,
         paint: Paint,
     ) {
         if x >= self.width || y >= self.height {
@@ -555,12 +554,21 @@ impl Framebuffer {
         }
         let width = w.min(self.width - x);
         let height = h.min(self.height - y);
-        for py in y..y + height {
-            for px in x..x + width {
-                if let Some(index) = palette.resolve_paint_index(paint, px, py) {
-                    self.set_pixel(px, py, index);
+
+        // Match the variant once instead of per pixel; each arm then has a
+        // tight inner loop over row slices.
+        match paint {
+            Paint::Solid(index) => self.fill_rect(x, y, w, h, index),
+            Paint::Checker(even, odd) => {
+                for py in y..y + height {
+                    let row = self.row_indices_mut(py, x, width);
+                    for (i, slot) in row.iter_mut().enumerate() {
+                        let px = x + i;
+                        *slot = if (px + py).is_multiple_of(2) { even } else { odd };
+                    }
                 }
             }
+            Paint::Transparent => {}
         }
     }
 

@@ -287,7 +287,6 @@ impl App {
             rect.y,
             rect.w,
             rect.h,
-            palette,
             app_color::BACKGROUND_PAINT,
         );
         draw_stretched_desk_region(fb, &self.desk, palette, rect);
