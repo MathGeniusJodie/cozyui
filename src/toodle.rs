@@ -48,12 +48,8 @@ const TODO_FILES: [&str; SECTION_COUNT] = [
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_normal.txt"),
     concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_snail.txt"),
 ];
-const DONE_TODO_FILES: [&str; SECTION_COUNT] = [
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_urgent_done.txt"),
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_frog_done.txt"),
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_normal_done.txt"),
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_snail_done.txt"),
-];
+/// Completed todos are filed under here, one file per day they were finished.
+const DONE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_done");
 const ARCHIVE_TRANSACTION_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/toodle_archive_transaction.json"
@@ -112,7 +108,9 @@ pub struct Toodle {
     pencil_shadow: Sprite,
     font: BitmapFont,
     todos: [TodoList; SECTION_COUNT],
-    done_counts: [usize; SECTION_COUNT],
+    // Per-priority count of todos archived into today's done files, used for
+    // the gold star.
+    today_done_counts: [usize; SECTION_COUNT],
     page: usize,
     focused_line: Option<usize>,
     field: TextField,
@@ -166,12 +164,7 @@ impl Toodle {
                 TodoList::load(TODO_FILES[2])?,
                 TodoList::load(TODO_FILES[3])?,
             ],
-            done_counts: [
-                done_todo_count(DONE_TODO_FILES[0])?,
-                done_todo_count(DONE_TODO_FILES[1])?,
-                done_todo_count(DONE_TODO_FILES[2])?,
-                done_todo_count(DONE_TODO_FILES[3])?,
-            ],
+            today_done_counts: today_done_counts()?,
             page: 0,
             focused_line: None,
             // The fits predicate is governed entirely by the two-line wrap, so
@@ -560,14 +553,17 @@ impl Toodle {
         }
 
         let mut staged_writes = Vec::new();
+        if archived.iter().any(|page| !page.is_empty()) {
+            fs::create_dir_all(DONE_DIR)?;
+        }
         for (page_index, archived_page) in archived.iter().enumerate() {
             if archived_page.is_empty() {
                 continue;
             }
 
-            let done_path = DONE_TODO_FILES[page_index];
-            let mut done_text = if Path::new(done_path).exists() {
-                fs::read_to_string(done_path)?
+            let done_path = daily_done_path(page_index);
+            let mut done_text = if Path::new(&done_path).exists() {
+                fs::read_to_string(&done_path)?
             } else {
                 String::new()
             };
@@ -578,7 +574,7 @@ impl Toodle {
                 done_text.push_str(todo);
                 done_text.push('\n');
             }
-            staged_writes.push(AtomicWrite::stage(done_path, done_text.into_bytes())?);
+            staged_writes.push(AtomicWrite::stage(&done_path, done_text.into_bytes())?);
         }
         for (page_index, changed) in changed_pages.into_iter().enumerate() {
             if changed {
@@ -596,9 +592,7 @@ impl Toodle {
         fs::remove_file(ARCHIVE_TRANSACTION_PATH)?;
 
         self.todos = staged_pages;
-        for (page_index, archived_page) in archived.iter().enumerate() {
-            self.done_counts[page_index] += archived_page.len();
-        }
+        self.today_done_counts = today_done_counts()?;
         self.keep_section_page_visible(current_page);
 
         Ok(())
@@ -670,6 +664,18 @@ impl Toodle {
         self.page = self.page_index_for(page.section, page.page.min(section_pages - 1));
     }
 
+    /// Gold-star tally for the current priority: todos already archived into
+    /// today's done file plus checked todos not yet swept there.
+    fn goldstar_count(&self) -> usize {
+        let section = self.current_page_ref().section;
+        let checked_unarchived = self.todos[section]
+            .items
+            .iter()
+            .filter(|item| item.checked && !item.text.trim().is_empty())
+            .count();
+        self.today_done_counts[section] + checked_unarchived
+    }
+
     fn draw_goldstar(&self, fb: &mut Framebuffer, palette: &Palette) {
         let star_x = PAGE_OFFSET_X + self.pages[0].width - self.goldstar.width;
         fb.draw_sprite(
@@ -679,7 +685,7 @@ impl Toodle {
             palette,
         );
 
-        let count = self.done_counts[self.current_page_ref().section].to_string();
+        let count = self.goldstar_count().to_string();
         let text_w = self.font.text_width(&count);
         let text_h = self.font.cell_h();
         let text_x = star_x + self.goldstar.width.saturating_sub(text_w) / 2;
@@ -787,6 +793,35 @@ impl Toodle {
 struct PageRef {
     section: usize,
     page: usize,
+}
+
+/// Today's local date as `YYYY-MM-DD`.
+fn today_date_string() -> String {
+    let tm = crate::localtime::local_time().unwrap_or_default();
+    format!(
+        "{:04}-{:02}-{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday
+    )
+}
+
+/// Path of the done-todo file for `section` today, named by date and priority.
+fn daily_done_path(section: usize) -> String {
+    format!(
+        "{DONE_DIR}/{}_{}.txt",
+        today_date_string(),
+        section_tag(section)
+    )
+}
+
+/// Per-priority count of todos archived in today's done files.
+fn today_done_counts() -> Result<[usize; SECTION_COUNT], Box<dyn Error>> {
+    let mut counts = [0; SECTION_COUNT];
+    for (section, count) in counts.iter_mut().enumerate() {
+        *count = done_todo_count(&daily_done_path(section))?;
+    }
+    Ok(counts)
 }
 
 fn done_todo_count(path: &str) -> Result<usize, Box<dyn Error>> {
@@ -1068,6 +1103,16 @@ fn page_swap(page_color: PageColor, pencil_on_second_line: bool) -> Swap {
         indices[palette_color::LIME as usize] = remap[palette_color::ROSE as usize];
     }
     Swap::from_indices(&indices)
+}
+
+/// Priority tag used in daily done filenames (`YYYY-MM-DD_<tag>.txt`).
+const fn section_tag(section: usize) -> &'static str {
+    match section % SECTION_COUNT {
+        0 => "urgent",
+        1 => "frog",
+        2 => "normal",
+        _ => "snail",
+    }
 }
 
 const fn section_color(section: usize) -> PageColor {

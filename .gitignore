@@ -6,3 +6,4 @@ toodle_*.txt
 .scrooge/accounts.log
 .scrooge/ledger.json
 tools/__pycache__
+toodle_done/*
