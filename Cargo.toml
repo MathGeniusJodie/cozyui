@@ -3,10 +3,6 @@ name = "cozyui"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "senpai"
-path = "src/senpai_main.rs"
-
 [dependencies]
 alacritty_terminal = "0.26.0"
 deunicode = "1"

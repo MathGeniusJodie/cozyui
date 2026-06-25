@@ -13,6 +13,7 @@ use xkbcommon::xkb::keysyms;
 
 #[cfg(test)]
 mod bench;
+mod budgit;
 mod comicoro_font;
 mod day;
 mod emojimap;
@@ -111,9 +112,10 @@ enum WidgetId {
     Wavey,
     Fizzle,
     Day,
+    Budgit,
 }
 
-const WIDGET_COUNT: usize = 7;
+const WIDGET_COUNT: usize = 8;
 
 impl WidgetId {
     const fn index(self) -> usize {
@@ -122,7 +124,7 @@ impl WidgetId {
 }
 
 impl WidgetId {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Wavey,
         Self::Puter,
         Self::Toodle,
@@ -130,16 +132,18 @@ impl WidgetId {
         Self::Twirl,
         Self::Fizzle,
         Self::Day,
+        Self::Budgit,
     ];
 
-    const VISIBLE_WITH_FWENDS: [Self; 7] = Self::ALL;
-    const VISIBLE_WITHOUT_FWENDS: [Self; 6] = [
+    const VISIBLE_WITH_FWENDS: [Self; 8] = Self::ALL;
+    const VISIBLE_WITHOUT_FWENDS: [Self; 7] = [
         Self::Wavey,
         Self::Puter,
         Self::Toodle,
         Self::Twirl,
         Self::Fizzle,
         Self::Day,
+        Self::Budgit,
     ];
 
     const fn visible() -> &'static [Self] {
@@ -163,6 +167,7 @@ struct App {
     wavey: wavey::Wavey,
     fizzle: fizzle::Fizzle,
     day: day::Day,
+    budgit: budgit::Budgit,
     desk: Sprite,
     // Indexed by WidgetId::index().
     fbs: [Framebuffer; WIDGET_COUNT],
@@ -181,8 +186,9 @@ impl App {
         let wavey = wavey::Wavey::load(palette)?;
         let fizzle = fizzle::Fizzle::load(palette)?;
         let day = day::Day::load(palette)?;
+        let budgit = budgit::Budgit::load(palette)?;
         let desk = Sprite::load_native(DESK_PATH, palette)?;
-        let positions = widget_positions(&puter, &toodle, &twirl, &wavey, &fizzle, &day);
+        let positions = widget_positions(&puter, &toodle, &twirl, &wavey, &fizzle, &day, &budgit);
         let sizes: [(usize, usize); WIDGET_COUNT] = [
             (puter.width(), puter.height()),
             (toodle.width(), toodle.height()),
@@ -191,6 +197,7 @@ impl App {
             (wavey.width(), wavey.height()),
             (fizzle.width(), fizzle.height()),
             (day.width(), day.height()),
+            (budgit.width(), budgit.height()),
         ];
         let fills: [Index; WIDGET_COUNT] = [
             puter.fill_color(palette),
@@ -200,6 +207,7 @@ impl App {
             wavey.fill_color(palette),
             fizzle.fill_color(palette),
             day.fill_color(palette),
+            budgit.fill_color(palette),
         ];
         let rects = std::array::from_fn(|i| {
             let (x, y) = positions[i];
@@ -219,6 +227,7 @@ impl App {
             wavey,
             fizzle,
             day,
+            budgit,
             desk,
             fbs,
             rects,
@@ -238,7 +247,8 @@ impl App {
         .max(self.desk.width)
         .max(rect(WidgetId::Twirl).x + rect(WidgetId::Twirl).w)
         .max(rect(WidgetId::Wavey).x + rect(WidgetId::Wavey).w)
-        .max(rect(WidgetId::Day).x + rect(WidgetId::Day).w);
+        .max(rect(WidgetId::Day).x + rect(WidgetId::Day).w)
+        .max(rect(WidgetId::Budgit).x + rect(WidgetId::Budgit).w);
         if SHOW_FWENDS {
             width.max(rect(WidgetId::Fwends).x + rect(WidgetId::Fwends).w)
         } else {
@@ -282,13 +292,7 @@ impl App {
     }
 
     fn render_background_rect(&self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
-        fb.fill_rect_paint(
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            app_color::BACKGROUND_PAINT,
-        );
+        fb.fill_rect_paint(rect.x, rect.y, rect.w, rect.h, app_color::BACKGROUND_PAINT);
         draw_stretched_desk_region(fb, &self.desk, palette, rect);
     }
 
@@ -333,6 +337,10 @@ impl App {
             WidgetId::Day => {
                 widget_fb.clear(self.day.fill_color(palette));
                 self.day.render(widget_fb, palette);
+            }
+            WidgetId::Budgit => {
+                widget_fb.clear(self.budgit.fill_color(palette));
+                self.budgit.render(widget_fb, palette);
             }
         }
         let rect = self.rects[widget.index()];
@@ -388,6 +396,7 @@ impl App {
             &self.wavey,
             &self.fizzle,
             &self.day,
+            &self.budgit,
         );
         for (rect, (x, y)) in self.rects.iter_mut().zip(positions) {
             changed |= move_rect(rect, x, y);
@@ -442,7 +451,11 @@ impl App {
             }
             #[allow(clippy::match_same_arms)]
             WidgetId::Fwends => Ok(None),
-            WidgetId::Twirl | WidgetId::Wavey | WidgetId::Fizzle | WidgetId::Day => Ok(None),
+            WidgetId::Twirl
+            | WidgetId::Wavey
+            | WidgetId::Fizzle
+            | WidgetId::Day
+            | WidgetId::Budgit => Ok(None),
         }
     }
 
@@ -477,7 +490,7 @@ impl App {
             WidgetId::Wavey => {
                 return Ok(self.wavey.click(x, y));
             }
-            WidgetId::Fizzle => {}
+            WidgetId::Fizzle | WidgetId::Budgit => {}
             WidgetId::Day => self.day.toggle_mode(),
         }
         Ok(None)
@@ -492,7 +505,8 @@ impl App {
                 | WidgetId::Twirl
                 | WidgetId::Wavey
                 | WidgetId::Fizzle
-                | WidgetId::Day => {}
+                | WidgetId::Day
+                | WidgetId::Budgit => {}
             }
             return Some(widget);
         }
@@ -526,7 +540,8 @@ impl App {
                 | WidgetId::Twirl
                 | WidgetId::Wavey
                 | WidgetId::Fizzle
-                | WidgetId::Day => false,
+                | WidgetId::Day
+                | WidgetId::Budgit => false,
             };
             return changed.then_some(widget);
         }
@@ -582,7 +597,14 @@ impl App {
             }
             (WidgetId::Wavey, ScrollDirection::Up) => self.wavey.scroll_up(x, y),
             (WidgetId::Wavey, ScrollDirection::Down) => self.wavey.scroll_down(x, y),
-            (WidgetId::Toodle | WidgetId::Twirl | WidgetId::Fizzle | WidgetId::Day, _) => {
+            (
+                WidgetId::Toodle
+                | WidgetId::Twirl
+                | WidgetId::Fizzle
+                | WidgetId::Day
+                | WidgetId::Budgit,
+                _,
+            ) => {
                 return None;
             }
         };
@@ -629,6 +651,7 @@ fn widget_positions(
     wavey: &wavey::Wavey,
     fizzle: &fizzle::Fizzle,
     day: &day::Day,
+    _budgit: &budgit::Budgit,
 ) -> [(usize, usize); WIDGET_COUNT] {
     let left_w = day.width().max(wavey.width());
     let middle_x = left_w + WIDGET_GAP;
@@ -658,6 +681,10 @@ fn widget_positions(
     let fizzle_x = wavey_x.saturating_sub(WIDGET_GAP + fizzle.width());
     let fizzle_y = (wavey_y + wavey.height()).saturating_sub(fizzle.height());
 
+    // Budgit sits in the otherwise-empty top-left corner above the day column.
+    let budgit_x = 0;
+    let budgit_y = 0;
+
     [
         (puter_x, puter_y),
         (toodle_x, toodle_y),
@@ -666,6 +693,7 @@ fn widget_positions(
         (wavey_x, wavey_y),
         (fizzle_x, fizzle_y),
         (day_x, day_y),
+        (budgit_x, budgit_y),
     ]
 }
 
@@ -837,6 +865,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
+        if app.budgit.update() {
+            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Budgit)?;
+            drew_frame = true;
+        }
+
         // Debounced toodle saves: edits hit disk shortly after typing pauses.
         app.toodle.maintain()?;
 
@@ -975,6 +1008,8 @@ fn should_load_clipboard_for_paste(focus: WidgetId, input: &text::KeyInput) -> b
     match focus {
         WidgetId::Puter => is_paste_shortcut(input),
         WidgetId::Toodle | WidgetId::Fwends => is_plain_paste_shortcut(input),
-        WidgetId::Twirl | WidgetId::Wavey | WidgetId::Fizzle | WidgetId::Day => false,
+        WidgetId::Twirl | WidgetId::Wavey | WidgetId::Fizzle | WidgetId::Day | WidgetId::Budgit => {
+            false
+        }
     }
 }

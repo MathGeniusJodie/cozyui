@@ -541,14 +541,7 @@ impl Framebuffer {
 
     /// Fill a rect with `paint`, so checkerboards land with their phase
     /// anchored to framebuffer coords.
-    pub(crate) fn fill_rect_paint(
-        &mut self,
-        x: usize,
-        y: usize,
-        w: usize,
-        h: usize,
-        paint: Paint,
-    ) {
+    pub(crate) fn fill_rect_paint(&mut self, x: usize, y: usize, w: usize, h: usize, paint: Paint) {
         if x >= self.width || y >= self.height {
             return;
         }
@@ -564,7 +557,11 @@ impl Framebuffer {
                     let row = self.row_indices_mut(py, x, width);
                     for (i, slot) in row.iter_mut().enumerate() {
                         let px = x + i;
-                        *slot = if (px + py).is_multiple_of(2) { even } else { odd };
+                        *slot = if (px + py).is_multiple_of(2) {
+                            even
+                        } else {
+                            odd
+                        };
                     }
                 }
             }
