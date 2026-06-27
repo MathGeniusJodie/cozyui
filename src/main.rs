@@ -40,7 +40,6 @@ mod poco_font;
 mod puter;
 #[allow(dead_code)]
 mod rozha_one_48_font;
-mod senpai;
 mod text;
 mod toodle;
 mod twirl;

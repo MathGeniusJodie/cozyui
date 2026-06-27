@@ -7,7 +7,6 @@ use std::thread;
 use crate::comicoro_font;
 use crate::openrouter;
 use crate::palette_color;
-use crate::senpai;
 use crate::text::{
     BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
 };
@@ -407,20 +406,16 @@ impl Fwends {
         });
 
         thread::spawn(move || {
-            // Lamp on: the fwend's thinking model plays senpai, briefing the
-            // regular model before it answers (with tools). Lamp off: plain
-            // single-model request.
-            let result = if thinking {
-                let config = senpai::SenpaiConfig {
-                    senpai_model: model.thinking_id.to_string(),
-                    student_model: model.id.to_string(),
-                    persona: Some(system_prompt),
-                };
-                senpai::respond(&config, &history_values(&history), &text)
-                    .map(|reply| normalize_display_text(&reply))
+            // Lamp on: thinking mode — same single-model request, but using the
+            // fwend's beefier thinking model with reasoning turned on. Lamp off:
+            // the fast model with reasoning off.
+            let model_id = if thinking {
+                model.thinking_id
             } else {
-                send_openrouter_request(model.id, &system_prompt, &history, &text)
+                model.id
             };
+            let result =
+                send_openrouter_request(model_id, &system_prompt, &history, &text, thinking);
             let _ = tx.send(result);
         });
     }
@@ -1064,29 +1059,25 @@ fn send_openrouter_request(
     system_prompt: &str,
     history: &[Message],
     latest_text: &str,
+    thinking: bool,
 ) -> Result<String, String> {
-    let response = openrouter::post(&chat_body(model, system_prompt, history, latest_text))?;
+    let response = openrouter::post(&chat_body(
+        model,
+        system_prompt,
+        history,
+        latest_text,
+        thinking,
+    ))?;
     extract_content(&response).map_err(|err| format!("{err}: {}", compact_error(&response)))
 }
 
-/// History as plain {"role", "content"} messages for the senpai pipeline,
-/// same role/text mapping as `chat_body`.
-fn history_values(history: &[Message]) -> Vec<Value> {
-    history
-        .iter()
-        .map(|message| {
-            json!({
-                "role": match message.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                },
-                "content": message.text,
-            })
-        })
-        .collect()
-}
-
-fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text: &str) -> Value {
+fn chat_body(
+    model: &str,
+    system_prompt: &str,
+    history: &[Message],
+    latest_text: &str,
+    thinking: bool,
+) -> Value {
     let mut messages = vec![json!({
         "role": "system",
         "content": system_prompt.trim(),
@@ -1105,13 +1096,21 @@ fn chat_body(model: &str, system_prompt: &str, history: &[Message], latest_text:
         "content": latest_text,
     }));
 
+    // Thinking mode turns reasoning on (but still excludes the reasoning trace
+    // from the reply, which the UI never shows); regular mode disables it.
+    let reasoning = if thinking {
+        json!({"effort": "high", "exclude": true})
+    } else {
+        json!({"exclude": true})
+    };
+
     // OpenRouter ignores "model" when a "models" routing list is present, so
     // the requested model must lead the list with the preset as fallback.
     json!({
         "model": model,
         "models": [model, openrouter::FALLBACK_MODEL],
         "messages": messages,
-        "reasoning": {"exclude": true},
+        "reasoning": reasoning,
         "include_reasoning": false,
     })
 }
@@ -1217,7 +1216,7 @@ mod tests {
 
     #[test]
     fn chat_body_preserves_unicode_and_escapes_json() {
-        let parsed = chat_body("model", "system", &[], "hi \"there\" 🩷");
+        let parsed = chat_body("model", "system", &[], "hi \"there\" 🩷", false);
 
         assert_eq!(parsed["model"], "model");
         assert_eq!(parsed["models"][0], "model");
@@ -1227,10 +1226,19 @@ mod tests {
 
     #[test]
     fn chat_body_excludes_reasoning_and_omits_tools() {
-        let parsed = chat_body("model", "system", &[], "hi");
+        let parsed = chat_body("model", "system", &[], "hi", false);
 
         assert_eq!(parsed["reasoning"]["exclude"], true);
+        assert!(parsed["reasoning"].get("effort").is_none());
         assert!(parsed.get("tools").is_none());
+    }
+
+    #[test]
+    fn chat_body_thinking_enables_reasoning_but_excludes_trace() {
+        let parsed = chat_body("model", "system", &[], "hi", true);
+
+        assert_eq!(parsed["reasoning"]["effort"], "high");
+        assert_eq!(parsed["reasoning"]["exclude"], true);
     }
 
     #[test]

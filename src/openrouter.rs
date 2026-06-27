@@ -1,12 +1,10 @@
-// Shared OpenRouter transport: a single secure curl POST used by both the
-// fwends chat widget and the senpai pipeline. The API key is streamed to curl
-// through a `--config -` file on stdin and the request body lives in a 0600
-// temp file, so neither the key nor the body ever appears in curl's argv (where
-// it would be visible to other processes via the process list).
+// Shared OpenRouter transport: a single secure curl POST used by the fwends
+// chat widget. The API key is streamed to curl through a `--config -` file on
+// stdin and the request body lives in a 0600 temp file, so neither the key nor
+// the body ever appears in curl's argv (where it would be visible to other
+// processes via the process list).
 //
-// Self-contained on purpose (std + serde_json only): the standalone `senpai`
-// binary pulls this module in directly, so it must not depend on any other
-// cozyui module.
+// Self-contained on purpose (std + serde_json only).
 #![allow(dead_code)]
 
 use serde_json::{Value, json};
