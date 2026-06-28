@@ -40,6 +40,7 @@ mod poco_font;
 mod puter;
 #[allow(dead_code)]
 mod rozha_one_48_font;
+mod stats;
 mod text;
 mod toodle;
 mod twirl;
@@ -112,9 +113,10 @@ enum WidgetId {
     Fizzle,
     Day,
     Budgit,
+    Stats,
 }
 
-const WIDGET_COUNT: usize = 8;
+const WIDGET_COUNT: usize = 9;
 
 impl WidgetId {
     const fn index(self) -> usize {
@@ -123,7 +125,7 @@ impl WidgetId {
 }
 
 impl WidgetId {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Wavey,
         Self::Puter,
         Self::Toodle,
@@ -132,10 +134,11 @@ impl WidgetId {
         Self::Fizzle,
         Self::Day,
         Self::Budgit,
+        Self::Stats,
     ];
 
-    const VISIBLE_WITH_FWENDS: [Self; 8] = Self::ALL;
-    const VISIBLE_WITHOUT_FWENDS: [Self; 7] = [
+    const VISIBLE_WITH_FWENDS: [Self; 9] = Self::ALL;
+    const VISIBLE_WITHOUT_FWENDS: [Self; 8] = [
         Self::Wavey,
         Self::Puter,
         Self::Toodle,
@@ -143,6 +146,7 @@ impl WidgetId {
         Self::Fizzle,
         Self::Day,
         Self::Budgit,
+        Self::Stats,
     ];
 
     const fn visible() -> &'static [Self] {
@@ -167,6 +171,7 @@ struct App {
     fizzle: fizzle::Fizzle,
     day: day::Day,
     budgit: budgit::Budgit,
+    stats: stats::Stats,
     desk: Sprite,
     // Indexed by WidgetId::index().
     fbs: [Framebuffer; WIDGET_COUNT],
@@ -186,8 +191,11 @@ impl App {
         let fizzle = fizzle::Fizzle::load(palette)?;
         let day = day::Day::load(palette)?;
         let budgit = budgit::Budgit::load(palette)?;
+        let stats = stats::Stats::load(palette)?;
         let desk = Sprite::load_native(DESK_PATH, palette)?;
-        let positions = widget_positions(&puter, &toodle, &twirl, &wavey, &fizzle, &day, &budgit);
+        let positions = widget_positions(
+            &puter, &toodle, &twirl, &wavey, &fizzle, &day, &budgit, &stats,
+        );
         let sizes: [(usize, usize); WIDGET_COUNT] = [
             (puter.width(), puter.height()),
             (toodle.width(), toodle.height()),
@@ -197,6 +205,7 @@ impl App {
             (fizzle.width(), fizzle.height()),
             (day.width(), day.height()),
             (budgit.width(), budgit.height()),
+            (stats.width(), stats.height()),
         ];
         let fills: [Index; WIDGET_COUNT] = [
             puter.fill_color(palette),
@@ -207,6 +216,7 @@ impl App {
             fizzle.fill_color(palette),
             day.fill_color(palette),
             budgit.fill_color(palette),
+            stats.fill_color(palette),
         ];
         let rects = std::array::from_fn(|i| {
             let (x, y) = positions[i];
@@ -227,6 +237,7 @@ impl App {
             fizzle,
             day,
             budgit,
+            stats,
             desk,
             fbs,
             rects,
@@ -247,7 +258,8 @@ impl App {
         .max(rect(WidgetId::Twirl).x + rect(WidgetId::Twirl).w)
         .max(rect(WidgetId::Wavey).x + rect(WidgetId::Wavey).w)
         .max(rect(WidgetId::Day).x + rect(WidgetId::Day).w)
-        .max(rect(WidgetId::Budgit).x + rect(WidgetId::Budgit).w);
+        .max(rect(WidgetId::Budgit).x + rect(WidgetId::Budgit).w)
+        .max(rect(WidgetId::Stats).x + rect(WidgetId::Stats).w);
         if SHOW_FWENDS {
             width.max(rect(WidgetId::Fwends).x + rect(WidgetId::Fwends).w)
         } else {
@@ -272,7 +284,8 @@ impl App {
             .max(self.desk.height)
             .max(rect(WidgetId::Twirl).y + rect(WidgetId::Twirl).h)
             .max(rect(WidgetId::Wavey).y + rect(WidgetId::Wavey).h)
-            .max(rect(WidgetId::Day).y + rect(WidgetId::Day).h);
+            .max(rect(WidgetId::Day).y + rect(WidgetId::Day).h)
+            .max(rect(WidgetId::Stats).y + rect(WidgetId::Stats).h);
         let height = if SHOW_FWENDS {
             height.max(rect(WidgetId::Fwends).y + self.fwends.min_height())
         } else {
@@ -341,6 +354,10 @@ impl App {
                 widget_fb.clear(self.budgit.fill_color(palette));
                 self.budgit.render(widget_fb, palette);
             }
+            WidgetId::Stats => {
+                widget_fb.clear(self.stats.fill_color(palette));
+                self.stats.render(widget_fb, palette);
+            }
         }
         let rect = self.rects[widget.index()];
         fb.blit_from(&self.fbs[widget.index()], rect.x, rect.y);
@@ -396,6 +413,7 @@ impl App {
             &self.fizzle,
             &self.day,
             &self.budgit,
+            &self.stats,
         );
         for (rect, (x, y)) in self.rects.iter_mut().zip(positions) {
             changed |= move_rect(rect, x, y);
@@ -454,7 +472,8 @@ impl App {
             | WidgetId::Wavey
             | WidgetId::Fizzle
             | WidgetId::Day
-            | WidgetId::Budgit => Ok(None),
+            | WidgetId::Budgit
+            | WidgetId::Stats => Ok(None),
         }
     }
 
@@ -489,7 +508,7 @@ impl App {
             WidgetId::Wavey => {
                 return Ok(self.wavey.click(x, y));
             }
-            WidgetId::Fizzle | WidgetId::Budgit => {}
+            WidgetId::Fizzle | WidgetId::Budgit | WidgetId::Stats => {}
             WidgetId::Day => self.day.toggle_mode(),
         }
         Ok(None)
@@ -505,7 +524,8 @@ impl App {
                 | WidgetId::Wavey
                 | WidgetId::Fizzle
                 | WidgetId::Day
-                | WidgetId::Budgit => {}
+                | WidgetId::Budgit
+                | WidgetId::Stats => {}
             }
             return Some(widget);
         }
@@ -540,7 +560,8 @@ impl App {
                 | WidgetId::Wavey
                 | WidgetId::Fizzle
                 | WidgetId::Day
-                | WidgetId::Budgit => false,
+                | WidgetId::Budgit
+                | WidgetId::Stats => false,
             };
             return changed.then_some(widget);
         }
@@ -601,7 +622,8 @@ impl App {
                 | WidgetId::Twirl
                 | WidgetId::Fizzle
                 | WidgetId::Day
-                | WidgetId::Budgit,
+                | WidgetId::Budgit
+                | WidgetId::Stats,
                 _,
             ) => {
                 return None;
@@ -643,6 +665,7 @@ impl App {
 const TOODLE_LEFT_OVERLAP: usize = 24;
 
 /// Widget (x, y) positions, indexed by `WidgetId::index()`.
+#[allow(clippy::too_many_arguments)]
 fn widget_positions(
     puter: &puter::Puter,
     toodle: &toodle::Toodle,
@@ -650,7 +673,8 @@ fn widget_positions(
     wavey: &wavey::Wavey,
     fizzle: &fizzle::Fizzle,
     day: &day::Day,
-    _budgit: &budgit::Budgit,
+    budgit: &budgit::Budgit,
+    _stats: &stats::Stats,
 ) -> [(usize, usize); WIDGET_COUNT] {
     let left_w = day.width().max(wavey.width());
     let middle_x = left_w + WIDGET_GAP;
@@ -684,6 +708,10 @@ fn widget_positions(
     let budgit_x = 0;
     let budgit_y = 0;
 
+    // Stats stacks directly beneath budgit in the same top-left column.
+    let stats_x = 0;
+    let stats_y = budgit_y + budgit.height() + WIDGET_GAP;
+
     [
         (puter_x, puter_y),
         (toodle_x, toodle_y),
@@ -693,6 +721,7 @@ fn widget_positions(
         (fizzle_x, fizzle_y),
         (day_x, day_y),
         (budgit_x, budgit_y),
+        (stats_x, stats_y),
     ]
 }
 
@@ -869,6 +898,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
+        if app.stats.update() {
+            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Stats)?;
+            drew_frame = true;
+        }
+
         // Debounced toodle saves: edits hit disk shortly after typing pauses.
         app.toodle.maintain()?;
 
@@ -1007,8 +1041,11 @@ fn should_load_clipboard_for_paste(focus: WidgetId, input: &text::KeyInput) -> b
     match focus {
         WidgetId::Puter => is_paste_shortcut(input),
         WidgetId::Toodle | WidgetId::Fwends => is_plain_paste_shortcut(input),
-        WidgetId::Twirl | WidgetId::Wavey | WidgetId::Fizzle | WidgetId::Day | WidgetId::Budgit => {
-            false
-        }
+        WidgetId::Twirl
+        | WidgetId::Wavey
+        | WidgetId::Fizzle
+        | WidgetId::Day
+        | WidgetId::Budgit
+        | WidgetId::Stats => false,
     }
 }
