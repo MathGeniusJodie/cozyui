@@ -13,10 +13,6 @@ use crate::pixolde_font;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette};
 
-/// Directory toodle files completed todos into, one file per day and priority
-/// (`YYYY-MM-DD_<tag>.txt`). Kept in sync with toodle's `DONE_DIR`.
-const DONE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_done");
-
 const DAYS: usize = 7;
 const PRIORITY_COUNT: usize = 4;
 
@@ -188,7 +184,7 @@ fn read_week_counts() -> Result<WeekCounts, Box<dyn Error>> {
     for (col, day_counts) in counts.iter_mut().enumerate() {
         let (y, m, d) = civil_from_days(sunday + col as i64);
         for (priority, tag) in PRIORITY_TAGS.iter().enumerate() {
-            let path = format!("{DONE_DIR}/{y:04}-{m:02}-{d:02}_{tag}.txt");
+            let path = crate::toodle::done_file_path(y, m, d, tag);
             day_counts[priority] = done_line_count(&path)?;
         }
     }

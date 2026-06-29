@@ -192,6 +192,12 @@ impl Twirl {
     }
 
     pub(crate) fn spin(&mut self) {
+        // Spinning while already spinning shouldn't discard the in-progress
+        // spin, but awarding the current pointer segment would let players time
+        // their re-spin to pick a result. Award a random segment instead.
+        if self.speed > 0.0 {
+            let _ = self.add_random_value();
+        }
         self.speed = random_unit().mul_add(START_SPEED_RANGE, START_SPEED_MIN);
         self.last_update = Instant::now();
         self.last_click_segment = self.pointer_segment();
@@ -230,9 +236,16 @@ impl Twirl {
     }
 
     fn add_landed_value(&mut self) -> Result<(), Box<dyn Error>> {
-        self.total = self
-            .total
-            .saturating_add(segment_value(self.pointer_segment())?);
+        self.add_segment_value(self.pointer_segment())
+    }
+
+    fn add_random_value(&mut self) -> Result<(), Box<dyn Error>> {
+        let segment = (random_unit() * SEGMENT_COUNT as f32) as usize % SEGMENT_COUNT;
+        self.add_segment_value(segment)
+    }
+
+    fn add_segment_value(&mut self, segment: usize) -> Result<(), Box<dyn Error>> {
+        self.total = self.total.saturating_add(segment_value(segment)?);
         save_total(TOTAL_PATH, self.total)
     }
 

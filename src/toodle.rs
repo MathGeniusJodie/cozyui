@@ -43,18 +43,20 @@ const DICE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/dice.png");
 
 const SECTION_COUNT: usize = 4;
 const VISIBLE_PAGE_COUNT: usize = 4;
-const TODO_FILES: [&str; SECTION_COUNT] = [
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_urgent.txt"),
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_frog.txt"),
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_normal.txt"),
-    concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_snail.txt"),
+/// Config file naming the directory that holds every toodle markdown file. The
+/// first non-blank, non-comment line is the root path (`~` expands to `$HOME`).
+const TOODLE_CONF_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle.conf");
+/// Root used when `toodle.conf` is missing or blank.
+const DEFAULT_TOODLE_ROOT: &str = "~/Desktop/RemoteVault/✅ Toodle/";
+const TODO_FILE_NAMES: [&str; SECTION_COUNT] = [
+    "toodle_urgent.md",
+    "toodle_frog.md",
+    "toodle_normal.md",
+    "toodle_snail.md",
 ];
 /// Completed todos are filed under here, one file per day they were finished.
-const DONE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle_done");
-const ARCHIVE_TRANSACTION_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/toodle_archive_transaction.json"
-);
+const DONE_DIR_NAME: &str = "toodle_done";
+const ARCHIVE_TRANSACTION_NAME: &str = "toodle_archive_transaction.json";
 const PAGE_OFFSET_X: usize = 14;
 /// Gap between the front page's right edge and the dice button.
 const DICE_GAP: usize = 8;
@@ -72,6 +74,10 @@ const TEXT_X: usize = 31;
 const TEXT_Y_OFFSET: usize = 2;
 const CHECK_X: usize = 10;
 const CHECK_Y: [usize; LINE_COUNT] = [71, 93, 115, 137, 159, 181];
+/// Half-height of the horizontal band used to isolate one line's checkbox box
+/// when blitting it from the combined checkboxes sprite. Half the line pitch so
+/// adjacent boxes fall outside the band.
+const CHECK_BAND_HALF: usize = 11;
 const CHECK_W: usize = 13;
 const CHECK_H: usize = 13;
 const CHECK_SPRITE_W: usize = 16;
@@ -143,7 +149,8 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 impl Toodle {
     pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
-        recover_archive_transaction(ARCHIVE_TRANSACTION_PATH)?;
+        fs::create_dir_all(toodle_root())?;
+        recover_archive_transaction(&archive_transaction_path())?;
 
         Ok(Self {
             pages: [
@@ -167,10 +174,10 @@ impl Toodle {
                 &crate::fusion_pixel_10_font::FUSION_PIXEL_10_SPEC,
             )?,
             todos: [
-                TodoList::load(TODO_FILES[0])?,
-                TodoList::load(TODO_FILES[1])?,
-                TodoList::load(TODO_FILES[2])?,
-                TodoList::load(TODO_FILES[3])?,
+                TodoList::load(&todo_file(0))?,
+                TodoList::load(&todo_file(1))?,
+                TodoList::load(&todo_file(2))?,
+                TodoList::load(&todo_file(3))?,
             ],
             today_done_counts: today_done_counts()?,
             page: 0,
@@ -260,7 +267,12 @@ impl Toodle {
                 page_x,
                 page_y,
             );
-            fb.draw_sprite(&self.checkboxes, page_x as isize, page_y as isize, palette);
+            // The front page's checkboxes are painted live (per line, only for
+            // checkbox lines) in `draw_front_overlay`; here we only bake the
+            // checkboxes of the partially-covered pages beneath it.
+            if visual_page != 0 {
+                fb.draw_sprite(&self.checkboxes, page_x as isize, page_y as isize, palette);
+            }
         }
     }
 
@@ -282,6 +294,9 @@ impl Toodle {
         };
         for (line, _) in LINE_Y.iter().enumerate().take(LINE_COUNT) {
             let todo = self.todos[section].item(page, line);
+            if todo.renders_checkbox(self.focused_line == Some(line)) {
+                self.draw_checkbox_box(fb, palette, line);
+            }
             if todo.checked {
                 self.draw_check(fb, palette, section, line, 0);
             }
@@ -360,7 +375,11 @@ impl Toodle {
             return Ok(false);
         }
 
-        if let Some(line) = checkbox_at(page_x, abs_y) {
+        if let Some(line) = checkbox_at(page_x, abs_y)
+            && self.todos[self.current_page_ref().section]
+                .item(self.current_page_ref().page, line)
+                .is_checkbox
+        {
             let PageRef { section, page } = self.current_page_ref();
             let checked = {
                 let item = self.todos[section].item_mut(page, line);
@@ -431,7 +450,7 @@ impl Toodle {
         let PageRef { section, page } = self.current_page_ref();
         if matches!(edit_key(input), EditKey::Backspace) && self.field.text().is_empty() {
             if self.todos[section].delete_item(page, line) {
-                self.todos[section].save(TODO_FILES[section])?;
+                self.todos[section].save(&todo_file(section))?;
             }
             self.keep_section_page_visible(PageRef { section, page });
             self.focused_line = Some(line);
@@ -496,6 +515,23 @@ impl Toodle {
         }
     }
 
+    /// Blit just the front page's checkbox box for one line out of the combined
+    /// (page-sized) checkboxes sprite. The box rows are isolated by a horizontal
+    /// band centered on the line so neighbouring boxes are untouched.
+    fn draw_checkbox_box(&self, fb: &mut Framebuffer, palette: &Palette, line: usize) {
+        let band_top = CHECK_Y[line].saturating_sub(CHECK_BAND_HALF);
+        let src = Rect::new(0, band_top, self.checkboxes.width, CHECK_BAND_HALF * 2);
+        fb.draw_sprite_full(
+            &self.checkboxes,
+            src,
+            PAGE_OFFSET_X as isize,
+            band_top as isize,
+            None,
+            palette,
+            None,
+        );
+    }
+
     fn draw_check(
         &self,
         fb: &mut Framebuffer,
@@ -527,7 +563,7 @@ impl Toodle {
 
     fn save_current_section(&mut self) -> Result<(), Box<dyn Error>> {
         let current_page = self.current_page_ref();
-        self.todos[current_page.section].save(TODO_FILES[current_page.section])?;
+        self.todos[current_page.section].save(&todo_file(current_page.section))?;
         self.dirty_sections[current_page.section] = false;
         self.keep_section_page_visible(current_page);
         Ok(())
@@ -545,9 +581,9 @@ impl Toodle {
 
     /// Write all pending edits now (shutdown, structural changes).
     pub(crate) fn flush_saves(&mut self) -> Result<(), Box<dyn Error>> {
-        for (section, file) in TODO_FILES.iter().enumerate() {
+        for section in 0..SECTION_COUNT {
             if self.dirty_sections[section] {
-                self.todos[section].save(file)?;
+                self.todos[section].save(&todo_file(section))?;
                 self.dirty_sections[section] = false;
             }
         }
@@ -581,7 +617,7 @@ impl Toodle {
 
         let mut staged_writes = Vec::new();
         if archived.iter().any(|page| !page.is_empty()) {
-            fs::create_dir_all(DONE_DIR)?;
+            fs::create_dir_all(done_dir())?;
         }
         for (page_index, archived_page) in archived.iter().enumerate() {
             if archived_page.is_empty() {
@@ -598,6 +634,7 @@ impl Toodle {
                 done_text.push('\n');
             }
             for todo in archived_page {
+                done_text.push_str("- [x] ");
                 done_text.push_str(todo);
                 done_text.push('\n');
             }
@@ -606,17 +643,18 @@ impl Toodle {
         for (page_index, changed) in changed_pages.into_iter().enumerate() {
             if changed {
                 staged_writes.push(AtomicWrite::stage(
-                    TODO_FILES[page_index],
+                    &todo_file(page_index),
                     staged_pages[page_index].serialized_text().into_bytes(),
                 )?);
             }
         }
 
-        write_archive_transaction_marker(ARCHIVE_TRANSACTION_PATH, &staged_writes)?;
+        let marker_path = archive_transaction_path();
+        write_archive_transaction_marker(&marker_path, &staged_writes)?;
         for staged_write in staged_writes {
             staged_write.commit()?;
         }
-        fs::remove_file(ARCHIVE_TRANSACTION_PATH)?;
+        fs::remove_file(&marker_path)?;
 
         self.todos = staged_pages;
         self.today_done_counts = today_done_counts()?;
@@ -829,7 +867,7 @@ impl Toodle {
         let candidates: Vec<usize> = (0..LINE_COUNT)
             .filter(|&line| {
                 let item = self.todos[section].item(page, line);
-                !item.checked && !item.text.trim().is_empty()
+                item.is_checkbox && !item.checked && !item.text.trim().is_empty()
             })
             .collect();
         self.highlighted = candidates
@@ -855,41 +893,88 @@ struct PageRef {
     page: usize,
 }
 
-/// Today's local date as `YYYY-MM-DD`.
-fn today_date_string() -> String {
-    let tm = crate::localtime::local_time().unwrap_or_default();
-    format!(
-        "{:04}-{:02}-{:02}",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday
-    )
+/// Root directory for all toodle markdown files, configurable via `toodle.conf`.
+/// Resolved once and cached; falls back to [`DEFAULT_TOODLE_ROOT`] when the
+/// config is missing or contains no usable path.
+fn toodle_root() -> &'static str {
+    static ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let configured = fs::read_to_string(TOODLE_CONF_PATH)
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty() && !line.starts_with('#'))
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| DEFAULT_TOODLE_ROOT.to_owned());
+        let expanded = expand_tilde(&configured);
+        expanded.trim_end_matches('/').to_owned()
+    })
+}
+
+/// Expand a leading `~/` to `$HOME`. Returns the input unchanged otherwise.
+fn expand_tilde(path: &str) -> String {
+    match (path.strip_prefix("~/"), std::env::var("HOME")) {
+        (Some(rest), Ok(home)) => format!("{}/{rest}", home.trim_end_matches('/')),
+        _ => path.to_owned(),
+    }
+}
+
+fn todo_file(section: usize) -> String {
+    format!("{}/{}", toodle_root(), TODO_FILE_NAMES[section])
+}
+
+fn done_dir() -> String {
+    format!("{}/{DONE_DIR_NAME}", toodle_root())
+}
+
+fn archive_transaction_path() -> String {
+    format!("{}/{ARCHIVE_TRANSACTION_NAME}", toodle_root())
+}
+
+/// Path of the done-todo file for a given date and priority tag, the single
+/// source of the `<root>/YYYY-MM-DD_<tag>.md` naming convention (shared with
+/// the stats widget).
+pub fn done_file_path(year: i32, month: i32, day: i32, tag: &str) -> String {
+    format!("{}/{year:04}-{month:02}-{day:02}_{tag}.md", done_dir())
 }
 
 /// Path of the done-todo file for `section` today, named by date and priority.
 fn daily_done_path(section: usize) -> String {
-    format!(
-        "{DONE_DIR}/{}_{}.txt",
-        today_date_string(),
-        section_tag(section)
+    let tm = crate::localtime::local_time().unwrap_or_default();
+    done_file_path(
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        section_tag(section),
     )
+}
+
+/// Today's existing done file for `section`, or `None` if it does not exist.
+fn existing_done_path(section: usize) -> Option<String> {
+    let md = daily_done_path(section);
+    Path::new(&md).exists().then_some(md)
 }
 
 /// Per-priority count of todos archived in today's done files.
 fn today_done_counts() -> Result<[usize; SECTION_COUNT], Box<dyn Error>> {
     let mut counts = [0; SECTION_COUNT];
     for (section, count) in counts.iter_mut().enumerate() {
-        *count = done_todo_count(&daily_done_path(section))?;
+        *count = done_todo_count(section)?;
     }
     Ok(counts)
 }
 
-fn done_todo_count(path: &str) -> Result<usize, Box<dyn Error>> {
-    if !Path::new(path).exists() {
+fn done_todo_count(section: usize) -> Result<usize, Box<dyn Error>> {
+    let Some(path) = existing_done_path(section) else {
         return Ok(0);
-    }
+    };
 
-    Ok(fs::read_to_string(path)?.lines().count())
+    Ok(fs::read_to_string(path)?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count())
 }
 
 #[derive(Clone)]
@@ -935,6 +1020,7 @@ impl TodoList {
         static BLANK_ITEM: TodoItem = TodoItem {
             text: String::new(),
             checked: false,
+            is_checkbox: true,
         };
         self.items
             .get(page * LINE_COUNT + line)
@@ -1081,39 +1167,61 @@ impl ArchiveWriteRecord {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct TodoItem {
     text: String,
     checked: bool,
+    /// Whether this line is a markdown checkbox (`- [ ]` / `- [x]`). Plain lines
+    /// from the file are kept verbatim and rendered without a checkbox to their
+    /// left. New lines typed in the widget default to checkboxes.
+    is_checkbox: bool,
+}
+
+/// New lines created in the widget are checkbox todos by default; plain lines
+/// only arise from non-checkbox text in the backing file.
+impl Default for TodoItem {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            checked: false,
+            is_checkbox: true,
+        }
+    }
 }
 
 impl TodoItem {
-    #[allow(clippy::option_if_let_else)]
     fn parse(line: &str) -> Self {
-        if let Some(text) = line.strip_prefix("[x] ") {
-            Self {
-                text: text.to_string(),
-                checked: true,
+        for (prefix, checked) in [("- [x]", true), ("- [X]", true), ("- [ ]", false)] {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                return Self {
+                    text: rest.strip_prefix(' ').unwrap_or(rest).to_string(),
+                    checked,
+                    is_checkbox: true,
+                };
             }
-        } else if let Some(text) = line.strip_prefix("[ ] ") {
-            Self {
-                text: text.to_string(),
-                checked: false,
-            }
-        } else {
-            Self {
-                text: line.to_string(),
-                checked: false,
-            }
+        }
+        Self {
+            text: line.to_string(),
+            checked: false,
+            is_checkbox: false,
         }
     }
 
     fn serialize(&self) -> String {
-        if self.checked {
-            format!("[x] {}", self.text)
-        } else {
+        if !self.is_checkbox {
             self.text.clone()
+        } else if self.checked {
+            format!("- [x] {}", self.text)
+        } else {
+            format!("- [ ] {}", self.text)
         }
+    }
+
+    /// Whether a checkbox should be drawn to the left of this line. Plain lines
+    /// never show one; a checkbox todo shows one once it has content, is
+    /// checked, or is the line currently being edited.
+    const fn renders_checkbox(&self, focused: bool) -> bool {
+        self.is_checkbox && (focused || self.checked || !self.text.is_empty())
     }
 
     const fn is_blank(&self) -> bool {
@@ -1165,7 +1273,7 @@ fn page_swap(page_color: PageColor, pencil_on_second_line: bool) -> Swap {
     Swap::from_indices(&indices)
 }
 
-/// Priority tag used in daily done filenames (`YYYY-MM-DD_<tag>.txt`).
+/// Priority tag used in daily done filenames (`YYYY-MM-DD_<tag>.md`).
 const fn section_tag(section: usize) -> &'static str {
     match section % SECTION_COUNT {
         0 => "urgent",
@@ -1296,24 +1404,46 @@ mod tests {
 
     #[test]
     fn todo_item_round_trips_checked_items() {
-        let item = TodoItem::parse("[x] ship the tiny desktop");
+        let item = TodoItem::parse("- [x] ship the tiny desktop");
 
         assert!(item.checked);
+        assert!(item.is_checkbox);
         assert_eq!(item.text, "ship the tiny desktop");
-        assert_eq!(item.serialize(), "[x] ship the tiny desktop");
+        assert_eq!(item.serialize(), "- [x] ship the tiny desktop");
     }
 
     #[test]
-    fn todo_list_serializes_only_needed_lines() {
+    fn todo_item_round_trips_unchecked_checkbox() {
+        let item = TodoItem::parse("- [ ] water the plants");
+
+        assert!(!item.checked);
+        assert!(item.is_checkbox);
+        assert_eq!(item.text, "water the plants");
+        assert_eq!(item.serialize(), "- [ ] water the plants");
+    }
+
+    #[test]
+    fn todo_item_keeps_plain_lines_verbatim() {
+        let item = TodoItem::parse("## groceries");
+
+        assert!(!item.is_checkbox);
+        assert!(!item.checked);
+        assert!(!item.renders_checkbox(false));
+        assert!(!item.renders_checkbox(true));
+        assert_eq!(item.serialize(), "## groceries");
+    }
+
+    #[test]
+    fn todo_list_serializes_checkboxes_and_plain_lines() {
         let mut list = TodoList {
             items: vec![TodoItem::default(); LINE_COUNT],
         };
-        list.items[0] = TodoItem::parse("[x] done");
-        list.items[1] = TodoItem::parse("next");
+        list.items[0] = TodoItem::parse("- [x] done");
+        list.items[1] = TodoItem::parse("a heading");
         list.trim_trailing_blank_items();
 
         assert_eq!(list.serialized_text().lines().count(), 2);
-        assert_eq!(list.serialized_text(), "[x] done\nnext\n");
+        assert_eq!(list.serialized_text(), "- [x] done\na heading\n");
     }
 
     #[test]
