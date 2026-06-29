@@ -43,6 +43,9 @@ const DICE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/dice.png");
 
 const SECTION_COUNT: usize = 4;
 const VISIBLE_PAGE_COUNT: usize = 4;
+/// Cap on how many pages a single category can show; extra overflow pages are
+/// simply not navigable.
+const MAX_PAGES_PER_SECTION: usize = 4;
 /// Config file naming the directory that holds every toodle markdown file. The
 /// first non-blank, non-comment line is the root path (`~` expands to `$HOME`).
 const TOODLE_CONF_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle.conf");
@@ -1009,11 +1012,12 @@ impl TodoList {
         let last_page_full = !self.items.is_empty()
             && (last_page_start..last_page_start + LINE_COUNT)
                 .all(|index| self.items.get(index).is_some_and(|item| !item.is_blank()));
-        if last_page_full {
+        let count = if last_page_full {
             pages_with_items + 1
         } else {
             pages_with_items
-        }
+        };
+        count.min(MAX_PAGES_PER_SECTION)
     }
 
     fn item(&self, page: usize, line: usize) -> &TodoItem {
