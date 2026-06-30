@@ -11,7 +11,15 @@ use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
 const WHEEL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/wheel.png");
-const TOTAL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/twirl_total.txt");
+const TOTAL_PATH: &str = "~/Desktop/RemoteVault/frogpoints.md";
+
+/// Expand a leading `~/` to `$HOME`. Returns the input unchanged otherwise.
+fn total_path() -> String {
+    match (TOTAL_PATH.strip_prefix("~/"), std::env::var("HOME")) {
+        (Some(rest), Ok(home)) => format!("{}/{rest}", home.trim_end_matches('/')),
+        _ => TOTAL_PATH.to_owned(),
+    }
+}
 const SHADOW_X_OFFSET: isize = 1;
 const SHADOW_Y_OFFSET: isize = 4;
 
@@ -75,7 +83,7 @@ impl Twirl {
             speed: 0.0,
             last_update: Instant::now(),
             last_click_segment: 0,
-            total: load_total(TOTAL_PATH)?,
+            total: load_total(&total_path())?,
             pixel_base_angle,
         })
     }
@@ -246,7 +254,7 @@ impl Twirl {
 
     fn add_segment_value(&mut self, segment: usize) -> Result<(), Box<dyn Error>> {
         self.total = self.total.saturating_add(segment_value(segment)?);
-        save_total(TOTAL_PATH, self.total)
+        save_total(&total_path(), self.total)
     }
 
     fn pointer_segment(&self) -> usize {
