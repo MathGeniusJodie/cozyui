@@ -29,6 +29,8 @@ mod graphics;
 mod hunger;
 mod localtime;
 mod openrouter;
+#[allow(dead_code)]
+mod paths;
 mod peanut_money_font;
 #[allow(dead_code)]
 mod pixolde_bold_font;
@@ -36,7 +38,6 @@ mod pixolde_bold_font;
 mod pixolde_font;
 #[allow(dead_code)]
 mod pixolde_italic_font;
-#[allow(dead_code)]
 mod poco_font;
 mod puter;
 #[allow(dead_code)]

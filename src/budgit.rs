@@ -3,6 +3,9 @@
 
 use std::error::Error;
 use std::fs;
+use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::palette_color;
@@ -25,17 +28,24 @@ const CONFIG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/budgit.conf");
 /// Path to the ledger CSV whose entries sum to the starting balance.
 const LEDGER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/budgit.csv");
 
-const REFRESH: Duration = Duration::from_millis(100);
+const REFRESH: Duration = Duration::from_secs(1);
+
+/// How long the background SVG counter waits between scans (measured from the
+/// end of the previous scan, so a slow scan never overlaps the next).
+const SVG_REFRESH: Duration = Duration::from_secs(1);
+
+/// Folder of finished templates; its SVGs set the "paths per finished SVG"
+/// baseline used to estimate how many in-progress SVGs are complete.
+const DONE_DIR: &str = "~/Desktop/allfiles/templates/done/";
+
+/// Folder of in-progress templates (the `done/` subfolder is excluded).
+const TEMPLATES_DIR: &str = "~/Desktop/allfiles/templates/";
 
 const TOP_GAP: usize = 12;
 const LABEL_GAP: usize = 4;
 const FRACTION_GAP: usize = 2;
 const STATS_GAP: usize = 14;
 const STAT_ROW_H: usize = 12;
-
-const SHORT_MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
 
 /// One budget period: a set of monthly expenses that takes effect on
 /// `start_secs` (Unix seconds) and runs until the next period begins.
@@ -47,9 +57,11 @@ struct Period {
     expenses: Vec<(String, f64)>,
 }
 
-/// Parsed budget config: a chronological list of expense periods.
+/// Parsed budget config: a chronological list of expense periods plus the
+/// global `dollars per svg` payout used to credit completed SVG work.
 struct Config {
     periods: Vec<Period>,
+    dollars_per_svg: f64,
 }
 
 impl Config {
@@ -60,6 +72,7 @@ impl Config {
     /// `#` starts a comment and blank lines are ignored.
     fn parse(text: &str) -> Result<Self, Box<dyn Error>> {
         let mut periods: Vec<Period> = Vec::new();
+        let mut dollars_per_svg = 0.0;
 
         for raw in text.lines() {
             let line = raw.split('#').next().unwrap_or("").trim();
@@ -80,6 +93,14 @@ impl Config {
                 .ok_or_else(|| format!("budgit.conf: missing '=' in line: {raw}"))?;
             let label = label.trim();
             let value = value.trim();
+            // Global setting (not tied to any expense period).
+            if label.eq_ignore_ascii_case("dollars per svg") {
+                let value = value.trim_matches('$').trim();
+                dollars_per_svg = value
+                    .parse()
+                    .map_err(|_| format!("budgit.conf: bad amount for {label}: {value}"))?;
+                continue;
+            }
             let amount: f64 = value
                 .parse()
                 .map_err(|_| format!("budgit.conf: bad amount for {label}: {value}"))?;
@@ -94,7 +115,10 @@ impl Config {
             return Err("budgit.conf: no [date] sections found".into());
         }
         periods.sort_by(|a, b| a.start_secs.total_cmp(&b.start_secs));
-        Ok(Self { periods })
+        Ok(Self {
+            periods,
+            dollars_per_svg,
+        })
     }
 }
 
@@ -151,9 +175,8 @@ struct BudgetView {
     color: Index,
     monthly: String,
     daily: String,
-    elapsed: String,
-    broke: String,
     days_left: String,
+    svgs_completed: String,
 }
 
 pub struct Budgit {
@@ -163,6 +186,12 @@ pub struct Budgit {
     start_balance: f64,
     /// Expense periods in chronological order; burn is piecewise over time.
     periods: Vec<Period>,
+    /// Dollars credited per completed SVG (from `budgit.conf`).
+    dollars_per_svg: f64,
+    /// Latest completed-SVG estimate received from the background counter.
+    svgs_completed: f64,
+    /// Receives fresh estimates from the off-thread ripgrep scanner.
+    svg_rx: Receiver<f64>,
     view: BudgetView,
     last_check: Instant,
 }
@@ -181,7 +210,17 @@ impl Budgit {
 
         let config = Config::parse(&fs::read_to_string(CONFIG_PATH)?)?;
         let start_balance = load_ledger_balance()?;
-        let view = compute_view(start_balance, &config.periods, now_secs());
+        // The estimate starts at zero and is filled in by the background
+        // counter once its first off-thread scan completes.
+        let svgs_completed = 0.0;
+        let svg_rx = spawn_svg_counter();
+        let view = compute_view(
+            start_balance,
+            &config.periods,
+            now_secs(),
+            svgs_completed,
+            config.dollars_per_svg,
+        );
 
         Ok(Self {
             label_font,
@@ -189,6 +228,9 @@ impl Budgit {
             stat_font,
             start_balance,
             periods: config.periods,
+            dollars_per_svg: config.dollars_per_svg,
+            svgs_completed,
+            svg_rx,
             view,
             last_check: Instant::now(),
         })
@@ -211,11 +253,22 @@ impl Budgit {
 
     pub(crate) fn update(&mut self) -> bool {
         let now = Instant::now();
+        // Drain any estimates produced by the background counter, keeping the
+        // most recent. This never blocks the render thread.
+        while let Ok(completed) = self.svg_rx.try_recv() {
+            self.svgs_completed = completed;
+        }
         if now.duration_since(self.last_check) < REFRESH {
             return false;
         }
         self.last_check = now;
-        let view = compute_view(self.start_balance, &self.periods, now_secs());
+        let view = compute_view(
+            self.start_balance,
+            &self.periods,
+            now_secs(),
+            self.svgs_completed,
+            self.dollars_per_svg,
+        );
         if view == self.view {
             return false;
         }
@@ -260,9 +313,8 @@ impl Budgit {
         let rows = [
             ("Monthly", self.view.monthly.as_str()),
             ("Daily", self.view.daily.as_str()),
-            ("Elapsed", self.view.elapsed.as_str()),
-            ("Broke", self.view.broke.as_str()),
             ("Days left", self.view.days_left.as_str()),
+            ("~ svgs completed", self.view.svgs_completed.as_str()),
         ];
         for (label, value) in rows {
             self.draw_row(fb, label, value, y);
@@ -318,13 +370,16 @@ fn now_secs() -> f64 {
         .map_or(0.0, |d| d.as_secs_f64())
 }
 
-fn compute_view(start_balance: f64, periods: &[Period], now: f64) -> BudgetView {
-    let start_secs = periods.first().map_or(now, |p| p.start_secs);
-    let elapsed = (now - start_secs).max(0.0);
-
+fn compute_view(
+    start_balance: f64,
+    periods: &[Period],
+    now: f64,
+    svgs_completed: f64,
+    dollars_per_svg: f64,
+) -> BudgetView {
     // Spend is integrated period by period so a later period's burn never
     // applies to time before it began. `burn` is the rate active right now,
-    // used for the monthly/daily display and the broke-date projection.
+    // used for the monthly/daily display and the days-left projection.
     let mut spent = 0.0;
     let mut burn = 0.0;
     for (i, period) in periods.iter().enumerate() {
@@ -337,7 +392,9 @@ fn compute_view(start_balance: f64, periods: &[Period], now: f64) -> BudgetView 
             burn = period.burn;
         }
     }
-    let remaining = start_balance - spent;
+    // Completed SVG work is credited to the balance at the configured rate.
+    let earned = dollars_per_svg * svgs_completed;
+    let remaining = start_balance + earned - spent;
     let per_sec = burn / MONTH_SECS;
     let per_day = burn / DAYS_PER_MONTH;
 
@@ -351,14 +408,13 @@ fn compute_view(start_balance: f64, periods: &[Period], now: f64) -> BudgetView 
 
     let (dollars, fraction) = split_money(remaining);
 
-    let (broke, days_left) = if burn > 0.0 && remaining > 0.0 {
-        let broke_at = now + remaining / per_sec;
-        let days = (broke_at - now) / 86400.0;
-        (fmt_date(broke_at), format!("{days:.1}d"))
+    let days_left = if burn > 0.0 && remaining > 0.0 {
+        let days = (remaining / per_sec) / 86400.0;
+        format!("{days:.1}d")
     } else if remaining <= 0.0 {
-        ("NOW".to_string(), "0d".to_string())
+        "0d".to_string()
     } else {
-        ("never".to_string(), "inf".to_string())
+        "inf".to_string()
     };
 
     BudgetView {
@@ -367,10 +423,83 @@ fn compute_view(start_balance: f64, periods: &[Period], now: f64) -> BudgetView 
         color,
         monthly: format!("{}/mo", fmt_money(burn, 2)),
         daily: format!("{}/day", fmt_money(per_day, 2)),
-        elapsed: fmt_duration(elapsed),
-        broke,
         days_left,
+        svgs_completed: format!("{svgs_completed:.1}"),
     }
+}
+
+/// Spawns a background thread that estimates completed SVGs off the render
+/// thread. It computes the finished-SVG path average once, then loops scanning
+/// the in-progress folder, sending each estimate and sleeping `SVG_REFRESH`
+/// *after* the scan finishes (so a slow scan never overlaps the next). The
+/// thread exits when the receiver is dropped.
+fn spawn_svg_counter() -> Receiver<f64> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let avg = avg_paths_per_svg(DONE_DIR);
+        loop {
+            let completed = compute_svgs_completed(TEMPLATES_DIR, avg);
+            if tx.send(completed).is_err() {
+                break;
+            }
+            thread::sleep(SVG_REFRESH);
+        }
+    });
+    rx
+}
+
+/// Counts `<path` occurrences across the `.svg` files in `dir`, returning
+/// `(total_paths, file_count)`. `recurse` controls descent into
+/// subdirectories. Shells out to ripgrep; any failure yields `(0, 0)`.
+fn count_svg_paths(dir: &str, recurse: bool) -> (u64, u64) {
+    let dir = crate::paths::expand_tilde(dir);
+    let mut cmd = Command::new("rg");
+    cmd.arg("--count-matches")
+        .arg("--no-messages")
+        .arg("--glob")
+        .arg("*.svg");
+    if !recurse {
+        cmd.arg("--max-depth").arg("1");
+    }
+    cmd.arg("<path").arg(&dir);
+    let Ok(output) = cmd.output() else {
+        return (0, 0);
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut total = 0u64;
+    let mut files = 0u64;
+    for line in text.lines() {
+        // ripgrep prints `path:count`; the count is after the final colon.
+        if let Some(count) = line
+            .rsplit(':')
+            .next()
+            .and_then(|n| n.trim().parse::<u64>().ok())
+        {
+            total += count;
+            files += 1;
+        }
+    }
+    (total, files)
+}
+
+/// Average `<path>` count per finished SVG in `done_dir` (0.0 if none).
+fn avg_paths_per_svg(done_dir: &str) -> f64 {
+    let (total, files) = count_svg_paths(done_dir, true);
+    if files == 0 {
+        0.0
+    } else {
+        total as f64 / files as f64
+    }
+}
+
+/// Estimated number of completed in-progress SVGs: the total `<path>` count of
+/// the (non-recursive) templates folder divided by the per-SVG average.
+fn compute_svgs_completed(templates_dir: &str, avg_paths_per_svg: f64) -> f64 {
+    if avg_paths_per_svg <= 0.0 {
+        return 0.0;
+    }
+    let (total, _) = count_svg_paths(templates_dir, false);
+    total as f64 / avg_paths_per_svg
 }
 
 /// Splits a money value into a big "-$1,234" dollar string and a ".5678"
@@ -417,24 +546,6 @@ fn group_digits(value: i64) -> String {
     out
 }
 
-fn fmt_duration(secs: f64) -> String {
-    let total = secs.max(0.0) as i64;
-    let d = total / 86400;
-    let h = (total % 86400) / 3600;
-    let m = (total % 3600) / 60;
-    let s = total % 60;
-    format!("{d}d {h}h {m}m {s}s")
-}
-
-fn fmt_date(secs: f64) -> String {
-    let days = (secs / 86400.0).floor() as i64;
-    let (year, month, day) = civil_from_days(days);
-    let name = SHORT_MONTHS
-        .get((month - 1).clamp(0, 11) as usize)
-        .unwrap_or(&"Jan");
-    format!("{name} {day}, {year}")
-}
-
 /// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
 const fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -444,20 +555,6 @@ const fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
     let doy = (153 * mp + 2) / 5 + (d as i64) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
-}
-
-/// Inverse of `days_from_civil`: returns (year, month, day).
-const fn civil_from_days(z: i64) -> (i32, i32, i32) {
-    let z = z + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    ((y + if m <= 2 { 1 } else { 0 }) as i32, m as i32, d as i32)
 }
 
 #[cfg(test)]
@@ -532,7 +629,7 @@ mod tests {
         // 1 month at $300/mo then 1 month at $600/mo = $900 spent.
         let periods = [period(0.0, 300.0), period(MONTH_SECS, 600.0)];
         let now = 2.0 * MONTH_SECS;
-        let view = compute_view(1000.0, &periods, now);
+        let view = compute_view(1000.0, &periods, now, 0.0, 0.0);
         assert_eq!(view.dollars, "$100");
         assert_eq!(view.fraction, ".0000");
         assert_eq!(view.color, palette_color::LIME);
@@ -549,8 +646,8 @@ mod tests {
             period(10.0 * MONTH_SECS, 9999.0),
         ];
         let now = 2.0 * MONTH_SECS;
-        let a = compute_view(1000.0, &with_future, now);
-        let b = compute_view(1000.0, &with_future[..2], now);
+        let a = compute_view(1000.0, &with_future, now, 0.0, 0.0);
+        let b = compute_view(1000.0, &with_future[..2], now, 0.0, 0.0);
         assert_eq!(a.dollars, b.dollars);
         assert_eq!(a.monthly, b.monthly);
     }
@@ -558,17 +655,15 @@ mod tests {
     #[test]
     fn compute_view_no_spend_before_start() {
         let periods = [period(MONTH_SECS, 600.0)];
-        let view = compute_view(500.0, &periods, 0.0);
+        let view = compute_view(500.0, &periods, 0.0, 0.0, 0.0);
         assert_eq!(view.dollars, "$500");
-        assert_eq!(view.elapsed, "0d 0h 0m 0s");
     }
 
     #[test]
     fn compute_view_goes_crimson_when_overdrawn() {
         let periods = [period(0.0, 600.0)];
-        let view = compute_view(0.0, &periods, MONTH_SECS);
+        let view = compute_view(0.0, &periods, MONTH_SECS, 0.0, 0.0);
         assert_eq!(view.color, palette_color::CRIMSON);
-        assert_eq!(view.broke, "NOW");
         assert_eq!(view.days_left, "0d");
     }
 }

@@ -911,17 +911,9 @@ fn toodle_root() -> &'static str {
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| DEFAULT_TOODLE_ROOT.to_owned());
-        let expanded = expand_tilde(&configured);
+        let expanded = crate::paths::expand_tilde(&configured);
         expanded.trim_end_matches('/').to_owned()
     })
-}
-
-/// Expand a leading `~/` to `$HOME`. Returns the input unchanged otherwise.
-fn expand_tilde(path: &str) -> String {
-    match (path.strip_prefix("~/"), std::env::var("HOME")) {
-        (Some(rest), Ok(home)) => format!("{}/{rest}", home.trim_end_matches('/')),
-        _ => path.to_owned(),
-    }
 }
 
 fn todo_file(section: usize) -> String {
