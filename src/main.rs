@@ -26,6 +26,7 @@ mod fusion_pixel_12_font;
 mod fusion_pixel_8_font;
 mod fwends;
 mod graphics;
+mod hunger;
 mod localtime;
 mod openrouter;
 mod peanut_money_font;
@@ -114,9 +115,10 @@ enum WidgetId {
     Day,
     Budgit,
     Stats,
+    Hunger,
 }
 
-const WIDGET_COUNT: usize = 9;
+const WIDGET_COUNT: usize = 10;
 
 impl WidgetId {
     const fn index(self) -> usize {
@@ -125,7 +127,7 @@ impl WidgetId {
 }
 
 impl WidgetId {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Wavey,
         Self::Puter,
         Self::Toodle,
@@ -135,10 +137,11 @@ impl WidgetId {
         Self::Day,
         Self::Budgit,
         Self::Stats,
+        Self::Hunger,
     ];
 
-    const VISIBLE_WITH_FWENDS: [Self; 9] = Self::ALL;
-    const VISIBLE_WITHOUT_FWENDS: [Self; 8] = [
+    const VISIBLE_WITH_FWENDS: [Self; 10] = Self::ALL;
+    const VISIBLE_WITHOUT_FWENDS: [Self; 9] = [
         Self::Wavey,
         Self::Puter,
         Self::Toodle,
@@ -147,6 +150,7 @@ impl WidgetId {
         Self::Day,
         Self::Budgit,
         Self::Stats,
+        Self::Hunger,
     ];
 
     const fn visible() -> &'static [Self] {
@@ -172,6 +176,7 @@ struct App {
     day: day::Day,
     budgit: budgit::Budgit,
     stats: stats::Stats,
+    hunger: hunger::Hunger,
     desk: Sprite,
     // Indexed by WidgetId::index().
     fbs: [Framebuffer; WIDGET_COUNT],
@@ -192,9 +197,10 @@ impl App {
         let day = day::Day::load(palette)?;
         let budgit = budgit::Budgit::load(palette)?;
         let stats = stats::Stats::load(palette)?;
+        let hunger = hunger::Hunger::load(palette)?;
         let desk = Sprite::load_native(DESK_PATH, palette)?;
         let positions = widget_positions(
-            &puter, &toodle, &twirl, &wavey, &fizzle, &day, &budgit, &stats,
+            &puter, &toodle, &twirl, &wavey, &fizzle, &day, &budgit, &stats, &hunger,
         );
         let sizes: [(usize, usize); WIDGET_COUNT] = [
             (puter.width(), puter.height()),
@@ -206,6 +212,7 @@ impl App {
             (day.width(), day.height()),
             (budgit.width(), budgit.height()),
             (stats.width(), stats.height()),
+            (hunger.width(), hunger.height()),
         ];
         let fills: [Index; WIDGET_COUNT] = [
             puter.fill_color(palette),
@@ -217,6 +224,7 @@ impl App {
             day.fill_color(palette),
             budgit.fill_color(palette),
             stats.fill_color(palette),
+            hunger.fill_color(palette),
         ];
         let rects = std::array::from_fn(|i| {
             let (x, y) = positions[i];
@@ -238,6 +246,7 @@ impl App {
             day,
             budgit,
             stats,
+            hunger,
             desk,
             fbs,
             rects,
@@ -269,6 +278,10 @@ impl App {
 
     fn height(&self) -> usize {
         let height = self.target_app_height();
+        // Hunger contributes no layout space of its own, but the window must
+        // still be tall enough to contain it where it sits below the puter.
+        let hunger = self.rect_for(WidgetId::Hunger);
+        let height = height.max(hunger.y + hunger.h);
         if SHOW_FWENDS {
             let fwends = self.rect_for(WidgetId::Fwends);
             height.max(fwends.y + fwends.h)
@@ -358,6 +371,10 @@ impl App {
                 widget_fb.clear(self.stats.fill_color(palette));
                 self.stats.render(widget_fb, palette);
             }
+            WidgetId::Hunger => {
+                widget_fb.clear(self.hunger.fill_color(palette));
+                self.hunger.render(widget_fb, palette);
+            }
         }
         let rect = self.rects[widget.index()];
         fb.blit_from(&self.fbs[widget.index()], rect.x, rect.y);
@@ -414,6 +431,7 @@ impl App {
             &self.day,
             &self.budgit,
             &self.stats,
+            &self.hunger,
         );
         for (rect, (x, y)) in self.rects.iter_mut().zip(positions) {
             changed |= move_rect(rect, x, y);
@@ -473,7 +491,8 @@ impl App {
             | WidgetId::Fizzle
             | WidgetId::Day
             | WidgetId::Budgit
-            | WidgetId::Stats => Ok(None),
+            | WidgetId::Stats
+            | WidgetId::Hunger => Ok(None),
         }
     }
 
@@ -509,6 +528,9 @@ impl App {
                 return Ok(self.wavey.click(x, y));
             }
             WidgetId::Fizzle | WidgetId::Budgit | WidgetId::Stats => {}
+            WidgetId::Hunger => {
+                self.hunger.click();
+            }
             WidgetId::Day => self.day.toggle_mode(),
         }
         Ok(None)
@@ -525,7 +547,8 @@ impl App {
                 | WidgetId::Fizzle
                 | WidgetId::Day
                 | WidgetId::Budgit
-                | WidgetId::Stats => {}
+                | WidgetId::Stats
+                | WidgetId::Hunger => {}
             }
             return Some(widget);
         }
@@ -561,7 +584,8 @@ impl App {
                 | WidgetId::Fizzle
                 | WidgetId::Day
                 | WidgetId::Budgit
-                | WidgetId::Stats => false,
+                | WidgetId::Stats
+                | WidgetId::Hunger => false,
             };
             return changed.then_some(widget);
         }
@@ -623,7 +647,8 @@ impl App {
                 | WidgetId::Fizzle
                 | WidgetId::Day
                 | WidgetId::Budgit
-                | WidgetId::Stats,
+                | WidgetId::Stats
+                | WidgetId::Hunger,
                 _,
             ) => {
                 return None;
@@ -640,6 +665,7 @@ impl App {
             WidgetId::Twirl,
             WidgetId::Fwends,
             WidgetId::Toodle,
+            WidgetId::Hunger,
             WidgetId::Puter,
         ]
         .into_iter()
@@ -664,6 +690,10 @@ impl App {
 
 const TOODLE_LEFT_OVERLAP: usize = 24;
 
+/// How far the hunger bar is pulled up to overlap the puter's lower edge,
+/// keeping it within the bottom padding rather than growing the window.
+const HUNGER_PUTER_OVERLAP: usize = 40;
+
 /// Widget (x, y) positions, indexed by `WidgetId::index()`.
 #[allow(clippy::too_many_arguments)]
 fn widget_positions(
@@ -675,6 +705,7 @@ fn widget_positions(
     day: &day::Day,
     budgit: &budgit::Budgit,
     _stats: &stats::Stats,
+    hunger: &hunger::Hunger,
 ) -> [(usize, usize); WIDGET_COUNT] {
     let left_w = day.width().max(wavey.width());
     let middle_x = left_w + WIDGET_GAP;
@@ -712,6 +743,13 @@ fn widget_positions(
     let stats_x = 0;
     let stats_y = budgit_y + budgit.height() + WIDGET_GAP;
 
+    // Hunger takes no layout space (it never feeds the width/height maxes), so
+    // it sits in the bottom padding directly below the puter, horizontally
+    // centered, without pushing any other widget around. It is nudged up into
+    // the puter's lower edge by HUNGER_PUTER_OVERLAP.
+    let hunger_x = puter_x + puter.width().saturating_sub(hunger.width()) / 2;
+    let hunger_y = (puter_y + puter.height() + WIDGET_GAP).saturating_sub(HUNGER_PUTER_OVERLAP);
+
     [
         (puter_x, puter_y),
         (toodle_x, toodle_y),
@@ -722,6 +760,7 @@ fn widget_positions(
         (day_x, day_y),
         (budgit_x, budgit_y),
         (stats_x, stats_y),
+        (hunger_x, hunger_y),
     ]
 }
 
@@ -903,6 +942,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
+        if app.hunger.update() {
+            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Hunger)?;
+            drew_frame = true;
+        }
+
         // Debounced toodle saves: edits hit disk shortly after typing pauses.
         app.toodle.maintain()?;
 
@@ -1046,6 +1090,7 @@ fn should_load_clipboard_for_paste(focus: WidgetId, input: &text::KeyInput) -> b
         | WidgetId::Fizzle
         | WidgetId::Day
         | WidgetId::Budgit
-        | WidgetId::Stats => false,
+        | WidgetId::Stats
+        | WidgetId::Hunger => false,
     }
 }
