@@ -9,9 +9,6 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::palette_color;
-use crate::pixolde_bold_font;
-use crate::pixolde_font;
-use crate::rozha_one_48_font;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette};
 
@@ -199,13 +196,13 @@ pub struct Budgit {
 impl Budgit {
     pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
         let label_font = BitmapFont::load_with_fallback(
-            &pixolde_bold_font::PIXOLDE_BOLD_SPEC,
-            &crate::fusion_pixel_12_font::FUSION_PIXEL_12_SPEC,
+            &pixel_fonts::PIXOLDE_BOLD_SPEC,
+            &pixel_fonts::FUSION_PIXEL_12_SPEC,
         )?;
-        let balance_font = BitmapFont::load(&rozha_one_48_font::ROZHA_ONE_48_SPEC)?;
+        let balance_font = BitmapFont::load(&pixel_fonts::ROZHA_ONE_48_SPEC)?;
         let stat_font = BitmapFont::load_with_fallback(
-            &pixolde_font::PIXOLDE_SPEC,
-            &crate::fusion_pixel_8_font::FUSION_PIXEL_8_SPEC,
+            &pixel_fonts::PIXOLDE_SPEC,
+            &pixel_fonts::FUSION_PIXEL_8_SPEC,
         )?;
 
         let config = Config::parse(&fs::read_to_string(CONFIG_PATH)?)?;

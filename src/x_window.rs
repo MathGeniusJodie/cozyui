@@ -5,21 +5,23 @@ use std::os::fd::OwnedFd;
 use std::time::{Duration, Instant};
 
 use memmap2::MmapMut;
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::Event as XEvent;
+use x11rb::protocol::shape::{self, ConnectionExt as ShapeConnectionExt};
 use x11rb::protocol::shm::{ConnectionExt as ShmConnectionExt, Seg};
 use x11rb::protocol::xproto::ConnectionExt as XprotoConnectionExt;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, CreateGCAux, CreateWindowAux,
-    EventMask, Gcontext, ImageFormat, PropMode, SELECTION_NOTIFY_EVENT, SelectionClearEvent,
-    SelectionNotifyEvent, SelectionRequestEvent, Time, Window, WindowClass,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ClipOrdering, ConfigureWindowAux, CreateGCAux,
+    CreateWindowAux, EventMask, Gcontext, ImageFormat, PropMode, Rectangle,
+    SELECTION_NOTIFY_EVENT, SelectionClearEvent, SelectionNotifyEvent, SelectionRequestEvent,
+    Time, Window, WindowClass,
 };
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
 
-use crate::graphics::PresentLut;
 use crate::text::input as text_input;
-use crate::{Framebuffer, Palette, Rect};
+use crate::{Framebuffer, Palette, Rect, TRANSPARENT};
+use pixel_graphics::PresentLut;
 
 pub struct XWindow {
     pub(crate) conn: XCBConnection,
@@ -33,6 +35,11 @@ pub struct XWindow {
     clipboard_text: Option<String>,
     /// Index -> BGRA table applied when presenting; refreshed via `set_palette`.
     lut: Box<PresentLut>,
+    /// SHAPE-based transparency: cut `TRANSPARENT` framebuffer pixels out of
+    /// the window. `false` when disabled or the server lacks the extension.
+    shaped: bool,
+    /// Last bounding-shape rectangles sent, to skip redundant updates.
+    shape_rects: Option<Vec<Rectangle>>,
 }
 
 struct ShmImage {
@@ -55,8 +62,16 @@ struct ClipboardAtoms {
 }
 
 impl XWindow {
-    pub(crate) fn open(width: usize, height: usize) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn open(
+        width: usize,
+        height: usize,
+        transparent: bool,
+    ) -> Result<Self, Box<dyn Error>> {
         let (conn, screen_num) = XCBConnection::connect(None)?;
+        let shaped = transparent
+            && conn
+                .extension_information(shape::X11_EXTENSION_NAME)?
+                .is_some();
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
         let depth = screen.root_depth;
@@ -113,6 +128,8 @@ impl XWindow {
             clipboard_atoms,
             clipboard_text: None,
             lut: Box::new([[0, 0, 0, 0xFF]; 256]),
+            shaped,
+            shape_rects: None,
         })
     }
 
@@ -150,7 +167,35 @@ impl XWindow {
         Err("MIT-SHM fd passing requires Unix".into())
     }
 
+    /// Sync the window's bounding shape to the framebuffer's `TRANSPARENT`
+    /// pixels, if shaping is enabled and the mask actually changed.
+    fn update_shape(&mut self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
+        if !self.shaped {
+            return Ok(());
+        }
+        let rects = opaque_rects(fb);
+        if self
+            .shape_rects
+            .as_ref()
+            .is_some_and(|cached| rects_equal(cached, &rects))
+        {
+            return Ok(());
+        }
+        self.conn.shape_rectangles(
+            shape::SO::SET,
+            shape::SK::BOUNDING,
+            ClipOrdering::UNSORTED,
+            self.window,
+            0,
+            0,
+            &rects,
+        )?;
+        self.shape_rects = Some(rects);
+        Ok(())
+    }
+
     pub(crate) fn draw(&mut self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
+        self.update_shape(fb)?;
         let frame_len = fb.width * fb.height * Framebuffer::BYTES_PER_PIXEL;
         if let Some(shm_image) = &mut self.shm_image {
             fb.present_into(&mut shm_image.mmap[..frame_len], &self.lut);
@@ -200,7 +245,17 @@ impl XWindow {
                 .width(width as u32)
                 .height(height as u32),
         )?;
+        self.resize_backing(width, height)
+    }
 
+    /// Recreates the SHM backing buffer to match a size the window already
+    /// has (e.g. reported by a `ConfigureNotify` from the WM), without
+    /// requesting a new geometry from the server.
+    pub(crate) fn resize_backing(
+        &mut self,
+        width: usize,
+        height: usize,
+    ) -> Result<(), Box<dyn Error>> {
         if let Some(shm_image) = self.shm_image.take() {
             self.conn.shm_detach(shm_image.seg)?;
         }
@@ -213,6 +268,7 @@ impl XWindow {
         if rect.x == 0 && rect.y == 0 && rect.w == fb.width && rect.h == fb.height {
             return self.draw(fb);
         }
+        self.update_shape(fb)?;
 
         let byte_len = rect.w * rect.h * Framebuffer::BYTES_PER_PIXEL;
         if let Some(shm_image) = &mut self.shm_image {
@@ -549,6 +605,62 @@ impl ClipboardAtoms {
 
 fn intern_atom(conn: &XCBConnection, name: &[u8]) -> Result<Atom, Box<dyn Error>> {
     Ok(conn.intern_atom(false, name)?.reply()?.atom)
+}
+
+/// Cover every non-`TRANSPARENT` pixel with rectangles: horizontal runs per
+/// row, with identical consecutive rows merged into taller bands.
+fn opaque_rects(fb: &Framebuffer) -> Vec<Rectangle> {
+    let mut rects = Vec::new();
+    let mut band_runs: Vec<(usize, usize)> = Vec::new();
+    let mut band_start = 0;
+    for y in 0..=fb.height {
+        let runs = if y < fb.height {
+            row_runs(fb.row(y))
+        } else {
+            Vec::new()
+        };
+        if runs != band_runs {
+            for &(x, w) in &band_runs {
+                rects.push(Rectangle {
+                    x: x as i16,
+                    y: band_start as i16,
+                    width: w as u16,
+                    height: (y - band_start) as u16,
+                });
+            }
+            band_runs = runs;
+            band_start = y;
+        }
+    }
+    rects
+}
+
+/// `Rectangle` doesn't derive `PartialEq`, so compare fields directly.
+fn rects_equal(a: &[Rectangle], b: &[Rectangle]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(p, q)| p.x == q.x && p.y == q.y && p.width == q.width && p.height == q.height)
+}
+
+/// (x, width) spans of non-`TRANSPARENT` pixels in one row.
+fn row_runs(row: &[u8]) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    for (x, &index) in row.iter().enumerate() {
+        match (index != TRANSPARENT, start) {
+            (true, None) => start = Some(x),
+            (false, Some(s)) => {
+                runs.push((s, x - s));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        runs.push((s, row.len() - s));
+    }
+    runs
 }
 
 fn selection_property(event: SelectionRequestEvent) -> Atom {

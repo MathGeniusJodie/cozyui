@@ -4,7 +4,6 @@ use std::fs;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use crate::comicoro_font;
 use crate::openrouter;
 use crate::palette_color;
 use crate::text::{
@@ -173,8 +172,8 @@ impl Fwends {
             lamp_off_image: Sprite::load_native(LAMP_OFF_PATH, palette)?,
             eraser: Sprite::load_native(ERASER_PATH, palette)?,
             font: BitmapFont::load_with_fallback(
-                &comicoro_font::COMICORO_SPEC,
-                &crate::fusion_pixel_10_font::FUSION_PIXEL_10_SPEC,
+                &pixel_fonts::COMICORO_SPEC,
+                &pixel_fonts::FUSION_PIXEL_10_SPEC,
             )?,
             messages: vec![intro_message()],
             input: TextField::new(MAX_INPUT_CHARS, INPUT_MAX_LINES),
@@ -497,14 +496,14 @@ impl Fwends {
             }
             for dx in 0..w {
                 let px = x + dx;
-                let sx = crate::graphics::stretch_source_coord(
+                let sx = pixel_graphics::stretch_source_coord(
                     dx,
                     w,
                     image.width,
                     style.left_cap,
                     style.right_cap,
                 );
-                let sy = crate::graphics::stretch_source_coord(
+                let sy = pixel_graphics::stretch_source_coord(
                     dy,
                     h,
                     image.height,

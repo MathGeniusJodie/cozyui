@@ -5,7 +5,6 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::app_color;
-use crate::comicoro_font;
 use crate::palette_color;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
@@ -69,8 +68,8 @@ impl Twirl {
         Ok(Self {
             wheel,
             font: BitmapFont::load_with_fallback(
-                &comicoro_font::COMICORO_SPEC,
-                &crate::fusion_pixel_10_font::FUSION_PIXEL_10_SPEC,
+                &pixel_fonts::COMICORO_SPEC,
+                &pixel_fonts::FUSION_PIXEL_10_SPEC,
             )?,
             angle: 0.0,
             speed: 0.0,

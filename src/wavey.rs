@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use crate::localtime::local_time;
 use crate::palette_color;
-use crate::poco_font;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
@@ -110,8 +109,8 @@ impl Wavey {
         let mut wavey = Self {
             image: Sprite::load_native(WAVEY_PATH, palette)?,
             font: BitmapFont::load_with_fallback(
-                &poco_font::POCO_SPEC,
-                &crate::fusion_pixel_8_font::FUSION_PIXEL_8_SPEC,
+                &pixel_fonts::POCO_SPEC,
+                &pixel_fonts::FUSION_PIXEL_8_SPEC,
             )?,
             stations: load_stations(STATIONS_PATH),
             station: 0,

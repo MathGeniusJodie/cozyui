@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use crate::app_color;
 use crate::palette_color;
-use crate::peanut_money_font;
 use crate::text::{
     BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
 };
@@ -173,8 +172,8 @@ impl Toodle {
             pencil_shadow: Sprite::load_native(PENCIL_SHADOW_PATH, palette)?,
             dice: Sprite::load_native(DICE_PATH, palette)?,
             font: BitmapFont::load_with_fallback(
-                &peanut_money_font::PEANUT_MONEY_SPEC,
-                &crate::fusion_pixel_10_font::FUSION_PIXEL_10_SPEC,
+                &pixel_fonts::PEANUT_MONEY_SPEC,
+                &pixel_fonts::FUSION_PIXEL_10_SPEC,
             )?,
             todos: [
                 TodoList::load(&todo_file(0))?,

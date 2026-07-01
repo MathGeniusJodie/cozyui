@@ -5,11 +5,9 @@
 
 pub mod edit;
 pub mod field;
-pub mod font;
 pub mod input;
-mod wrap;
 
 pub use edit::TextEditOutcome;
-pub use field::{LinePlacement, TextField, TextLayout};
-pub use font::{BitmapFont, FontAtlas, FontSpec};
+pub use field::TextField;
 pub use input::{EditKey, KeyInput, edit_key};
+pub use pixel_fonts::{BitmapFont, LinePlacement, TextLayout};

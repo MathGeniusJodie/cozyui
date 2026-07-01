@@ -14,34 +14,16 @@ use xkbcommon::xkb::keysyms;
 #[cfg(test)]
 mod bench;
 mod budgit;
-mod comicoro_font;
 mod day;
 mod emojimap;
 mod fizzle;
-#[allow(dead_code)]
-mod fusion_pixel_10_font;
-#[allow(dead_code)]
-mod fusion_pixel_12_font;
-#[allow(dead_code)]
-mod fusion_pixel_8_font;
 mod fwends;
-mod graphics;
 mod hunger;
 mod localtime;
 mod openrouter;
 #[allow(dead_code)]
 mod paths;
-mod peanut_money_font;
-#[allow(dead_code)]
-mod pixolde_bold_font;
-#[allow(dead_code)]
-mod pixolde_font;
-#[allow(dead_code)]
-mod pixolde_italic_font;
-mod poco_font;
 mod puter;
-#[allow(dead_code)]
-mod rozha_one_48_font;
 mod stats;
 mod text;
 mod toodle;
@@ -49,7 +31,7 @@ mod twirl;
 mod wavey;
 mod x_window;
 
-pub(crate) use graphics::{
+pub(crate) use pixel_graphics::{
     Framebuffer, Index, Paint, Palette, Rect, Rgb, Rgba, Sprite, Swap, TRANSPARENT,
     decode_png_with_size,
 };
@@ -90,10 +72,21 @@ pub(crate) mod app_color {
     pub const BACKGROUND: Index = palette_color::CYAN;
 
     /// The background and its cast shadows are the only thing that paints with
-    /// these checkers. Everything else uses literal palette colors.
-    pub const BACKGROUND_PAINT: Paint = Paint::Checker(palette_color::LIME, palette_color::CYAN);
-    pub const BACKGROUND_SHADOW_PAINT: Paint =
-        Paint::Checker(palette_color::BLUE, palette_color::GREEN);
+    /// these checkers. Everything else uses literal palette colors. With
+    /// `TRANSPARENT_BACKGROUND` the background collapses to `TRANSPARENT`
+    /// holes instead, which the X SHAPE mask then cuts out of the window.
+    pub const BACKGROUND_PAINT: Paint = if crate::TRANSPARENT_BACKGROUND {
+        Paint::Solid(crate::TRANSPARENT)
+    } else {
+        Paint::Checker(palette_color::LIME, palette_color::CYAN)
+    };
+    /// Shadows stay visible on a transparent background so widgets still cast
+    /// onto the desktop below.
+    pub const BACKGROUND_SHADOW_PAINT: Paint = if crate::TRANSPARENT_BACKGROUND {
+        Paint::Solid(palette_color::PINE)
+    } else {
+        Paint::Checker(palette_color::BLUE, palette_color::GREEN)
+    };
 }
 
 const WHEEL_UP: u8 = 4;
@@ -103,6 +96,10 @@ const WIDGET_GAP: usize = 16;
 const APP_LEFT_PADDING: usize = 144;
 const APP_BOTTOM_PADDING: usize = 74;
 const SHOW_FWENDS: bool = true;
+/// Cut the desk background out of the window with the X SHAPE extension so
+/// whatever is underneath shows through (no compositor needed). The holes are
+/// fully click-through.
+const TRANSPARENT_BACKGROUND: bool = true;
 const FWENDS_LEFT_APRON: usize = 60;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -185,6 +182,11 @@ struct App {
     focus: WidgetId,
     puter_pressed: bool,
     text_drag: Option<WidgetId>,
+    /// Floor imposed by the actual X window height (set from ConfigureNotify
+    /// when the WM/user makes the window taller than the content needs), so
+    /// the bottom-anchored widgets stay pinned to the real bottom edge
+    /// instead of leaving a gap below them.
+    min_height: usize,
 }
 
 impl App {
@@ -201,7 +203,7 @@ impl App {
         let hunger = hunger::Hunger::load(palette)?;
         let desk = Sprite::load_native(DESK_PATH, palette)?;
         let positions = widget_positions(
-            &puter, &toodle, &twirl, &wavey, &fizzle, &day, &budgit, &stats, &hunger,
+            &puter, &toodle, &twirl, &wavey, &fizzle, &day, &budgit, &stats, &hunger, 0,
         );
         let sizes: [(usize, usize); WIDGET_COUNT] = [
             (puter.width(), puter.height()),
@@ -254,6 +256,7 @@ impl App {
             focus: WidgetId::Toodle,
             puter_pressed: false,
             text_drag: None,
+            min_height: 0,
         };
         app.sync_fwends_height(palette);
         Ok(app)
@@ -305,7 +308,18 @@ impl App {
         } else {
             height
         };
-        height + APP_BOTTOM_PADDING
+        (height + APP_BOTTOM_PADDING).max(self.min_height)
+    }
+
+    /// Records the actual X window height (from a ConfigureNotify) so the
+    /// bottom-anchored layout can grow to fill it. Returns whether the floor
+    /// changed and a relayout is needed.
+    fn set_min_height(&mut self, height: usize) -> bool {
+        if self.min_height == height {
+            return false;
+        }
+        self.min_height = height;
+        true
     }
 
     #[allow(clippy::unused_self)]
@@ -433,6 +447,7 @@ impl App {
             &self.budgit,
             &self.stats,
             &self.hunger,
+            self.min_height.saturating_sub(APP_BOTTOM_PADDING),
         );
         for (rect, (x, y)) in self.rects.iter_mut().zip(positions) {
             changed |= move_rect(rect, x, y);
@@ -693,7 +708,7 @@ const TOODLE_LEFT_OVERLAP: usize = 24;
 
 /// How far the hunger bar is pulled up to overlap the puter's lower edge,
 /// keeping it within the bottom padding rather than growing the window.
-const HUNGER_PUTER_OVERLAP: usize = 40;
+const HUNGER_PUTER_OVERLAP: usize = 36;
 
 /// Widget (x, y) positions, indexed by `WidgetId::index()`.
 #[allow(clippy::too_many_arguments)]
@@ -707,13 +722,14 @@ fn widget_positions(
     budgit: &budgit::Budgit,
     _stats: &stats::Stats,
     hunger: &hunger::Hunger,
+    min_layout_h: usize,
 ) -> [(usize, usize); WIDGET_COUNT] {
     let left_w = day.width().max(wavey.width());
     let middle_x = left_w + WIDGET_GAP;
     let middle_w = puter.width().max(toodle.width()).max(twirl.width());
     let left_h = day.height() + WIDGET_GAP + wavey.height();
     let middle_h = twirl.height() + WIDGET_GAP + toodle.height() + WIDGET_GAP + puter.height();
-    let layout_h = left_h.max(middle_h);
+    let layout_h = left_h.max(middle_h).max(min_layout_h);
     let wavey_y = layout_h - wavey.height();
     let day_y = wavey_y - WIDGET_GAP - day.height() - 30;
     let puter_y = layout_h - puter.height();
@@ -892,7 +908,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let width = app.width();
     let height = app.height();
     let mut fb = Framebuffer::new(width, height, app.fill_color(&palette));
-    let mut xwin = XWindow::open(width, height)?;
+    let mut xwin = XWindow::open(width, height, TRANSPARENT_BACKGROUND)?;
     xwin.set_palette(&palette);
     app.start(u64::from(xwin.window))?;
     app.render(&mut fb, &palette);
@@ -1021,6 +1037,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 XEvent::SelectionRequest(event) => xwin.handle_selection_request(event)?,
                 XEvent::SelectionClear(event) => xwin.handle_selection_clear(event),
+                XEvent::ConfigureNotify(event) => {
+                    if app.set_min_height(event.height as usize) {
+                        app.sync_dynamic_layout(&palette);
+                        fb = Framebuffer::new(app.width(), app.height(), app.fill_color(&palette));
+                        xwin.resize_backing(fb.width, fb.height)?;
+                        app.render(&mut fb, &palette);
+                        xwin.draw(&fb)?;
+                        drew_frame = true;
+                    }
+                }
                 XEvent::DestroyNotify(_) => running = false,
                 _ => {}
             }

@@ -9,7 +9,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::localtime;
 use crate::palette_color;
-use crate::pixolde_bold_font;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
@@ -26,7 +25,7 @@ const STATE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hunger.txt");
 /// resolves the countdown into `APPLES * 4` steps.
 const APPLES: usize = 5;
 const APPLE_GAP: usize = 0;
-const BAR_TEXT_GAP: usize = 4;
+const BAR_TEXT_GAP: usize = 5;
 
 const REFRESH: Duration = Duration::from_secs(1);
 
@@ -76,8 +75,8 @@ impl Hunger {
         let apple_50 = Sprite::load_native(APPLE_50_PATH, palette)?;
         let apple_25 = Sprite::load_native(APPLE_25_PATH, palette)?;
         let font = BitmapFont::load_with_fallback(
-            &pixolde_bold_font::PIXOLDE_BOLD_SPEC,
-            &crate::fusion_pixel_12_font::FUSION_PIXEL_12_SPEC,
+            &pixel_fonts::PIXOLDE_BOLD_SPEC,
+            &pixel_fonts::FUSION_PIXEL_12_SPEC,
         )?;
 
         let width = APPLES * apple_100.width + (APPLES - 1) * APPLE_GAP;

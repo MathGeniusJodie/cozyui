@@ -104,7 +104,8 @@ dependencies = [
  "deunicode",
  "memmap2",
  "phf",
- "png",
+ "pixel-fonts",
+ "pixel-graphics",
  "serde_json",
  "x11rb",
  "xkbcommon",
@@ -350,6 +351,20 @@ dependencies = [
  "atomic-waker",
  "fastrand",
  "futures-io",
+]
+
+[[package]]
+name = "pixel-fonts"
+version = "0.1.0"
+dependencies = [
+ "pixel-graphics",
+]
+
+[[package]]
+name = "pixel-graphics"
+version = "0.1.0"
+dependencies = [
+ "png",
 ]
 
 [[package]]

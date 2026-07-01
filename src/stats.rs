@@ -9,7 +9,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::palette_color;
-use crate::pixolde_font;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette};
 
@@ -59,8 +58,8 @@ pub struct Stats {
 impl Stats {
     pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
         let font = BitmapFont::load_with_fallback(
-            &pixolde_font::PIXOLDE_SPEC,
-            &crate::fusion_pixel_8_font::FUSION_PIXEL_8_SPEC,
+            &pixel_fonts::PIXOLDE_SPEC,
+            &pixel_fonts::FUSION_PIXEL_8_SPEC,
         )?;
         Ok(Self {
             font,

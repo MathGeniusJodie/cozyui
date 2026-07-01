@@ -4,9 +4,6 @@ use std::time::{Duration, Instant};
 use crate::app_color;
 use crate::localtime::local_time;
 use crate::palette_color;
-use crate::pixolde_bold_font;
-use crate::poco_font;
-use crate::rozha_one_48_font;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT, draw_filled_circle};
 
@@ -82,13 +79,13 @@ impl Day {
         Ok(Self {
             background: Sprite::load_native(BACKGROUND_PATH, palette)?,
             label_font: BitmapFont::load_with_fallback(
-                &pixolde_bold_font::PIXOLDE_BOLD_SPEC,
-                &crate::fusion_pixel_12_font::FUSION_PIXEL_12_SPEC,
+                &pixel_fonts::PIXOLDE_BOLD_SPEC,
+                &pixel_fonts::FUSION_PIXEL_12_SPEC,
             )?,
-            number_font: BitmapFont::load(&rozha_one_48_font::ROZHA_ONE_48_SPEC)?,
+            number_font: BitmapFont::load(&pixel_fonts::ROZHA_ONE_48_SPEC)?,
             calendar_font: BitmapFont::load_with_fallback(
-                &poco_font::POCO_SPEC,
-                &crate::fusion_pixel_8_font::FUSION_PIXEL_8_SPEC,
+                &pixel_fonts::POCO_SPEC,
+                &pixel_fonts::FUSION_PIXEL_8_SPEC,
             )?,
             date: current_date_parts(),
             last_check: Instant::now(),
