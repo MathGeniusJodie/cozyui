@@ -92,15 +92,11 @@ pub(crate) mod app_color {
 const WHEEL_UP: u8 = 4;
 const WHEEL_DOWN: u8 = 5;
 
-const WIDGET_GAP: usize = 16;
-const APP_LEFT_PADDING: usize = 144;
-const APP_BOTTOM_PADDING: usize = 74;
 const SHOW_FWENDS: bool = true;
 /// Cut the desk background out of the window with the X SHAPE extension so
 /// whatever is underneath shows through (no compositor needed). The holes are
 /// fully click-through.
 const TRANSPARENT_BACKGROUND: bool = true;
-const FWENDS_LEFT_APRON: usize = 60;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WidgetId {
@@ -122,9 +118,7 @@ impl WidgetId {
     const fn index(self) -> usize {
         self as usize
     }
-}
 
-impl WidgetId {
     const ALL: [Self; 10] = [
         Self::Wavey,
         Self::Puter,
@@ -202,9 +196,6 @@ impl App {
         let stats = stats::Stats::load(palette)?;
         let hunger = hunger::Hunger::load(palette)?;
         let desk = Sprite::load_native(DESK_PATH, palette)?;
-        let positions = widget_positions(
-            &puter, &toodle, &twirl, &wavey, &fizzle, &day, &budgit, &stats, &hunger, 0,
-        );
         let sizes: [(usize, usize); WIDGET_COUNT] = [
             (puter.width(), puter.height()),
             (toodle.width(), toodle.height()),
@@ -229,10 +220,11 @@ impl App {
             stats.fill_color(palette),
             hunger.fill_color(palette),
         ];
+        // Positions start at (0, 0); sync_dynamic_layout below lays everything
+        // out through the same path used after every dynamic change.
         let rects = std::array::from_fn(|i| {
-            let (x, y) = positions[i];
             let (w, h) = sizes[i];
-            Rect { x, y, w, h }
+            Rect { x: 0, y: 0, w, h }
         });
         let fbs = std::array::from_fn(|i| {
             let (w, h) = sizes[i];
@@ -258,7 +250,7 @@ impl App {
             text_drag: None,
             min_height: 0,
         };
-        app.sync_fwends_height(palette);
+        app.sync_dynamic_layout(palette);
         Ok(app)
     }
 
@@ -281,34 +273,24 @@ impl App {
     }
 
     fn height(&self) -> usize {
-        let height = self.target_app_height();
-        // Hunger contributes no layout space of its own, but the window must
-        // still be tall enough to contain it where it sits below the puter.
-        let hunger = self.rect_for(WidgetId::Hunger);
-        let height = height.max(hunger.y + hunger.h);
-        if SHOW_FWENDS {
-            let fwends = self.rect_for(WidgetId::Fwends);
-            height.max(fwends.y + fwends.h)
-        } else {
-            height
-        }
+        required_screen_height(&self.widget_heights(), self.desk.height, self.min_height)
     }
 
-    fn target_app_height(&self) -> usize {
-        let rect = |widget: WidgetId| self.rect_for(widget);
-        let height = rect(WidgetId::Puter)
-            .h
-            .max(self.desk.height)
-            .max(rect(WidgetId::Twirl).y + rect(WidgetId::Twirl).h)
-            .max(rect(WidgetId::Wavey).y + rect(WidgetId::Wavey).h)
-            .max(rect(WidgetId::Day).y + rect(WidgetId::Day).h)
-            .max(rect(WidgetId::Stats).y + rect(WidgetId::Stats).h);
-        let height = if SHOW_FWENDS {
-            height.max(rect(WidgetId::Fwends).y + self.fwends.min_height())
-        } else {
-            height
-        };
-        (height + APP_BOTTOM_PADDING).max(self.min_height)
+    /// Widget heights, indexed by `WidgetId::index()`. Fwends contributes its
+    /// minimum height since its actual height is sized to the window.
+    fn widget_heights(&self) -> [usize; WIDGET_COUNT] {
+        [
+            self.puter.height(),
+            self.toodle.height(),
+            self.fwends.min_height(),
+            self.twirl.height(),
+            self.wavey.height(),
+            self.fizzle.height(),
+            self.day.height(),
+            self.budgit.height(),
+            self.stats.height(),
+            self.hunger.height(),
+        ]
     }
 
     /// Records the actual X window height (from a ConfigureNotify) so the
@@ -437,28 +419,18 @@ impl App {
             changed = true;
         }
 
-        let positions = widget_positions(
-            &self.puter,
-            &self.toodle,
-            &self.twirl,
-            &self.wavey,
-            &self.fizzle,
-            &self.day,
-            &self.budgit,
-            &self.stats,
-            &self.hunger,
-            self.min_height.saturating_sub(APP_BOTTOM_PADDING),
-        );
+        let heights = self.widget_heights();
+        let screen_h = required_screen_height(&heights, self.desk.height, self.min_height);
+        let positions = widget_positions(&heights, screen_h);
         for (rect, (x, y)) in self.rects.iter_mut().zip(positions) {
             changed |= move_rect(rect, x, y);
         }
-        changed |= self.sync_fwends_height(palette);
+        changed |= self.sync_fwends_height(screen_h, palette);
 
         changed
     }
 
-    fn sync_fwends_height(&mut self, palette: &Palette) -> bool {
-        let height = self.target_app_height();
+    fn sync_fwends_height(&mut self, height: usize, palette: &Palette) -> bool {
         let fwends_rect = self.rects[WidgetId::Fwends.index()];
         if !self.fwends.set_height(height) && fwends_rect.h == self.fwends.height() {
             return false;
@@ -704,87 +676,73 @@ impl App {
     }
 }
 
-const TOODLE_LEFT_OVERLAP: usize = 24;
+/// Where every widget sits. Tweak positions here.
+///
+/// `(x, y)`: x is pixels from the window's left edge to the widget's left
+/// edge; y is pixels from the BOTTOM of the window up to the widget's bottom
+/// edge (y = 0 puts the widget flush with the bottom; negative y hangs that
+/// many pixels of it below the bottom edge). Widgets keep their bottom-left
+/// corner pinned, so ones with dynamic sizes grow up/right from here.
+///
+/// Fwends is the one exception: it is pinned to the window's TOP edge and
+/// only its x is used.
+const fn widget_xy(widget: WidgetId) -> (usize, isize) {
+    match widget {
+        WidgetId::Puter => (463, 49),
+        WidgetId::Toodle => (322, 311),
+        WidgetId::Fwends => (713, 0),
+        WidgetId::Twirl => (587, 331),
+        WidgetId::Wavey => (113, 41),
+        WidgetId::Fizzle => (393, 41),
+        WidgetId::Day => (330, 207),
+        WidgetId::Budgit => (322, 762),
+        WidgetId::Stats => (322, 614),
+        WidgetId::Hunger => (463, 13),
+    }
+}
 
-/// How far the hunger bar is pulled up to overlap the puter's lower edge,
-/// keeping it within the bottom padding rather than growing the window.
-const HUNGER_PUTER_OVERLAP: usize = 36;
+/// The desk background's bottom edge, in the same bottom-up coordinate as
+/// `widget_xy` (negative = hangs below the window's bottom edge).
+const DESK_Y: isize = -29;
 
-/// Widget (x, y) positions, indexed by `WidgetId::index()`.
-#[allow(clippy::too_many_arguments)]
+/// Empty space kept above the tallest widget when the window height is
+/// content-driven rather than set by the window manager.
+const TOP_PADDING: usize = 25;
+
+/// Widget (x, y) top-left positions, indexed by `WidgetId::index()`.
+/// Converts the bottom-anchored `widget_xy` table for a `screen_h`-tall
+/// window: top = screen_h - y - height.
 fn widget_positions(
-    puter: &puter::Puter,
-    toodle: &toodle::Toodle,
-    twirl: &twirl::Twirl,
-    wavey: &wavey::Wavey,
-    fizzle: &fizzle::Fizzle,
-    day: &day::Day,
-    budgit: &budgit::Budgit,
-    stats: &stats::Stats,
-    hunger: &hunger::Hunger,
-    min_layout_h: usize,
+    heights: &[usize; WIDGET_COUNT],
+    screen_h: usize,
 ) -> [(usize, usize); WIDGET_COUNT] {
-    let left_w = day.width().max(wavey.width());
-    let middle_x = left_w + WIDGET_GAP;
-    let middle_w = puter.width().max(toodle.width()).max(twirl.width());
-    let left_h = day.height() + WIDGET_GAP + wavey.height();
-    let middle_h = budgit.height()
-        + WIDGET_GAP
-        + stats.height()
-        + WIDGET_GAP
-        + toodle.height()
-        + WIDGET_GAP
-        + puter.height();
-    let layout_h = left_h.max(middle_h).max(min_layout_h);
-    let wavey_y = layout_h - wavey.height();
-    let day_y = wavey_y - WIDGET_GAP - day.height() - 30;
-    let puter_y = layout_h - puter.height();
-    let toodle_y = puter_y - WIDGET_GAP - toodle.height();
+    let mut positions = [(0, 0); WIDGET_COUNT];
+    for widget in WidgetId::ALL {
+        let (x, y) = widget_xy(widget);
+        let h = heights[widget.index()] as isize;
+        let top = (screen_h as isize - y - h).max(0) as usize;
+        positions[widget.index()] = (x, top);
+    }
+    // Fwends stays pinned to the window's top edge.
+    positions[WidgetId::Fwends.index()].1 = 0;
+    positions
+}
 
-    // Tweak widget positions here. These final coordinates are used both at startup and
-    // after dynamic redraws, so edits in this block won't get snapped back later.
-    let puter_x = middle_x + APP_LEFT_PADDING;
-    let toodle_x = middle_x.saturating_sub(day.width() + TOODLE_LEFT_OVERLAP) + APP_LEFT_PADDING;
-    // Twirl sits to the right of toodle, bottom-aligned with it.
-    let twirl_x = toodle_x + toodle.width() + WIDGET_GAP;
-    let twirl_y = (toodle_y + toodle.height()).saturating_sub(twirl.height());
-    let wavey_x = APP_LEFT_PADDING + 32;
-    let wavey_y = wavey_y + 4;
-    let day_x = wavey.width().saturating_sub(day.width()) + APP_LEFT_PADDING;
-    let fwends_x = middle_x + middle_w + WIDGET_GAP + APP_LEFT_PADDING - FWENDS_LEFT_APRON;
-    let fwends_y = 0;
-
-    // Fizzle sits to the left of wavey, with the candle holder bottom-aligned to
-    // wavey so the flame grows upward as the battery charges.
-    let fizzle_x = wavey_x.saturating_sub(WIDGET_GAP + fizzle.width());
-    let fizzle_y = (wavey_y + wavey.height()).saturating_sub(fizzle.height());
-
-    // Budgit and stats stack above toodle where twirl used to be, with stats
-    // directly on top of toodle and budgit above stats.
-    let stats_x = toodle_x;
-    let stats_y = toodle_y.saturating_sub(WIDGET_GAP + stats.height());
-    let budgit_x = toodle_x;
-    let budgit_y = stats_y.saturating_sub(WIDGET_GAP + budgit.height());
-
-    // Hunger takes no layout space (it never feeds the width/height maxes), so
-    // it sits in the bottom padding directly below the puter, horizontally
-    // centered, without pushing any other widget around. It is nudged up into
-    // the puter's lower edge by HUNGER_PUTER_OVERLAP.
-    let hunger_x = puter_x + puter.width().saturating_sub(hunger.width()) / 2;
-    let hunger_y = (puter_y + puter.height() + WIDGET_GAP).saturating_sub(HUNGER_PUTER_OVERLAP);
-
-    [
-        (puter_x, puter_y),
-        (toodle_x, toodle_y),
-        (fwends_x, fwends_y),
-        (twirl_x, twirl_y),
-        (wavey_x, wavey_y),
-        (fizzle_x, fizzle_y),
-        (day_x, day_y),
-        (budgit_x, budgit_y),
-        (stats_x, stats_y),
-        (hunger_x, hunger_y),
-    ]
+/// Window height needed to show every bottom-anchored widget and the desk,
+/// plus TOP_PADDING; the actual window height (`min_h`) wins if larger.
+/// Fwends contributes its `widget_heights` entry (its minimum height) at
+/// y = 0 like everything else, even though it ends up pinned to the top.
+fn required_screen_height(heights: &[usize; WIDGET_COUNT], desk_h: usize, min_h: usize) -> usize {
+    let mut needed = (desk_h as isize + DESK_Y).max(0) as usize;
+    for widget in WidgetId::ALL {
+        if !widget.is_visible() {
+            continue;
+        }
+        let (_, y) = widget_xy(widget);
+        let h = heights[widget.index()] as isize;
+        needed = needed.max((h + y).max(0) as usize);
+    }
+    (needed + TOP_PADDING).max(min_h)
 }
 
 const fn move_rect(rect: &mut Rect, x: usize, y: usize) -> bool {
@@ -805,7 +763,10 @@ const fn rects_intersect(a: Rect, b: Rect) -> bool {
 }
 
 fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Palette, rect: Rect) {
-    let desk_y = fb.height.saturating_sub(desk.height);
+    // The desk is bottom-anchored like the widgets: its bottom edge sits
+    // DESK_Y above the window's bottom (below it when negative, cutting off
+    // its lowest rows).
+    let desk_y = ((fb.height as isize - DESK_Y).max(0) as usize).saturating_sub(desk.height);
     let x0 = rect.x.min(fb.width);
     let x1 = rect.x.saturating_add(rect.w).min(fb.width);
     let y0 = rect.y.max(desk_y).min(fb.height);

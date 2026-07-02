@@ -30,6 +30,7 @@ const INPUT_BOX_RIGHT_PAD: usize = 11;
 const INPUT_EXTRA_W: usize = 40;
 const INPUT_EXTRA_H: usize = 4;
 const SELECTED_FWEND_GAP: usize = 4;
+const SELECTED_FWEND_Y_OFFSET: usize = 10;
 const BUBBLE_PAD_X: usize = 14;
 const BUBBLE_PAD_TOP: usize = 8;
 const BUBBLE_PAD_BOTTOM: usize = 11;
@@ -73,7 +74,7 @@ const INPUT_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sti
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
 const LAMP_RIGHT_PAD: usize = 140;
-const LAMP_Y_OFFSET: usize = 70;
+const LAMP_Y_OFFSET: usize = 60;
 const ERASER_RIGHT_PAD: usize = 0;
 
 const MODELS: [Model; 4] = [
@@ -684,7 +685,7 @@ impl Fwends {
     const fn selected_fwend_rect(&self) -> FwendRect {
         FwendRect {
             x: CONTENT_X_OFFSET + INPUT_X,
-            y: self.input_y(),
+            y: self.input_y() + SELECTED_FWEND_Y_OFFSET,
             w: self.model_slot_w,
             h: self.model_slot_h,
         }
