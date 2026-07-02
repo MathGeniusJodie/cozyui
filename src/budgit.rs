@@ -445,16 +445,24 @@ fn compute_view(
 }
 
 /// Spawns a background thread that estimates completed SVGs off the render
-/// thread. It computes the finished-SVG path average once, then loops scanning
-/// the in-progress folder, sending each estimate and sleeping `SVG_REFRESH`
-/// *after* the scan finishes (so a slow scan never overlaps the next). The
-/// thread exits when the receiver is dropped.
+/// thread. It computes the finished-SVG path average once, then loops sending
+/// an estimate and sleeping `SVG_REFRESH` *after* the scan finishes (so a slow
+/// scan never overlaps the next). The ripgrep scan only reruns when the
+/// folder's stamp changes; unchanged ticks resend the cached estimate, which
+/// also keeps the receiver-dropped exit path exercised. The thread exits when
+/// the receiver is dropped.
 fn spawn_svg_counter() -> Receiver<f64> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let avg = avg_paths_per_svg(DONE_DIR);
+        let mut stamp = None;
+        let mut completed = 0.0;
         loop {
-            let completed = compute_svgs_completed(TEMPLATES_DIR, avg);
+            let current = svg_dir_stamp(TEMPLATES_DIR);
+            if stamp != Some(current) {
+                stamp = Some(current);
+                completed = compute_svgs_completed(TEMPLATES_DIR, avg);
+            }
             if tx.send(completed).is_err() {
                 break;
             }
@@ -462,6 +470,24 @@ fn spawn_svg_counter() -> Receiver<f64> {
         }
     });
     rx
+}
+
+/// Change stamp for the templates folder: the `.svg` count and newest mtime at
+/// depth 1 (matching the non-recursive scan there). `None` when the folder
+/// can't be read.
+fn svg_dir_stamp(dir: &str) -> Option<(u64, SystemTime)> {
+    let entries = fs::read_dir(crate::paths::expand_tilde(dir)).ok()?;
+    let mut count = 0;
+    let mut newest = UNIX_EPOCH;
+    for entry in entries.flatten() {
+        if entry.path().extension().is_some_and(|ext| ext == "svg") {
+            count += 1;
+            if let Ok(mtime) = entry.metadata().and_then(|meta| meta.modified()) {
+                newest = newest.max(mtime);
+            }
+        }
+    }
+    Some((count, newest))
 }
 
 /// Counts `<path` occurrences across the `.svg` files in `dir`, returning

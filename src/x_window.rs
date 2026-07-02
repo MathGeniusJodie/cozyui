@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fs::File;
 #[cfg(unix)]
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 use memmap2::MmapMut;
@@ -268,6 +268,24 @@ impl XWindow {
         )?;
         self.conn.flush()?;
         self.current_cursor = Some(kind);
+        Ok(())
+    }
+
+    /// Blocks until the X socket becomes readable or `timeout` elapses, so the
+    /// main loop can sleep instead of polling. Pending requests are flushed
+    /// first; without that the server may never produce the reply or event the
+    /// wait is for. Spurious early wake-ups (EINTR) are fine — the caller
+    /// re-checks all its event sources every iteration.
+    #[cfg(unix)]
+    pub(crate) fn wait_for_event(&self, timeout: Duration) -> Result<(), Box<dyn Error>> {
+        self.conn.flush()?;
+        let mut pfd = libc::pollfd {
+            fd: self.conn.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+        unsafe { libc::poll(&raw mut pfd, 1, millis) };
         Ok(())
     }
 

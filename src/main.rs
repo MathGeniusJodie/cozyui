@@ -1107,7 +1107,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
-        std::thread::sleep(Duration::from_millis(if drew_frame { 1 } else { 16 }));
+        // After drawing, come back almost immediately in case more work is
+        // queued (animations, terminal bursts). Otherwise sleep on the X
+        // socket: input wakes us instantly, and 250ms bounds the latency of
+        // the non-X sources checked above (channels and widget timers).
+        xwin.wait_for_event(Duration::from_millis(if drew_frame { 1 } else { 250 }))?;
     }
 
     app.shutdown();
