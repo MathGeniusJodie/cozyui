@@ -327,6 +327,15 @@ impl XWindow {
         Ok(())
     }
 
+    /// Round-trip to the server after a `shm_put_image`. The put executes
+    /// asynchronously and reads the segment when the server gets to it, so
+    /// without this barrier the next draw could overwrite the segment first
+    /// and the server would blit mis-strided garbage.
+    fn sync_shm(&self) -> Result<(), Box<dyn Error>> {
+        self.conn.get_input_focus()?.reply()?;
+        Ok(())
+    }
+
     pub(crate) fn draw(&mut self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
         self.update_shape(fb)?;
         let frame_len = fb.width * fb.height * Framebuffer::BYTES_PER_PIXEL;
@@ -349,7 +358,7 @@ impl XWindow {
                 shm_image.seg,
                 0,
             )?;
-            self.conn.flush()?;
+            self.sync_shm()?;
             return Ok(());
         }
 
@@ -423,7 +432,7 @@ impl XWindow {
                 shm_image.seg,
                 0,
             )?;
-            self.conn.flush()?;
+            self.sync_shm()?;
             return Ok(());
         }
 
