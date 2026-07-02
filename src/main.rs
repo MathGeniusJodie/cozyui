@@ -19,6 +19,7 @@ mod day;
 mod emojimap;
 mod fizzle;
 mod fwends;
+mod gauges;
 mod hunger;
 mod localtime;
 mod openrouter;
@@ -120,16 +121,17 @@ enum WidgetId {
     Budgit,
     Stats,
     Hunger,
+    Gauges,
 }
 
-const WIDGET_COUNT: usize = 10;
+const WIDGET_COUNT: usize = 11;
 
 impl WidgetId {
     const fn index(self) -> usize {
         self as usize
     }
 
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Wavey,
         Self::Puter,
         Self::Toodle,
@@ -140,10 +142,11 @@ impl WidgetId {
         Self::Budgit,
         Self::Stats,
         Self::Hunger,
+        Self::Gauges,
     ];
 
-    const VISIBLE_WITH_FWENDS: [Self; 10] = Self::ALL;
-    const VISIBLE_WITHOUT_FWENDS: [Self; 9] = [
+    const VISIBLE_WITH_FWENDS: [Self; 11] = Self::ALL;
+    const VISIBLE_WITHOUT_FWENDS: [Self; 10] = [
         Self::Wavey,
         Self::Puter,
         Self::Toodle,
@@ -153,6 +156,7 @@ impl WidgetId {
         Self::Budgit,
         Self::Stats,
         Self::Hunger,
+        Self::Gauges,
     ];
 
     const fn visible() -> &'static [Self] {
@@ -179,6 +183,7 @@ struct App {
     budgit: budgit::Budgit,
     stats: stats::Stats,
     hunger: hunger::Hunger,
+    gauges: gauges::Gauges,
     desk: Sprite,
     // Indexed by WidgetId::index().
     fbs: [Framebuffer; WIDGET_COUNT],
@@ -206,6 +211,7 @@ impl App {
         let budgit = budgit::Budgit::load(palette)?;
         let stats = stats::Stats::load(palette)?;
         let hunger = hunger::Hunger::load(palette)?;
+        let gauges = gauges::Gauges::load(palette)?;
         let desk = assets::desk();
         let sizes: [(usize, usize); WIDGET_COUNT] = [
             (puter.width(), puter.height()),
@@ -218,6 +224,7 @@ impl App {
             (budgit.width(), budgit.height()),
             (stats.width(), stats.height()),
             (hunger.width(), hunger.height()),
+            (gauges.width(), gauges.height()),
         ];
         let fills: [Index; WIDGET_COUNT] = [
             puter.fill_color(palette),
@@ -230,6 +237,7 @@ impl App {
             budgit.fill_color(palette),
             stats.fill_color(palette),
             hunger.fill_color(palette),
+            gauges.fill_color(palette),
         ];
         // Positions start at (0, 0); sync_dynamic_layout below lays everything
         // out through the same path used after every dynamic change.
@@ -253,6 +261,7 @@ impl App {
             budgit,
             stats,
             hunger,
+            gauges,
             desk,
             fbs,
             rects,
@@ -276,7 +285,8 @@ impl App {
         .max(rect(WidgetId::Wavey).x + rect(WidgetId::Wavey).w)
         .max(rect(WidgetId::Day).x + rect(WidgetId::Day).w)
         .max(rect(WidgetId::Budgit).x + rect(WidgetId::Budgit).w)
-        .max(rect(WidgetId::Stats).x + rect(WidgetId::Stats).w);
+        .max(rect(WidgetId::Stats).x + rect(WidgetId::Stats).w)
+        .max(rect(WidgetId::Gauges).x + rect(WidgetId::Gauges).w);
         if SHOW_FWENDS {
             width.max(rect(WidgetId::Fwends).x + rect(WidgetId::Fwends).w)
         } else {
@@ -302,6 +312,7 @@ impl App {
             self.budgit.height(),
             self.stats.height(),
             self.hunger.height(),
+            self.gauges.height(),
         ]
     }
 
@@ -383,6 +394,10 @@ impl App {
             WidgetId::Hunger => {
                 widget_fb.clear(self.hunger.fill_color(palette));
                 self.hunger.render(widget_fb, palette);
+            }
+            WidgetId::Gauges => {
+                widget_fb.clear(self.gauges.fill_color(palette));
+                self.gauges.render(widget_fb, palette);
             }
         }
         let rect = self.rects[widget.index()];
@@ -492,7 +507,8 @@ impl App {
             | WidgetId::Day
             | WidgetId::Budgit
             | WidgetId::Stats
-            | WidgetId::Hunger => Ok(None),
+            | WidgetId::Hunger
+            | WidgetId::Gauges => Ok(None),
         }
     }
 
@@ -527,7 +543,7 @@ impl App {
             WidgetId::Wavey => {
                 return Ok(self.wavey.click(x, y));
             }
-            WidgetId::Fizzle | WidgetId::Budgit | WidgetId::Stats => {}
+            WidgetId::Fizzle | WidgetId::Budgit | WidgetId::Stats | WidgetId::Gauges => {}
             WidgetId::Hunger => {
                 self.hunger.click();
             }
@@ -548,7 +564,8 @@ impl App {
                 | WidgetId::Day
                 | WidgetId::Budgit
                 | WidgetId::Stats
-                | WidgetId::Hunger => {}
+                | WidgetId::Hunger
+                | WidgetId::Gauges => {}
             }
             return Some(widget);
         }
@@ -587,7 +604,8 @@ impl App {
                 | WidgetId::Day
                 | WidgetId::Budgit
                 | WidgetId::Stats
-                | WidgetId::Hunger => false,
+                | WidgetId::Hunger
+                | WidgetId::Gauges => false,
             };
             return changed.then_some(widget);
         }
@@ -650,7 +668,8 @@ impl App {
                 | WidgetId::Day
                 | WidgetId::Budgit
                 | WidgetId::Stats
-                | WidgetId::Hunger,
+                | WidgetId::Hunger
+                | WidgetId::Gauges,
                 _,
             ) => {
                 return None;
@@ -675,7 +694,9 @@ impl App {
             WidgetId::Wavey => self.wavey.cursor_at(x, y),
             // Clicking anywhere on these triggers their action.
             WidgetId::Day | WidgetId::Hunger => CursorKind::Hand,
-            WidgetId::Fizzle | WidgetId::Budgit | WidgetId::Stats => CursorKind::Pointer,
+            WidgetId::Fizzle | WidgetId::Budgit | WidgetId::Stats | WidgetId::Gauges => {
+                CursorKind::Pointer
+            }
         }
     }
 
@@ -732,6 +753,7 @@ const fn widget_xy(widget: WidgetId) -> (usize, isize) {
         WidgetId::Budgit => (322, 752),
         WidgetId::Stats => (322, 604),
         WidgetId::Hunger => (463, 3),
+        WidgetId::Gauges => (335, 915),
     }
 }
 
@@ -966,6 +988,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
+        if app.gauges.update() {
+            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Gauges)?;
+            drew_frame = true;
+        }
+
         // Toodle housekeeping: debounced saves hit disk shortly after typing
         // pauses, and external edits to the todo files are folded in. The
         // latter can change the page-stack size, so it may need a relayout.
@@ -1138,6 +1165,7 @@ fn should_load_clipboard_for_paste(focus: WidgetId, input: &text::KeyInput) -> b
         | WidgetId::Day
         | WidgetId::Budgit
         | WidgetId::Stats
-        | WidgetId::Hunger => false,
+        | WidgetId::Hunger
+        | WidgetId::Gauges => false,
     }
 }
