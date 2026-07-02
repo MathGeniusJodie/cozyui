@@ -11,6 +11,7 @@ use x11rb::protocol::Event as XEvent;
 use x11rb::protocol::xproto::ButtonIndex;
 use xkbcommon::xkb::keysyms;
 
+mod assets;
 #[cfg(test)]
 mod bench;
 mod budgit;
@@ -32,13 +33,9 @@ mod wavey;
 mod x_window;
 
 pub(crate) use pixel_graphics::{
-    Framebuffer, Index, Paint, Palette, Rect, Rgb, Rgba, Sprite, Swap, TRANSPARENT,
-    decode_png_with_size,
+    Framebuffer, Index, Paint, Palette, Rect, Rgb, Sprite, Swap, TRANSPARENT,
 };
 use x_window::XWindow;
-
-const PALETTE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/na16-1x.png");
-const DESK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/desk.png");
 
 #[allow(dead_code)]
 pub(crate) mod palette_color {
@@ -88,6 +85,19 @@ pub(crate) mod app_color {
         Paint::Checker(palette_color::BLUE, palette_color::GREEN)
     };
 }
+
+/// Mouse cursor shapes, drawn from the baked `cursor_*` sprites. `Disabled`
+/// is baked and ready but nothing is disabled yet, so no hit-test maps to it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum CursorKind {
+    Pointer,
+    Text,
+    Hand,
+    Disabled,
+}
+
+pub(crate) const CURSOR_KIND_COUNT: usize = 4;
 
 const WHEEL_UP: u8 = 4;
 const WHEEL_DOWN: u8 = 5;
@@ -175,6 +185,7 @@ struct App {
     rects: [Rect; WIDGET_COUNT],
     focus: WidgetId,
     puter_pressed: bool,
+    quit_requested: bool,
     text_drag: Option<WidgetId>,
     /// Floor imposed by the actual X window height (set from ConfigureNotify
     /// when the WM/user makes the window taller than the content needs), so
@@ -195,7 +206,7 @@ impl App {
         let budgit = budgit::Budgit::load(palette)?;
         let stats = stats::Stats::load(palette)?;
         let hunger = hunger::Hunger::load(palette)?;
-        let desk = Sprite::load_native(DESK_PATH, palette)?;
+        let desk = assets::desk();
         let sizes: [(usize, usize); WIDGET_COUNT] = [
             (puter.width(), puter.height()),
             (toodle.width(), toodle.height()),
@@ -247,6 +258,7 @@ impl App {
             rects,
             focus: WidgetId::Toodle,
             puter_pressed: false,
+            quit_requested: false,
             text_drag: None,
             min_height: 0,
         };
@@ -547,7 +559,9 @@ impl App {
 
         if self.puter_pressed {
             let (x, y) = self.rect_for(WidgetId::Puter).local(x, y);
-            self.puter.release_button(x, y);
+            if self.puter.release_button(x, y) {
+                self.quit_requested = true;
+            }
             self.puter_pressed = false;
             return Some(WidgetId::Puter);
         }
@@ -645,6 +659,26 @@ impl App {
         handled.then_some(widget)
     }
 
+    /// Which cursor shape fits whatever is under the pointer.
+    fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+        if self.text_drag.is_some() {
+            return CursorKind::Text;
+        }
+        let Some((widget, x, y)) = self.widget_at(x, y) else {
+            return CursorKind::Pointer;
+        };
+        match widget {
+            WidgetId::Puter => self.puter.cursor_at(x, y),
+            WidgetId::Toodle => self.toodle.cursor_at(x, y),
+            WidgetId::Fwends => self.fwends.cursor_at(x, y),
+            WidgetId::Twirl => self.twirl.cursor_at(x, y),
+            WidgetId::Wavey => self.wavey.cursor_at(x, y),
+            // Clicking anywhere on these triggers their action.
+            WidgetId::Day | WidgetId::Hunger => CursorKind::Hand,
+            WidgetId::Fizzle | WidgetId::Budgit | WidgetId::Stats => CursorKind::Pointer,
+        }
+    }
+
     fn widget_at(&self, x: i16, y: i16) -> Option<(WidgetId, i16, i16)> {
         [
             WidgetId::Wavey,
@@ -688,22 +722,22 @@ impl App {
 /// only its x is used.
 const fn widget_xy(widget: WidgetId) -> (usize, isize) {
     match widget {
-        WidgetId::Puter => (463, 49),
-        WidgetId::Toodle => (322, 311),
-        WidgetId::Fwends => (713, 0),
-        WidgetId::Twirl => (587, 331),
-        WidgetId::Wavey => (113, 41),
-        WidgetId::Fizzle => (393, 41),
-        WidgetId::Day => (330, 207),
-        WidgetId::Budgit => (322, 762),
-        WidgetId::Stats => (322, 614),
-        WidgetId::Hunger => (463, 13),
+        WidgetId::Puter => (463, 39),
+        WidgetId::Toodle => (322, 301),
+        WidgetId::Fwends => (713, -10),
+        WidgetId::Twirl => (587, 321),
+        WidgetId::Wavey => (113, 31),
+        WidgetId::Fizzle => (393, 31),
+        WidgetId::Day => (330, 197),
+        WidgetId::Budgit => (322, 752),
+        WidgetId::Stats => (322, 604),
+        WidgetId::Hunger => (463, 3),
     }
 }
 
 /// The desk background's bottom edge, in the same bottom-up coordinate as
 /// `widget_xy` (negative = hangs below the window's bottom edge).
-const DESK_Y: isize = -29;
+const DESK_Y: isize = -39;
 
 /// Empty space kept above the tallest widget when the window height is
 /// content-driven rather than set by the window manager.
@@ -723,8 +757,8 @@ fn widget_positions(
         let top = (screen_h as isize - y - h).max(0) as usize;
         positions[widget.index()] = (x, top);
     }
-    // Fwends stays pinned to the window's top edge.
-    positions[WidgetId::Fwends.index()].1 = 0;
+    // Fwends stays pinned 10px below the window's top edge.
+    positions[WidgetId::Fwends.index()].1 = 10;
     positions
 }
 
@@ -870,13 +904,14 @@ enum ScrollDirection {
 
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn Error>> {
-    let palette = Palette::load(PALETTE_PATH)?;
+    let palette = assets::palette();
     let mut app = App::load(&palette)?;
     let width = app.width();
     let height = app.height();
     let mut fb = Framebuffer::new(width, height, app.fill_color(&palette));
     let mut xwin = XWindow::open(width, height, TRANSPARENT_BACKGROUND)?;
     xwin.set_palette(&palette);
+    xwin.load_cursors(&palette)?;
     app.start(u64::from(xwin.window))?;
     app.render(&mut fb, &palette);
     xwin.draw(&fb)?;
@@ -931,8 +966,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
-        // Debounced toodle saves: edits hit disk shortly after typing pauses.
-        app.toodle.maintain()?;
+        // Toodle housekeeping: debounced saves hit disk shortly after typing
+        // pauses, and external edits to the todo files are folded in. The
+        // latter can change the page-stack size, so it may need a relayout.
+        if app.toodle.maintain()? {
+            if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
+                app.render(&mut fb, &palette);
+                xwin.draw(&fb)?;
+            } else {
+                app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Toodle)?;
+            }
+            drew_frame = true;
+        }
 
         let mut pending_motion_widget = None;
         // Coalesce input redraws: key auto-repeat and rapid clicks can deliver
@@ -1002,6 +1047,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 XEvent::MotionNotify(event) => {
+                    xwin.set_cursor(app.cursor_at(event.event_x, event.event_y))?;
                     if let Some(widget) = app.motion(event.event_x, event.event_y) {
                         pending_motion_widget = Some(widget);
                     }
@@ -1021,6 +1067,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 XEvent::DestroyNotify(_) => running = false,
                 _ => {}
             }
+        }
+        if app.quit_requested {
+            running = false;
         }
         if needs_input_redraw {
             redraw_after_input(&mut app, &mut fb, &mut xwin, &palette)?;

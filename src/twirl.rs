@@ -7,9 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::app_color;
 use crate::palette_color;
 use crate::text::BitmapFont;
-use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
+use crate::{CursorKind, Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
-const WHEEL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/wheel.png");
 const TOTAL_PATH: &str = "~/Desktop/RemoteVault/frogpoints.md";
 
 const SHADOW_X_OFFSET: isize = 1;
@@ -62,8 +61,8 @@ pub struct Twirl {
 }
 
 impl Twirl {
-    pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
-        let wheel = Sprite::load_native(WHEEL_PATH, palette)?;
+    pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
+        let wheel = crate::assets::wheel();
         let pixel_base_angle = Self::compute_pixel_base_angles(&wheel);
         Ok(Self {
             wheel,
@@ -169,6 +168,26 @@ impl Twirl {
         }
 
         Ok(true)
+    }
+
+    /// Hand inside the spinnable wheel, mirroring the `click` hit-test.
+    pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+        if x < 0 || y < 0 {
+            return CursorKind::Pointer;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        if x >= self.width() || y >= self.height() {
+            return CursorKind::Pointer;
+        }
+        let (center_x, center_y) = self.wheel_center();
+        let dx = x as f32 + 0.5 - center_x;
+        let dy = y as f32 + 0.5 - center_y;
+        if dx * dx + dy * dy <= center_x.min(center_y).powi(2) {
+            CursorKind::Hand
+        } else {
+            CursorKind::Pointer
+        }
     }
 
     pub(crate) fn click(&mut self, x: i16, y: i16) {

@@ -8,8 +8,13 @@ alacritty_terminal = "0.26.0"
 deunicode = "1"
 memmap2 = "0.9"
 phf = { version = "0.11", features = ["macros"] }
-pixel-fonts = { path = "../pixel-fonts" }
-pixel-graphics = { path = "../pixel-graphics" }
+# All art and font atlases are baked into the binary at build time (see
+# build.rs here and in pixel-fonts); no PNG decoding or asset files at runtime.
+pixel-fonts = { path = "../pixel-fonts", default-features = false, features = ["baked"] }
+pixel-graphics = { path = "../pixel-graphics", default-features = false }
 serde_json = "1"
-x11rb = { version = "0.13", features = ["allow-unsafe-code", "shm", "shape"] }
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "shm", "shape", "render"] }
 xkbcommon = { version = "0.8", default-features = false, features = ["x11"] }
+
+[build-dependencies]
+pixel-graphics = { path = "../pixel-graphics" }

@@ -12,9 +12,8 @@ use std::time::{Duration, Instant};
 use crate::localtime::local_time;
 use crate::palette_color;
 use crate::text::BitmapFont;
-use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
+use crate::{CursorKind, Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
-const WAVEY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wavey.png");
 const STATIONS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/radio_stations.txt");
 
 const DISPLAY_X: usize = 6;
@@ -104,10 +103,10 @@ pub struct Wavey {
 }
 
 impl Wavey {
-    pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
         let volume = read_system_volume().unwrap_or(50);
         let mut wavey = Self {
-            image: Sprite::load_native(WAVEY_PATH, palette)?,
+            image: crate::assets::wavey(),
             font: BitmapFont::load_with_fallback(
                 &pixel_fonts::POCO_SPEC,
                 &pixel_fonts::FUSION_PIXEL_8_SPEC,
@@ -251,6 +250,26 @@ impl Wavey {
         }
 
         None
+    }
+
+    /// Hand over everything clickable: media buttons, clock, volume knob,
+    /// tuner, and the copyable title.
+    pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+        if x < 0 || y < 0 {
+            return CursorKind::Pointer;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        if media_button_at(x, y).is_some()
+            || self.clock_contains(x, y)
+            || self.knob_contains(x, y)
+            || self.tuner_contains(x, y)
+            || self.title_contains(x, y)
+        {
+            CursorKind::Hand
+        } else {
+            CursorKind::Pointer
+        }
     }
 
     fn title_contains(&self, x: usize, y: usize) -> bool {

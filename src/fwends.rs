@@ -9,7 +9,7 @@ use crate::palette_color;
 use crate::text::{
     BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
 };
-use crate::{Framebuffer, Index, Palette, Rect, Sprite, Swap, TRANSPARENT};
+use crate::{CursorKind, Framebuffer, Index, Palette, Rect, Sprite, Swap, TRANSPARENT};
 use serde_json::{Value, json};
 
 const CONTENT_W: usize = 348;
@@ -57,20 +57,9 @@ const INPUT_MAX_LINES: usize = 5;
 const HISTORY_LIMIT: usize = 8;
 const SYSTEM_PROMPT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fwends_system_prompt.txt");
 const USER_NAME: &str = "Jodie";
-const FOCUS_PENCIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/focus_pencil.png");
-const PENCIL_SHADOW_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/toodle_pencil_shadow.png"
-);
-const LAMP_ON_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/lamp_on.png");
-const LAMP_OFF_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/lamp_off.png");
-const ERASER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/eraser.png");
-const USER_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky.png");
-const SMOL_FWENDS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/smol_fwends.png");
 const SMOL_ICON_SIZE: usize = 11;
 const SMOL_ICON_GAP: usize = 2;
 const SMOL_ICON_Y_OFFSET: usize = 3;
-const INPUT_STICKY_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sticky_stack.png");
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
 const LAMP_RIGHT_PAD: usize = 140;
@@ -83,28 +72,28 @@ const MODELS: [Model; 4] = [
         thinking_id: "anthropic/claude-opus-4.5",
         name: "Claude",
         icon_index: 2,
-        asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/claw.png"),
+        avatar: crate::assets::claw,
     },
     Model {
         id: "deepseek/deepseek-v4-flash",
         thinking_id: "deepseek/deepseek-v4-pro",
         name: "Deepseek",
         icon_index: 1,
-        asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/deep.png"),
+        avatar: crate::assets::deep,
     },
     Model {
         id: "qwen/qwen3.6-35b-a3b",
         thinking_id: "qwen/qwen3.7-plus",
         name: "Qwen",
         icon_index: 0,
-        asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/qwen.png"),
+        avatar: crate::assets::qwen,
     },
     Model {
         id: "moonshotai/kimi-k2.6",
         thinking_id: "moonshotai/kimi-k2.6",
         name: "Kimi",
         icon_index: 3,
-        asset_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets/kimi.png"),
+        avatar: crate::assets::kimi,
     },
 ];
 
@@ -143,12 +132,12 @@ struct PendingReply {
 }
 
 impl Fwends {
-    pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
         let avatars = [
-            Sprite::load_native(MODELS[0].asset_path, palette)?,
-            Sprite::load_native(MODELS[1].asset_path, palette)?,
-            Sprite::load_native(MODELS[2].asset_path, palette)?,
-            Sprite::load_native(MODELS[3].asset_path, palette)?,
+            (MODELS[0].avatar)(),
+            (MODELS[1].avatar)(),
+            (MODELS[2].avatar)(),
+            (MODELS[3].avatar)(),
         ];
         let model_slot_w = avatars.iter().map(|avatar| avatar.width).max().unwrap_or(1);
         let model_slot_h = avatars
@@ -160,18 +149,15 @@ impl Fwends {
 
         let mut fwends = Self {
             avatars,
-            bubble: Sprite::load_native(
-                concat!(env!("CARGO_MANIFEST_DIR"), "/assets/bubble.png"),
-                palette,
-            )?,
-            user_sticky: Sprite::load_native(USER_STICKY_PATH, palette)?,
-            input_sticky: Sprite::load_native(INPUT_STICKY_PATH, palette)?,
-            smol_icons: Sprite::load_native(SMOL_FWENDS_PATH, palette)?,
-            pencil: Sprite::load_native(FOCUS_PENCIL_PATH, palette)?,
-            pencil_shadow: Sprite::load_native(PENCIL_SHADOW_PATH, palette)?,
-            lamp_on_image: Sprite::load_native(LAMP_ON_PATH, palette)?,
-            lamp_off_image: Sprite::load_native(LAMP_OFF_PATH, palette)?,
-            eraser: Sprite::load_native(ERASER_PATH, palette)?,
+            bubble: crate::assets::bubble(),
+            user_sticky: crate::assets::sticky(),
+            input_sticky: crate::assets::sticky_stack(),
+            smol_icons: crate::assets::smol_fwends(),
+            pencil: crate::assets::focus_pencil(),
+            pencil_shadow: crate::assets::toodle_pencil_shadow(),
+            lamp_on_image: crate::assets::lamp_on(),
+            lamp_off_image: crate::assets::lamp_off(),
+            eraser: crate::assets::eraser(),
             font: BitmapFont::load_with_fallback(
                 &pixel_fonts::COMICORO_SPEC,
                 &pixel_fonts::FUSION_PIXEL_10_SPEC,
@@ -273,6 +259,31 @@ impl Fwends {
             let cursor = self.input.index_at(&self.input_layout(&self.font), x, y);
             self.input.begin_drag(cursor);
         }
+    }
+
+    /// Mirrors the hit-testing in `click`, without side effects.
+    pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+        if x < 0 || y < 0 {
+            return CursorKind::Pointer;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        if self.eraser_contains(x, y)
+            || self.lamp_contains(x, y)
+            || self.selected_fwend_rect().contains_point(x, y)
+        {
+            return CursorKind::Hand;
+        }
+        let input_x = self.input_sticky_x();
+        if self.pending.is_none()
+            && x >= input_x
+            && x < input_x + self.input_sticky_w()
+            && y >= self.input_y()
+            && y < self.input_y() + self.input_sticky_h()
+        {
+            return CursorKind::Text;
+        }
+        CursorKind::Pointer
     }
 
     pub(crate) fn drag_text(&mut self, x: i16, y: i16) -> bool {
@@ -877,7 +888,7 @@ struct Model {
     id: &'static str,
     thinking_id: &'static str,
     name: &'static str,
-    asset_path: &'static str,
+    avatar: fn() -> Sprite,
     icon_index: usize,
 }
 
@@ -1182,7 +1193,7 @@ mod tests {
         use std::time::Instant;
 
         let palette =
-            crate::Palette::load(concat!(env!("CARGO_MANIFEST_DIR"), "/na16-1x.png")).unwrap();
+            crate::assets::palette();
         let mut fwends = Fwends::load(&palette).unwrap();
         for i in 0..60 {
             fwends.messages.push(Message::user(format!(

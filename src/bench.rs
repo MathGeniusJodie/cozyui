@@ -7,10 +7,7 @@
 
 use std::time::Instant;
 
-use crate::{Framebuffer, Palette, Sprite};
-
-const DESK_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/desk.png");
-const PALETTE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/na16-1x.png");
+use crate::{Framebuffer, Palette};
 
 fn time<F: FnMut()>(label: &str, iterations: u32, mut work: F) {
     // Warm up caches and lazy state.
@@ -24,14 +21,14 @@ fn time<F: FnMut()>(label: &str, iterations: u32, mut work: F) {
 }
 
 fn palette() -> Palette {
-    Palette::load(PALETTE_PATH).unwrap()
+    crate::assets::palette()
 }
 
 #[test]
 #[ignore]
 fn bench_fill_from_sprite() {
     let palette = palette();
-    let desk = Sprite::load_native(DESK_PATH, &palette).unwrap();
+    let desk = crate::assets::desk();
     let mut fb = Framebuffer::new(desk.width, desk.height, 0);
     time("fill_from_sprite", 200, || {
         fb.fill_from_sprite(&desk, &palette);
@@ -42,7 +39,7 @@ fn bench_fill_from_sprite() {
 #[ignore]
 fn bench_draw_sprite() {
     let palette = palette();
-    let desk = Sprite::load_native(DESK_PATH, &palette).unwrap();
+    let desk = crate::assets::desk();
     let mut fb = Framebuffer::new(desk.width, desk.height, 0);
     time("draw_sprite", 200, || {
         fb.draw_sprite(&desk, 0, 0, &palette);
@@ -62,7 +59,7 @@ fn bench_fill_rect() {
 #[ignore]
 fn bench_desk_background() {
     let palette = palette();
-    let desk = Sprite::load_native(DESK_PATH, &palette).unwrap();
+    let desk = crate::assets::desk();
     let mut fb = Framebuffer::new(1100, 800, 0);
     let full = crate::Rect::new(0, 0, fb.width, fb.height);
     time("draw_stretched_desk_region (full window)", 100, || {

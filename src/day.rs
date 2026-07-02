@@ -9,7 +9,6 @@ use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT, draw_filled_circle
 
 const WIDTH: usize = 116;
 const HEIGHT: usize = 116;
-const BACKGROUND_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/days.png");
 const SHADOW_X_OFFSET: isize = 1;
 const SHADOW_Y_OFFSET: isize = 4;
 const DATE_REFRESH: Duration = Duration::from_secs(60);
@@ -75,9 +74,9 @@ pub struct Day {
 }
 
 impl Day {
-    pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
-            background: Sprite::load_native(BACKGROUND_PATH, palette)?,
+            background: crate::assets::days(),
             label_font: BitmapFont::load_with_fallback(
                 &pixel_fonts::PIXOLDE_BOLD_SPEC,
                 &pixel_fonts::FUSION_PIXEL_12_SPEC,

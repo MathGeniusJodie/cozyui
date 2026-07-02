@@ -1,6 +1,5 @@
 use std::error::Error;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -9,7 +8,16 @@ use crate::palette_color;
 use crate::text::{
     BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
 };
-use crate::{Framebuffer, Index, Paint, Palette, Rect, Sprite, Swap, TRANSPARENT};
+use crate::{CursorKind, Framebuffer, Index, Paint, Palette, Rect, Sprite, Swap, TRANSPARENT};
+
+mod store;
+
+pub(crate) use store::done_file_path;
+use store::{
+    AtomicWrite, DoneCounts, LINE_COUNT, SECTION_COUNT, SectionStore, TodoList,
+    archive_transaction_path, daily_done_path, done_dir, recover_archive_transaction, todo_file,
+    toodle_root, write_archive_transaction_marker,
+};
 
 /// toodle's two-line todo layout: a lone line sits on the baseline; once the
 /// text wraps, the first line lifts and the second drops.
@@ -19,46 +27,9 @@ const TODO_LINE_PLACEMENT: LinePlacement = LinePlacement::Split {
     hit_threshold: WRAPPED_SECOND_LINE_OFFSET_Y - 3,
 };
 
-const LINE_COUNT: usize = 6;
 const CHECK_VARIANTS: usize = 4;
 
-const TOP_PAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/toodle_top.png");
-const SECOND_PAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/toodle_2nd.png");
-const THIRD_PAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/toodle_page.png");
-const CHECKBOXES_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/checkboxes.png");
-const CHECKS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/checks.png");
-const ERASER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/eraser.png");
-const PRIORITY_URGENT_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/priority_urgent.png");
-const PRIORITY_FROG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/priority_frog.png");
-const PRIORITY_SNAIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/priority_snail.png");
-const GOLDSTAR_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/goldstar.png");
-const PENCIL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/focus_pencil.png");
-const PENCIL_SHADOW_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/toodle_pencil_shadow.png"
-);
-const DICE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/dice.png");
-
-const SECTION_COUNT: usize = 4;
 const VISIBLE_PAGE_COUNT: usize = 4;
-/// Cap on how many pages a single category can show; extra overflow pages are
-/// simply not navigable.
-const MAX_PAGES_PER_SECTION: usize = 4;
-/// Config file naming the directory that holds every toodle markdown file. The
-/// first non-blank, non-comment line is the root path (`~` expands to `$HOME`).
-const TOODLE_CONF_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle.conf");
-/// Root used when `toodle.conf` is missing or blank.
-const DEFAULT_TOODLE_ROOT: &str = "~/Desktop/RemoteVault/✅ Toodle/";
-const TODO_FILE_NAMES: [&str; SECTION_COUNT] = [
-    "toodle_urgent.md",
-    "toodle_frog.md",
-    "toodle_normal.md",
-    "toodle_snail.md",
-];
-/// Completed todos are filed under here, one file per day they were finished.
-const DONE_DIR_NAME: &str = "toodle_done";
-const ARCHIVE_TRANSACTION_NAME: &str = "toodle_archive_transaction.json";
 const PAGE_OFFSET_X: usize = 14;
 /// Gap between the front page's right edge and the dice button.
 const DICE_GAP: usize = 8;
@@ -119,10 +90,12 @@ pub struct Toodle {
     pencil_shadow: Sprite,
     dice: Sprite,
     font: BitmapFont,
-    todos: [TodoList; SECTION_COUNT],
+    // Per-priority todo lists, each kept in lockstep with its backing markdown
+    // file (which other programs may rewrite at any time).
+    sections: [SectionStore; SECTION_COUNT],
     // Per-priority count of todos archived into today's done files, used for
     // the gold star.
-    today_done_counts: [usize; SECTION_COUNT],
+    done_counts: DoneCounts,
     page: usize,
     focused_line: Option<usize>,
     // The todo the dice last landed on, as (section, page, line). Drawn crimson
@@ -132,8 +105,10 @@ pub struct Toodle {
     eraser_hovered: bool,
     // Per-keystroke saves fsync and made typing lag; edits are saved after a
     // typing pause instead (and flushed on shutdown).
-    dirty_sections: [bool; SECTION_COUNT],
     last_edit: Instant,
+    // External edits to the backing files are picked up by polling their
+    // fingerprints; this throttles the stat calls.
+    last_poll: Instant,
     // The static page-stack art (shadows + page images + checkboxes) is the
     // expensive part to draw and only changes when the stack geometry does.
     // We cache it and blit it each frame, painting the live front-page text and
@@ -148,40 +123,41 @@ pub struct Toodle {
 type PageArtKey = (usize, [usize; SECTION_COUNT]);
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+const DISK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 impl Toodle {
-    pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
         fs::create_dir_all(toodle_root())?;
         recover_archive_transaction(&archive_transaction_path())?;
 
         Ok(Self {
             pages: [
-                Sprite::load_native(TOP_PAGE_PATH, palette)?,
-                Sprite::load_native(SECOND_PAGE_PATH, palette)?,
-                Sprite::load_native(THIRD_PAGE_PATH, palette)?,
-                Sprite::load_native(THIRD_PAGE_PATH, palette)?,
+                crate::assets::toodle_top(),
+                crate::assets::toodle_2nd(),
+                crate::assets::toodle_page(),
+                crate::assets::toodle_page(),
             ],
-            checkboxes: Sprite::load_native(CHECKBOXES_PATH, palette)?,
-            checks: Sprite::load_native(CHECKS_PATH, palette)?,
-            eraser: Sprite::load_native(ERASER_PATH, palette)?,
-            priority_urgent: Sprite::load_native(PRIORITY_URGENT_PATH, palette)?,
-            priority_frog: Sprite::load_native(PRIORITY_FROG_PATH, palette)?,
-            priority_snail: Sprite::load_native(PRIORITY_SNAIL_PATH, palette)?,
-            goldstar: Sprite::load_native(GOLDSTAR_PATH, palette)?,
-            pencil: Sprite::load_native(PENCIL_PATH, palette)?,
-            pencil_shadow: Sprite::load_native(PENCIL_SHADOW_PATH, palette)?,
-            dice: Sprite::load_native(DICE_PATH, palette)?,
+            checkboxes: crate::assets::checkboxes(),
+            checks: crate::assets::checks(),
+            eraser: crate::assets::eraser(),
+            priority_urgent: crate::assets::priority_urgent(),
+            priority_frog: crate::assets::priority_frog(),
+            priority_snail: crate::assets::priority_snail(),
+            goldstar: crate::assets::goldstar(),
+            pencil: crate::assets::focus_pencil(),
+            pencil_shadow: crate::assets::toodle_pencil_shadow(),
+            dice: crate::assets::dice(),
             font: BitmapFont::load_with_fallback(
                 &pixel_fonts::PEANUT_MONEY_SPEC,
                 &pixel_fonts::FUSION_PIXEL_10_SPEC,
             )?,
-            todos: [
-                TodoList::load(&todo_file(0))?,
-                TodoList::load(&todo_file(1))?,
-                TodoList::load(&todo_file(2))?,
-                TodoList::load(&todo_file(3))?,
+            sections: [
+                SectionStore::load(&todo_file(0))?,
+                SectionStore::load(&todo_file(1))?,
+                SectionStore::load(&todo_file(2))?,
+                SectionStore::load(&todo_file(3))?,
             ],
-            today_done_counts: today_done_counts()?,
+            done_counts: DoneCounts::load()?,
             page: 0,
             focused_line: None,
             highlighted: None,
@@ -189,8 +165,8 @@ impl Toodle {
             // there is no separate character cap.
             field: TextField::new(usize::MAX, 2),
             eraser_hovered: false,
-            dirty_sections: [false; SECTION_COUNT],
             last_edit: Instant::now(),
+            last_poll: Instant::now(),
             page_art: None,
             page_art_key: None,
         })
@@ -212,11 +188,15 @@ impl Toodle {
         TRANSPARENT
     }
 
+    const fn list(&self, section: usize) -> &TodoList {
+        self.sections[section].list()
+    }
+
     /// Geometry signature the cached page art depends on.
     fn page_art_key(&self) -> PageArtKey {
         let mut counts = [0usize; SECTION_COUNT];
-        for (count, todos) in counts.iter_mut().zip(self.todos.iter()) {
-            *count = todos.page_count();
+        for (count, section) in counts.iter_mut().zip(self.sections.iter()) {
+            *count = section.list().page_count();
         }
         (self.page, counts)
     }
@@ -295,7 +275,7 @@ impl Toodle {
             text_color
         };
         for (line, _) in LINE_Y.iter().enumerate().take(LINE_COUNT) {
-            let todo = self.todos[section].item(page, line);
+            let todo = self.list(section).item(page, line);
             if todo.renders_checkbox(self.focused_line == Some(line)) {
                 self.draw_checkbox_box(fb, palette, line);
             }
@@ -378,13 +358,14 @@ impl Toodle {
         }
 
         if let Some(line) = checkbox_at(page_x, abs_y)
-            && self.todos[self.current_page_ref().section]
+            && self
+                .list(self.current_page_ref().section)
                 .item(self.current_page_ref().page, line)
                 .is_checkbox
         {
             let PageRef { section, page } = self.current_page_ref();
             let checked = {
-                let item = self.todos[section].item_mut(page, line);
+                let item = self.sections[section].list_mut().item_mut(page, line);
                 item.checked = !item.checked;
                 item.checked
             };
@@ -430,6 +411,34 @@ impl Toodle {
         self.field.is_dragging()
     }
 
+    /// Mirrors the hit-testing in `click`, without side effects.
+    pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+        if self.eraser_at(x, y) || self.dice_at(x, y) {
+            return CursorKind::Hand;
+        }
+        let abs_x = x.max(0) as usize;
+        let abs_y = y.max(0) as usize;
+        let Some(page_x) = abs_x.checked_sub(PAGE_OFFSET_X) else {
+            return CursorKind::Pointer;
+        };
+        if page_x >= PAGE_CURL_X && abs_y >= PAGE_CURL_Y {
+            return CursorKind::Hand;
+        }
+        if let Some(line) = checkbox_at(page_x, abs_y)
+            && self
+                .list(self.current_page_ref().section)
+                .item(self.current_page_ref().page, line)
+                .is_checkbox
+        {
+            return CursorKind::Hand;
+        }
+        if line_at(abs_y).is_some() {
+            CursorKind::Text
+        } else {
+            CursorKind::Pointer
+        }
+    }
+
     pub(crate) fn hover(&mut self, x: i16, y: i16) -> bool {
         let was_hovered = self.eraser_hovered;
         if x < 0 || y < 0 {
@@ -451,8 +460,10 @@ impl Toodle {
 
         let PageRef { section, page } = self.current_page_ref();
         if matches!(edit_key(input), EditKey::Backspace) && self.field.text().is_empty() {
-            if self.todos[section].delete_item(page, line) {
-                self.todos[section].save(&todo_file(section))?;
+            if self.sections[section].list_mut().delete_item(page, line)
+                && self.sections[section].save(&todo_file(section))?
+            {
+                self.fix_ui_after_sync(PageRef { section, page });
             }
             self.keep_section_page_visible(PageRef { section, page });
             self.focused_line = Some(line);
@@ -465,9 +476,10 @@ impl Toodle {
         let outcome = self.field.handle_key(input, clipboard_text, &layout);
         if let TextEditOutcome::Handled { changed, copy } = outcome {
             if changed {
-                self.todos[section].item_mut(page, line).text = self.field.text().to_string();
+                self.sections[section].list_mut().item_mut(page, line).text =
+                    self.field.text().to_string();
                 // Deferred save: an fsync per keystroke makes typing lag.
-                self.dirty_sections[section] = true;
+                self.sections[section].mark_dirty();
                 self.last_edit = Instant::now();
                 self.keep_section_page_visible(PageRef { section, page });
             }
@@ -508,11 +520,11 @@ impl Toodle {
 
     /// Load the focused line's text into the editing field (the field is the
     /// live buffer while a line is focused; edits are mirrored back into the
-    /// todo item so the rest of the widget can keep rendering from `todos`).
+    /// todo item so the rest of the widget can keep rendering from the lists).
     fn load_focused_field(&mut self) {
         if let Some(line) = self.focused_line {
             let PageRef { section, page } = self.current_page_ref();
-            let text = self.todos[section].item(page, line).text.clone();
+            let text = self.list(section).item(page, line).text.clone();
             self.field.set_text(&text);
         }
     }
@@ -565,68 +577,153 @@ impl Toodle {
 
     fn save_current_section(&mut self) -> Result<(), Box<dyn Error>> {
         let current_page = self.current_page_ref();
-        self.todos[current_page.section].save(&todo_file(current_page.section))?;
-        self.dirty_sections[current_page.section] = false;
-        self.keep_section_page_visible(current_page);
+        let externally_changed =
+            self.sections[current_page.section].save(&todo_file(current_page.section))?;
+        if externally_changed {
+            self.fix_ui_after_sync(current_page);
+        } else {
+            self.keep_section_page_visible(current_page);
+        }
         Ok(())
     }
 
-    /// Write debounced edits once typing has paused. Call regularly.
-    pub(crate) fn maintain(&mut self) -> Result<(), Box<dyn Error>> {
-        if self.dirty_sections.iter().any(|&dirty| dirty)
+    /// Keep the widget in lockstep with disk: absorb external edits to the
+    /// backing files and write debounced edits once typing has paused. Call
+    /// regularly; returns whether anything visible changed (redraw needed).
+    pub(crate) fn maintain(&mut self) -> Result<bool, Box<dyn Error>> {
+        let mut changed = false;
+        if self.last_poll.elapsed() >= DISK_POLL_INTERVAL {
+            self.last_poll = Instant::now();
+            changed = self.sync_with_disk()?;
+        }
+        if self.sections.iter().any(SectionStore::is_dirty)
             && self.last_edit.elapsed() >= SAVE_DEBOUNCE
         {
-            self.flush_saves()?;
+            changed |= self.flush_saves()?;
         }
-        Ok(())
+        Ok(changed)
     }
 
-    /// Write all pending edits now (shutdown, structural changes).
-    pub(crate) fn flush_saves(&mut self) -> Result<(), Box<dyn Error>> {
+    /// One reconciliation pass: fold in external edits to the four todo files
+    /// and refresh the gold-star counts. Returns whether anything changed.
+    fn sync_with_disk(&mut self) -> Result<bool, Box<dyn Error>> {
+        let current_page = self.current_page_ref();
+        let mut lists_changed = false;
         for section in 0..SECTION_COUNT {
-            if self.dirty_sections[section] {
-                self.todos[section].save(&todo_file(section))?;
-                self.dirty_sections[section] = false;
+            lists_changed |= self.sections[section].absorb_external(&todo_file(section))?;
+        }
+        if lists_changed {
+            self.fix_ui_after_sync(current_page);
+        }
+        let counts_changed = self.done_counts.refresh()?;
+        Ok(lists_changed || counts_changed)
+    }
+
+    /// Write all pending edits now (shutdown, structural changes). Each save
+    /// first absorbs any unseen external change to its file, so this can also
+    /// alter the lists; returns whether that happened.
+    pub(crate) fn flush_saves(&mut self) -> Result<bool, Box<dyn Error>> {
+        let current_page = self.current_page_ref();
+        let mut externally_changed = false;
+        for section in 0..SECTION_COUNT {
+            if self.sections[section].is_dirty() {
+                externally_changed |= self.sections[section].save(&todo_file(section))?;
             }
         }
-        Ok(())
+        if externally_changed {
+            self.fix_ui_after_sync(current_page);
+        }
+        Ok(externally_changed)
+    }
+
+    /// After external changes are folded in, page counts and item positions
+    /// may have shifted; keep the visible page, the focused line, and the dice
+    /// highlight pointing at sensible things. `current_page` is the page that
+    /// was showing before the sync.
+    fn fix_ui_after_sync(&mut self, current_page: PageRef) {
+        self.keep_section_page_visible(current_page);
+
+        if self.focused_line.is_some() {
+            let text = self.field.text().to_owned();
+            let index = if text.is_empty() {
+                // A blank focused line has no identity to follow; any blank
+                // spot is as good as another, so stay put.
+                None
+            } else {
+                self.list(current_page.section)
+                    .items
+                    .iter()
+                    .position(|item| item.text == text)
+            };
+            if let Some(index) = index {
+                // Follow the focused todo to wherever it landed.
+                self.focused_line = Some(index % LINE_COUNT);
+                self.keep_section_page_visible(PageRef {
+                    section: current_page.section,
+                    page: index / LINE_COUNT,
+                });
+            }
+            // Show whatever is at the focused spot now (the todo may have been
+            // edited or removed on disk); the cursor is clamped by the field.
+            self.load_focused_field();
+        }
+
+        if let Some((section, page, line)) = self.highlighted {
+            let list = self.list(section);
+            let item = list.item(page, line);
+            if page >= list.page_count()
+                || !item.is_checkbox
+                || item.checked
+                || item.text.trim().is_empty()
+            {
+                self.highlighted = None;
+            }
+        }
     }
 
     fn archive_completed_todos(&mut self) -> Result<(), Box<dyn Error>> {
+        // Fold in external edits first so the sweep operates on what is really
+        // on disk, not a stale view.
+        self.sync_with_disk()?;
         let current_page = self.current_page_ref();
-        let mut archived: [Vec<String>; SECTION_COUNT] = std::array::from_fn(|_| Vec::new());
-        let mut changed_pages = [false; SECTION_COUNT];
-        let mut staged_pages = self.todos.clone();
 
-        for (page_index, page) in staged_pages.iter_mut().enumerate() {
+        let mut archived: [Vec<String>; SECTION_COUNT] = std::array::from_fn(|_| Vec::new());
+        let mut changed_sections = [false; SECTION_COUNT];
+        let mut staged_lists: Vec<TodoList> = self
+            .sections
+            .iter()
+            .map(|section| section.list().clone())
+            .collect();
+
+        for (section, list) in staged_lists.iter_mut().enumerate() {
             let mut remaining = Vec::new();
-            for item in page.items.iter().cloned() {
+            for item in list.items.iter().cloned() {
                 if item.checked {
                     if !item.text.trim().is_empty() {
-                        archived[page_index].push(item.text.clone());
+                        archived[section].push(item.text.clone());
                     }
-                    changed_pages[page_index] = true;
+                    changed_sections[section] = true;
                 } else {
                     remaining.push(item);
                 }
             }
 
-            if changed_pages[page_index] {
-                page.items = remaining;
-                page.trim_trailing_blank_items();
+            if changed_sections[section] {
+                list.items = remaining;
+                list.trim_trailing_blank_items();
             }
         }
 
-        let mut staged_writes = Vec::new();
-        if archived.iter().any(|page| !page.is_empty()) {
+        let mut done_writes = Vec::new();
+        if archived.iter().any(|section| !section.is_empty()) {
             fs::create_dir_all(done_dir())?;
         }
-        for (page_index, archived_page) in archived.iter().enumerate() {
-            if archived_page.is_empty() {
+        for (section, archived_section) in archived.iter().enumerate() {
+            if archived_section.is_empty() {
                 continue;
             }
 
-            let done_path = daily_done_path(page_index);
+            let done_path = daily_done_path(section);
             let mut done_text = if Path::new(&done_path).exists() {
                 fs::read_to_string(&done_path)?
             } else {
@@ -635,31 +732,38 @@ impl Toodle {
             if !done_text.is_empty() && !done_text.ends_with('\n') {
                 done_text.push('\n');
             }
-            for todo in archived_page {
+            for todo in archived_section {
                 done_text.push_str("- [x] ");
                 done_text.push_str(todo);
                 done_text.push('\n');
             }
-            staged_writes.push(AtomicWrite::stage(&done_path, done_text.into_bytes())?);
+            done_writes.push(AtomicWrite::stage(&done_path, done_text.into_bytes())?);
         }
-        for (page_index, changed) in changed_pages.into_iter().enumerate() {
+        let mut section_writes = Vec::new();
+        for (section, changed) in changed_sections.into_iter().enumerate() {
             if changed {
-                staged_writes.push(AtomicWrite::stage(
-                    &todo_file(page_index),
-                    staged_pages[page_index].serialized_text().into_bytes(),
-                )?);
+                let text = staged_lists[section].serialized_text();
+                let write = AtomicWrite::stage(&todo_file(section), text.as_bytes())?;
+                section_writes.push((section, text, write));
             }
         }
 
         let marker_path = archive_transaction_path();
-        write_archive_transaction_marker(&marker_path, &staged_writes)?;
-        for staged_write in staged_writes {
+        let marker_writes: Vec<&AtomicWrite> = done_writes
+            .iter()
+            .chain(section_writes.iter().map(|(_, _, write)| write))
+            .collect();
+        write_archive_transaction_marker(&marker_path, &marker_writes)?;
+        for staged_write in done_writes {
             staged_write.commit()?;
+        }
+        for (section, text, staged_write) in section_writes {
+            let written = staged_write.commit()?;
+            self.sections[section].adopt(staged_lists[section].clone(), text, written);
         }
         fs::remove_file(&marker_path)?;
 
-        self.todos = staged_pages;
-        self.today_done_counts = today_done_counts()?;
+        self.done_counts.refresh()?;
         self.keep_section_page_visible(current_page);
 
         Ok(())
@@ -695,7 +799,10 @@ impl Toodle {
     }
 
     fn logical_page_count(&self) -> usize {
-        self.todos.iter().map(TodoList::page_count).sum()
+        self.sections
+            .iter()
+            .map(|section| section.list().page_count())
+            .sum()
     }
 
     fn current_page_ref(&self) -> PageRef {
@@ -703,8 +810,8 @@ impl Toodle {
     }
 
     fn page_ref(&self, mut page: usize) -> PageRef {
-        for (section, todos) in self.todos.iter().enumerate() {
-            let section_pages = todos.page_count();
+        for (section, store) in self.sections.iter().enumerate() {
+            let section_pages = store.list().page_count();
             if page < section_pages {
                 return PageRef { section, page };
             }
@@ -713,21 +820,21 @@ impl Toodle {
 
         PageRef {
             section: SECTION_COUNT - 1,
-            page: self.todos[SECTION_COUNT - 1].page_count() - 1,
+            page: self.list(SECTION_COUNT - 1).page_count() - 1,
         }
     }
 
     fn page_index_for(&self, section: usize, section_page: usize) -> usize {
-        self.todos
+        self.sections
             .iter()
             .take(section)
-            .map(TodoList::page_count)
+            .map(|store| store.list().page_count())
             .sum::<usize>()
-            + section_page.min(self.todos[section].page_count() - 1)
+            + section_page.min(self.list(section).page_count() - 1)
     }
 
     fn keep_section_page_visible(&mut self, page: PageRef) {
-        let section_pages = self.todos[page.section].page_count();
+        let section_pages = self.list(page.section).page_count();
         self.page = self.page_index_for(page.section, page.page.min(section_pages - 1));
     }
 
@@ -735,12 +842,13 @@ impl Toodle {
     /// today's done file plus checked todos not yet swept there.
     fn goldstar_count(&self) -> usize {
         let section = self.current_page_ref().section;
-        let checked_unarchived = self.todos[section]
+        let checked_unarchived = self
+            .list(section)
             .items
             .iter()
             .filter(|item| item.checked && !item.text.trim().is_empty())
             .count();
-        self.today_done_counts[section] + checked_unarchived
+        self.done_counts.count(section) + checked_unarchived
     }
 
     fn draw_goldstar(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -832,7 +940,7 @@ impl Toodle {
     fn focused_pencil_position(&self) -> Option<(usize, usize, usize, bool)> {
         let line = self.focused_line?;
         let PageRef { section, page } = self.current_page_ref();
-        let todo = self.todos[section].item(page, line);
+        let todo = self.list(section).item(page, line);
         let layout = Self::line_layout(&self.font, line);
         let (cursor_x, cursor_y) = layout.cursor_position(&todo.text, self.field.cursor());
         Some((line, cursor_x, cursor_y, layout.wrap(&todo.text).len() > 1))
@@ -840,7 +948,7 @@ impl Toodle {
 
     fn should_draw_pencil_shadow(&self, line: usize) -> bool {
         let PageRef { section, page } = self.current_page_ref();
-        let char_count = self.todos[section].item(page, line).text.chars().count();
+        let char_count = self.list(section).item(page, line).text.chars().count();
         match line {
             line if line == LINE_COUNT - 2 => char_count <= PENULTIMATE_LINE_SHADOW_MAX_CHARS,
             line if line == LINE_COUNT - 1 => char_count <= LAST_LINE_SHADOW_MAX_CHARS,
@@ -868,7 +976,7 @@ impl Toodle {
         let PageRef { section, page } = self.current_page_ref();
         let candidates: Vec<usize> = (0..LINE_COUNT)
             .filter(|&line| {
-                let item = self.todos[section].item(page, line);
+                let item = self.list(section).item(page, line);
                 item.is_checkbox && !item.checked && !item.text.trim().is_empty()
             })
             .collect();
@@ -893,335 +1001,6 @@ impl Toodle {
 struct PageRef {
     section: usize,
     page: usize,
-}
-
-/// Root directory for all toodle markdown files, configurable via `toodle.conf`.
-/// Resolved once and cached; falls back to [`DEFAULT_TOODLE_ROOT`] when the
-/// config is missing or contains no usable path.
-fn toodle_root() -> &'static str {
-    static ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    ROOT.get_or_init(|| {
-        let configured = fs::read_to_string(TOODLE_CONF_PATH)
-            .ok()
-            .and_then(|text| {
-                text.lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty() && !line.starts_with('#'))
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| DEFAULT_TOODLE_ROOT.to_owned());
-        let expanded = crate::paths::expand_tilde(&configured);
-        expanded.trim_end_matches('/').to_owned()
-    })
-}
-
-fn todo_file(section: usize) -> String {
-    format!("{}/{}", toodle_root(), TODO_FILE_NAMES[section])
-}
-
-fn done_dir() -> String {
-    format!("{}/{DONE_DIR_NAME}", toodle_root())
-}
-
-fn archive_transaction_path() -> String {
-    format!("{}/{ARCHIVE_TRANSACTION_NAME}", toodle_root())
-}
-
-/// Path of the done-todo file for a given date and priority tag, the single
-/// source of the `<root>/YYYY-MM-DD_<tag>.md` naming convention (shared with
-/// the stats widget).
-pub fn done_file_path(year: i32, month: i32, day: i32, tag: &str) -> String {
-    format!("{}/{year:04}-{month:02}-{day:02}_{tag}.md", done_dir())
-}
-
-/// Path of the done-todo file for `section` today, named by date and priority.
-fn daily_done_path(section: usize) -> String {
-    let tm = crate::localtime::local_time().unwrap_or_default();
-    done_file_path(
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        section_tag(section),
-    )
-}
-
-/// Today's existing done file for `section`, or `None` if it does not exist.
-fn existing_done_path(section: usize) -> Option<String> {
-    let md = daily_done_path(section);
-    Path::new(&md).exists().then_some(md)
-}
-
-/// Per-priority count of todos archived in today's done files.
-fn today_done_counts() -> Result<[usize; SECTION_COUNT], Box<dyn Error>> {
-    let mut counts = [0; SECTION_COUNT];
-    for (section, count) in counts.iter_mut().enumerate() {
-        *count = done_todo_count(section)?;
-    }
-    Ok(counts)
-}
-
-fn done_todo_count(section: usize) -> Result<usize, Box<dyn Error>> {
-    let Some(path) = existing_done_path(section) else {
-        return Ok(0);
-    };
-
-    Ok(fs::read_to_string(path)?
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count())
-}
-
-#[derive(Clone)]
-struct TodoList {
-    items: Vec<TodoItem>,
-}
-
-impl TodoList {
-    fn load(path: &str) -> Result<Self, Box<dyn Error>> {
-        let items = if Path::new(path).exists() {
-            fs::read_to_string(path)?
-                .lines()
-                .map(TodoItem::parse)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let mut list = Self { items };
-        list.trim_trailing_blank_items();
-        Ok(list)
-    }
-
-    fn save(&mut self, path: &str) -> Result<(), Box<dyn Error>> {
-        self.trim_trailing_blank_items();
-        atomic_write(path, self.serialized_text().as_bytes())?;
-        Ok(())
-    }
-
-    fn page_count(&self) -> usize {
-        let pages_with_items = self.items.len().div_ceil(LINE_COUNT).max(1);
-        let last_page_start = (pages_with_items - 1) * LINE_COUNT;
-        let last_page_full = !self.items.is_empty()
-            && (last_page_start..last_page_start + LINE_COUNT)
-                .all(|index| self.items.get(index).is_some_and(|item| !item.is_blank()));
-        let count = if last_page_full {
-            pages_with_items + 1
-        } else {
-            pages_with_items
-        };
-        count.min(MAX_PAGES_PER_SECTION)
-    }
-
-    fn item(&self, page: usize, line: usize) -> &TodoItem {
-        static BLANK_ITEM: TodoItem = TodoItem {
-            text: String::new(),
-            checked: false,
-            is_checkbox: true,
-        };
-        self.items
-            .get(page * LINE_COUNT + line)
-            .unwrap_or(&BLANK_ITEM)
-    }
-
-    fn item_mut(&mut self, page: usize, line: usize) -> &mut TodoItem {
-        let index = page * LINE_COUNT + line;
-        if self.items.len() <= index {
-            self.items.resize_with(index + 1, TodoItem::default);
-        }
-        &mut self.items[index]
-    }
-
-    fn delete_item(&mut self, page: usize, line: usize) -> bool {
-        let index = page * LINE_COUNT + line;
-        if index >= self.items.len() {
-            return false;
-        }
-        self.items.remove(index);
-        true
-    }
-
-    fn trim_trailing_blank_items(&mut self) {
-        while self.items.last().is_some_and(TodoItem::is_blank) {
-            self.items.pop();
-        }
-    }
-
-    fn serialized_text(&self) -> String {
-        if self.items.is_empty() {
-            return String::new();
-        }
-
-        let text = self
-            .items
-            .iter()
-            .map(TodoItem::serialize)
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("{text}\n")
-    }
-}
-
-struct AtomicWrite {
-    path: String,
-    temp_path: String,
-}
-
-impl AtomicWrite {
-    fn stage(path: &str, contents: impl AsRef<[u8]>) -> Result<Self, Box<dyn Error>> {
-        let temp_path = format!("{path}.tmp.{}", std::process::id());
-        {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&temp_path)?;
-            file.write_all(contents.as_ref())?;
-            file.sync_all()?;
-        }
-        Ok(Self {
-            path: path.to_string(),
-            temp_path,
-        })
-    }
-
-    fn commit(self) -> Result<(), Box<dyn Error>> {
-        fs::rename(&self.temp_path, &self.path)?;
-        Ok(())
-    }
-}
-
-impl Drop for AtomicWrite {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.temp_path);
-    }
-}
-
-fn atomic_write(path: &str, contents: &[u8]) -> Result<(), Box<dyn Error>> {
-    AtomicWrite::stage(path, contents)?.commit()
-}
-
-fn write_archive_transaction_marker(
-    marker_path: &str,
-    staged_writes: &[AtomicWrite],
-) -> Result<(), Box<dyn Error>> {
-    let writes = staged_writes
-        .iter()
-        .map(|write| {
-            serde_json::json!({
-                "path": write.path.as_str(),
-                "temp_path": write.temp_path.as_str(),
-            })
-        })
-        .collect::<Vec<_>>();
-    let marker = serde_json::to_vec(&writes)?;
-    let transaction_marker = AtomicWrite::stage(marker_path, marker)?;
-    transaction_marker.commit()?;
-    Ok(())
-}
-
-fn recover_archive_transaction(marker_path: &str) -> Result<(), Box<dyn Error>> {
-    if !Path::new(marker_path).exists() {
-        return Ok(());
-    }
-
-    let marker = fs::read_to_string(marker_path)?;
-    let writes = serde_json::from_str::<serde_json::Value>(&marker)?;
-    let Some(records) = writes.as_array() else {
-        return Err("archive transaction marker is not a JSON array".into());
-    };
-
-    for record in records.iter().map(ArchiveWriteRecord::from_json) {
-        let record = record?;
-        if Path::new(&record.temp_path).exists() {
-            fs::rename(&record.temp_path, &record.path)?;
-        }
-    }
-
-    fs::remove_file(marker_path)?;
-    Ok(())
-}
-
-struct ArchiveWriteRecord {
-    path: String,
-    temp_path: String,
-}
-
-impl ArchiveWriteRecord {
-    fn from_json(value: &serde_json::Value) -> Result<Self, Box<dyn Error>> {
-        Ok(Self {
-            path: value
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("archive transaction marker is missing path")?
-                .to_string(),
-            temp_path: value
-                .get("temp_path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("archive transaction marker is missing temp_path")?
-                .to_string(),
-        })
-    }
-}
-
-#[derive(Clone)]
-struct TodoItem {
-    text: String,
-    checked: bool,
-    /// Whether this line is a markdown checkbox (`- [ ]` / `- [x]`). Plain lines
-    /// from the file are kept verbatim and rendered without a checkbox to their
-    /// left. New lines typed in the widget default to checkboxes.
-    is_checkbox: bool,
-}
-
-/// New lines created in the widget are checkbox todos by default; plain lines
-/// only arise from non-checkbox text in the backing file.
-impl Default for TodoItem {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            checked: false,
-            is_checkbox: true,
-        }
-    }
-}
-
-impl TodoItem {
-    fn parse(line: &str) -> Self {
-        for (prefix, checked) in [("- [x]", true), ("- [X]", true), ("- [ ]", false)] {
-            if let Some(rest) = line.strip_prefix(prefix) {
-                return Self {
-                    text: rest.strip_prefix(' ').unwrap_or(rest).to_string(),
-                    checked,
-                    is_checkbox: true,
-                };
-            }
-        }
-        Self {
-            text: line.to_string(),
-            checked: false,
-            is_checkbox: false,
-        }
-    }
-
-    fn serialize(&self) -> String {
-        if !self.is_checkbox {
-            self.text.clone()
-        } else if self.checked {
-            format!("- [x] {}", self.text)
-        } else {
-            format!("- [ ] {}", self.text)
-        }
-    }
-
-    /// Whether a checkbox should be drawn to the left of this line. Plain lines
-    /// never show one; a checkbox todo shows one once it has content, is
-    /// checked, or is the line currently being edited.
-    const fn renders_checkbox(&self, focused: bool) -> bool {
-        self.is_checkbox && (focused || self.checked || !self.text.is_empty())
-    }
-
-    const fn is_blank(&self) -> bool {
-        !self.checked && self.text.is_empty()
-    }
 }
 
 fn draw_page_image(
@@ -1266,16 +1045,6 @@ fn page_swap(page_color: PageColor, pencil_on_second_line: bool) -> Swap {
         indices[palette_color::LIME as usize] = remap[palette_color::ROSE as usize];
     }
     Swap::from_indices(&indices)
-}
-
-/// Priority tag used in daily done filenames (`YYYY-MM-DD_<tag>.md`).
-const fn section_tag(section: usize) -> &'static str {
-    match section % SECTION_COUNT {
-        0 => "urgent",
-        1 => "frog",
-        2 => "normal",
-        _ => "snail",
-    }
 }
 
 const fn section_color(section: usize) -> PageColor {
@@ -1389,141 +1158,5 @@ const fn max_text_width(line: usize) -> usize {
         LAST_LINE_MAX_TEXT_WIDTH
     } else {
         MAX_TEXT_WIDTH
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn todo_item_round_trips_checked_items() {
-        let item = TodoItem::parse("- [x] ship the tiny desktop");
-
-        assert!(item.checked);
-        assert!(item.is_checkbox);
-        assert_eq!(item.text, "ship the tiny desktop");
-        assert_eq!(item.serialize(), "- [x] ship the tiny desktop");
-    }
-
-    #[test]
-    fn todo_item_round_trips_unchecked_checkbox() {
-        let item = TodoItem::parse("- [ ] water the plants");
-
-        assert!(!item.checked);
-        assert!(item.is_checkbox);
-        assert_eq!(item.text, "water the plants");
-        assert_eq!(item.serialize(), "- [ ] water the plants");
-    }
-
-    #[test]
-    fn todo_item_keeps_plain_lines_verbatim() {
-        let item = TodoItem::parse("## groceries");
-
-        assert!(!item.is_checkbox);
-        assert!(!item.checked);
-        assert!(!item.renders_checkbox(false));
-        assert!(!item.renders_checkbox(true));
-        assert_eq!(item.serialize(), "## groceries");
-    }
-
-    #[test]
-    fn todo_list_serializes_checkboxes_and_plain_lines() {
-        let mut list = TodoList {
-            items: vec![TodoItem::default(); LINE_COUNT],
-        };
-        list.items[0] = TodoItem::parse("- [x] done");
-        list.items[1] = TodoItem::parse("a heading");
-        list.trim_trailing_blank_items();
-
-        assert_eq!(list.serialized_text().lines().count(), 2);
-        assert_eq!(list.serialized_text(), "- [x] done\na heading\n");
-    }
-
-    #[test]
-    fn todo_list_adds_blank_page_after_full_page() {
-        let mut list = TodoList { items: Vec::new() };
-        for line in 0..LINE_COUNT {
-            list.item_mut(0, line).text = format!("todo {line}");
-        }
-
-        assert_eq!(list.page_count(), 2);
-
-        list.items.pop();
-        assert_eq!(list.page_count(), 1);
-    }
-
-    #[test]
-    fn todo_list_does_not_add_page_after_sparse_page() {
-        let mut list = TodoList {
-            items: vec![TodoItem::default(); LINE_COUNT],
-        };
-        list.items[0].text = "first".to_string();
-        list.items[LINE_COUNT - 1].text = "last".to_string();
-
-        assert_eq!(list.page_count(), 1);
-    }
-
-    #[test]
-    fn todo_list_uses_one_file_for_overflow_pages() {
-        let mut list = TodoList { items: Vec::new() };
-        list.item_mut(1, 0).text = "overflow".to_string();
-
-        assert_eq!(list.serialized_text().lines().count(), LINE_COUNT + 1);
-        assert!(list.serialized_text().ends_with("overflow\n"));
-    }
-
-    #[test]
-    fn todo_list_delete_item_shifts_later_items_up() {
-        let mut list = TodoList { items: Vec::new() };
-        list.item_mut(0, 0).text = "first".to_string();
-        list.item_mut(0, 1).text = String::new();
-        list.item_mut(0, 2).text = "third".to_string();
-
-        assert!(list.delete_item(0, 1));
-
-        assert_eq!(list.item(0, 0).text, "first");
-        assert_eq!(list.item(0, 1).text, "third");
-    }
-
-    #[test]
-    fn archive_transaction_recovery_finishes_interrupted_commit() {
-        let dir = unique_temp_dir();
-        fs::create_dir_all(&dir).unwrap();
-
-        let marker_path = dir.join("transaction.json");
-        let done_path = dir.join("done.txt");
-        let page_path = dir.join("page.txt");
-        fs::write(&done_path, "old\n").unwrap();
-        fs::write(&page_path, "[x] done\nnext\n\n\n\n\n").unwrap();
-
-        let staged_writes = vec![
-            AtomicWrite::stage(done_path.to_str().unwrap(), b"old\ndone\n").unwrap(),
-            AtomicWrite::stage(page_path.to_str().unwrap(), b"next\n\n\n\n\n\n").unwrap(),
-        ];
-        write_archive_transaction_marker(marker_path.to_str().unwrap(), &staged_writes).unwrap();
-
-        let marker = fs::read_to_string(&marker_path).unwrap();
-        let writes = serde_json::from_str::<serde_json::Value>(&marker).unwrap();
-        let writes = writes.as_array().unwrap();
-        let done_temp_path = writes[0].get("temp_path").unwrap().as_str().unwrap();
-        fs::rename(done_temp_path, &done_path).unwrap();
-
-        recover_archive_transaction(marker_path.to_str().unwrap()).unwrap();
-
-        assert_eq!(fs::read_to_string(&done_path).unwrap(), "old\ndone\n");
-        assert_eq!(fs::read_to_string(&page_path).unwrap(), "next\n\n\n\n\n\n");
-        assert!(!marker_path.exists());
-
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    fn unique_temp_dir() -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("cozyui-toodle-test-{}-{nanos}", std::process::id()))
     }
 }

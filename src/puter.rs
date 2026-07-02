@@ -18,10 +18,7 @@ use xkbcommon::xkb::keysyms;
 
 use crate::palette_color;
 use crate::text::KeyInput;
-use crate::{
-    Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Rgba, Sprite, TRANSPARENT,
-    decode_png_with_size,
-};
+use crate::{CursorKind, Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Sprite, TRANSPARENT};
 
 const GLYPH_W: usize = 6;
 const GLYPH_H: usize = 12;
@@ -32,9 +29,6 @@ const SCREEN_SOURCE_Y: usize = 49;
 const SCREEN_W: usize = 205;
 const SCREEN_H: usize = 158;
 
-const GREEN_LOW_CONTRAST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/puter_g_lc.png");
-const ORANGE_LOW_CONTRAST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/puter_o_lc.png");
-const HIGH_CONTRAST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/puter_hc.png");
 const ART_CROP_X: usize = 19;
 const ART_CROP_Y: usize = 17;
 
@@ -79,11 +73,6 @@ const TERM_COLOR_DIM_MAGENTA: Index = palette_color::PLUM;
 const TERM_COLOR_DIM_CYAN: Index = palette_color::BLUE;
 const TERM_COLOR_DIM_WHITE: Index = palette_color::LAVENDER;
 
-const BUTTON_SPRITES_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/buttons.png");
-const BUTTON_PRESSED_SPRITES_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/buttons-pressed.png");
-const POWER_BUTTON_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/puter_power.png");
-const LOCK_BUTTON_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/puter_lock.png");
 const BUTTON_W: usize = 19;
 const BUTTON_H: usize = 16;
 const BUTTON_SPRITE_OFFSET_X: usize = 3;
@@ -183,14 +172,14 @@ pub struct Puter {
 }
 
 impl Puter {
-    pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
+    pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
-            mode_images: ModeImages::load(palette)?,
-            button_sprites: Sprite::load_native(BUTTON_SPRITES_PATH, palette)?,
-            button_pressed_sprites: Sprite::load_native(BUTTON_PRESSED_SPRITES_PATH, palette)?,
-            power_button: Sprite::load_native(POWER_BUTTON_PATH, palette)?,
-            lock_button: Sprite::load_native(LOCK_BUTTON_PATH, palette)?,
-            atlas: GlyphAtlas::load()?,
+            mode_images: ModeImages::load(),
+            button_sprites: crate::assets::buttons(),
+            button_pressed_sprites: crate::assets::buttons_pressed(),
+            power_button: crate::assets::puter_power(),
+            lock_button: crate::assets::puter_lock(),
+            atlas: GlyphAtlas::load(),
             terminal: None,
             settings: DisplaySettings::new(),
             active_button: None,
@@ -224,12 +213,20 @@ impl Puter {
         self.selecting_terminal = self.selection_point.is_some();
     }
 
-    pub(crate) fn release_button(&mut self, x: i16, y: i16) {
+    /// Returns true when the power button was clicked and the app should quit.
+    pub(crate) fn release_button(&mut self, x: i16, y: i16) -> bool {
+        let mut quit = false;
         let released_button = button_at(x, y);
         if let (Some(pressed), Some(released)) = (self.active_button, released_button)
             && pressed == released
         {
-            self.settings.toggle(BUTTON_TARGETS[pressed].action);
+            match BUTTON_TARGETS[pressed].action {
+                ButtonAction::Power => quit = true,
+                ButtonAction::Lock => {
+                    let _ = std::process::Command::new("xflock4").spawn();
+                }
+                action => self.settings.toggle(action),
+            }
         }
         self.active_button = None;
         if self.selecting_terminal {
@@ -239,6 +236,28 @@ impl Puter {
         }
         self.selecting_terminal = false;
         self.selection_point = None;
+        quit
+    }
+
+    /// Hand over the front-panel buttons, text over the terminal screen.
+    pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+        if button_at(x, y).is_some() {
+            return CursorKind::Hand;
+        }
+        if x >= 0 && y >= 0 {
+            let x = x as usize;
+            let y = y as usize;
+            let screen_x = art_x(SCREEN_SOURCE_X);
+            let screen_y = art_y(SCREEN_SOURCE_Y);
+            if x >= screen_x
+                && x < screen_x + SCREEN_W
+                && y >= screen_y
+                && y < screen_y + SCREEN_H
+            {
+                return CursorKind::Text;
+            }
+        }
+        CursorKind::Pointer
     }
 
     pub(crate) fn motion(&mut self, x: i16, y: i16) -> bool {
@@ -551,18 +570,13 @@ struct GlyphAtlas {
 }
 
 impl GlyphAtlas {
-    fn load() -> Result<Self, Box<dyn Error>> {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/glyphs/0000-007F.png");
-        let (width, height, pixels) = decode_png_with_size(path)?;
-        if width < GLYPH_W {
-            return Err(format!("glyph atlas {path} is too narrow for terminal glyphs").into());
+    /// Size checks and the ink threshold happen at build time (build.rs),
+    /// which bakes the atlas to a 0/1 mask.
+    fn load() -> Self {
+        Self {
+            width: crate::assets::GLYPH_ATLAS_WIDTH,
+            pixels: crate::assets::GLYPH_ATLAS_MASK.iter().map(|&b| b != 0).collect(),
         }
-        let rows = 128_usize.div_ceil(width / GLYPH_W);
-        if height < rows * GLYPH_H {
-            return Err(format!("glyph atlas {path} is too small for 128 terminal glyphs").into());
-        }
-        let pixels = pixels.into_iter().map(is_glyph_ink).collect();
-        Ok(Self { width, pixels })
     }
 
     fn is_on(&self, ch: char, x: usize, y: usize) -> bool {
@@ -926,12 +940,12 @@ struct ModeImages {
 }
 
 impl ModeImages {
-    fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
-        Ok(Self {
-            green_low_contrast: Sprite::load_native(GREEN_LOW_CONTRAST_PATH, palette)?,
-            orange_low_contrast: Sprite::load_native(ORANGE_LOW_CONTRAST_PATH, palette)?,
-            high_contrast: Sprite::load_native(HIGH_CONTRAST_PATH, palette)?,
-        })
+    fn load() -> Self {
+        Self {
+            green_low_contrast: crate::assets::puter_g_lc(),
+            orange_low_contrast: crate::assets::puter_o_lc(),
+            high_contrast: crate::assets::puter_hc(),
+        }
     }
 
     const fn for_settings(&self, settings: DisplaySettings) -> &Sprite {
@@ -1232,11 +1246,6 @@ fn draw_glyph(
             fb.set_pixel(x + gx, y + gy, color);
         }
     }
-}
-
-const fn is_glyph_ink(color: Rgba) -> bool {
-    let luminance = color.r as u16 + color.g as u16 + color.b as u16;
-    luminance >= 384
 }
 
 fn button_at(x: i16, y: i16) -> Option<usize> {

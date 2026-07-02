@@ -12,10 +12,6 @@ use crate::palette_color;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
-const APPLE_100_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/apple-100.png");
-const APPLE_75_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/apple-75.png");
-const APPLE_50_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/apple-50.png");
-const APPLE_25_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/apple-25.png");
 
 /// Where the last-eaten meal time is persisted so an "eaten" acknowledgement
 /// survives restarts.
@@ -69,11 +65,11 @@ pub struct Hunger {
 }
 
 impl Hunger {
-    pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
-        let apple_100 = Sprite::load_native(APPLE_100_PATH, palette)?;
-        let apple_75 = Sprite::load_native(APPLE_75_PATH, palette)?;
-        let apple_50 = Sprite::load_native(APPLE_50_PATH, palette)?;
-        let apple_25 = Sprite::load_native(APPLE_25_PATH, palette)?;
+    pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
+        let apple_100 = crate::assets::apple_100();
+        let apple_75 = crate::assets::apple_75();
+        let apple_50 = crate::assets::apple_50();
+        let apple_25 = crate::assets::apple_25();
         let font = BitmapFont::load_with_fallback(
             &pixel_fonts::PIXOLDE_BOLD_SPEC,
             &pixel_fonts::FUSION_PIXEL_12_SPEC,

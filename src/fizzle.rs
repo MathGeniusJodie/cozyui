@@ -5,12 +5,6 @@ use std::time::{Duration, Instant};
 
 use crate::{Framebuffer, Index, Palette, Rect, Sprite, TRANSPARENT};
 
-const BASE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/candle_base.png");
-const MIDDLE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/candle_middle.png");
-const TOP_LIT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/candle_top_lit.png");
-const TOP_UNLIT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/candle_top_unlit.png");
-const TOP_FULL_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/candle_top_full.png");
-const LOW_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/candle_low.png");
 
 /// Tallest the candle ever gets: this many wax slices stacked between the
 /// holder and the flaming top. Charge scales the slice count down to zero.
@@ -36,13 +30,13 @@ pub struct Fizzle {
 }
 
 impl Fizzle {
-    pub(crate) fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
-        let base = Sprite::load_native(BASE_PATH, palette)?;
-        let middle = Sprite::load_native(MIDDLE_PATH, palette)?;
-        let top_lit = Sprite::load_native(TOP_LIT_PATH, palette)?;
-        let top_unlit = Sprite::load_native(TOP_UNLIT_PATH, palette)?;
-        let top_full = Sprite::load_native(TOP_FULL_PATH, palette)?;
-        let low = Sprite::load_native(LOW_PATH, palette)?;
+    pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
+        let base = crate::assets::candle_base();
+        let middle = crate::assets::candle_middle();
+        let top_lit = crate::assets::candle_top_lit();
+        let top_unlit = crate::assets::candle_top_unlit();
+        let top_full = crate::assets::candle_top_full();
+        let low = crate::assets::candle_low();
 
         let width = base.width.max(low.width);
         // Reserve room for the tallest possible candle so shorter ones just
