@@ -13,7 +13,6 @@ use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette};
 
 const WIDTH: usize = 210;
-const HEIGHT: usize = 208;
 
 /// Seconds in an average month (365.25 / 12 days).
 const MONTH_SECS: f64 = (365.25 / 12.0) * 24.0 * 3600.0;
@@ -191,6 +190,9 @@ pub struct Budgit {
     svg_rx: Receiver<f64>,
     view: BudgetView,
     last_check: Instant,
+    /// Widget height, computed from the fonts so it ends exactly at the last
+    /// stat row (mirrors the layout math in `render`).
+    height: usize,
 }
 
 impl Budgit {
@@ -219,6 +221,23 @@ impl Budgit {
             config.dollars_per_svg,
         );
 
+        // Mirror the vertical layout in `render`: label, balance ink, fraction,
+        // stat rows. The balance line's height comes from digit ink bounds so
+        // it matches what actually gets drawn. The last stat row contributes
+        // its full text height rather than the row advance.
+        let balance_h = balance_font
+            .text_ink_bounds("-$0123456789,")
+            .map_or_else(|| balance_font.cell_h(), |b| b.height());
+        let height = TOP_GAP
+            + label_font.cell_h()
+            + LABEL_GAP
+            + balance_h
+            + FRACTION_GAP
+            + label_font.cell_h()
+            + STATS_GAP
+            + 3 * STAT_ROW_H
+            + label_font.cell_h().max(stat_font.cell_h());
+
         Ok(Self {
             label_font,
             balance_font,
@@ -230,6 +249,7 @@ impl Budgit {
             svg_rx,
             view,
             last_check: Instant::now(),
+            height,
         })
     }
 
@@ -238,9 +258,8 @@ impl Budgit {
         WIDTH
     }
 
-    #[allow(clippy::unused_self)]
     pub(crate) const fn height(&self) -> usize {
-        HEIGHT
+        self.height
     }
 
     #[allow(clippy::unused_self)]

@@ -720,7 +720,7 @@ fn widget_positions(
     fizzle: &fizzle::Fizzle,
     day: &day::Day,
     budgit: &budgit::Budgit,
-    _stats: &stats::Stats,
+    stats: &stats::Stats,
     hunger: &hunger::Hunger,
     min_layout_h: usize,
 ) -> [(usize, usize); WIDGET_COUNT] {
@@ -728,21 +728,28 @@ fn widget_positions(
     let middle_x = left_w + WIDGET_GAP;
     let middle_w = puter.width().max(toodle.width()).max(twirl.width());
     let left_h = day.height() + WIDGET_GAP + wavey.height();
-    let middle_h = twirl.height() + WIDGET_GAP + toodle.height() + WIDGET_GAP + puter.height();
+    let middle_h = budgit.height()
+        + WIDGET_GAP
+        + stats.height()
+        + WIDGET_GAP
+        + toodle.height()
+        + WIDGET_GAP
+        + puter.height();
     let layout_h = left_h.max(middle_h).max(min_layout_h);
     let wavey_y = layout_h - wavey.height();
     let day_y = wavey_y - WIDGET_GAP - day.height() - 30;
     let puter_y = layout_h - puter.height();
     let toodle_y = puter_y - WIDGET_GAP - toodle.height();
-    let twirl_y = toodle_y - WIDGET_GAP - twirl.height();
 
     // Tweak widget positions here. These final coordinates are used both at startup and
     // after dynamic redraws, so edits in this block won't get snapped back later.
     let puter_x = middle_x + APP_LEFT_PADDING;
     let toodle_x = middle_x.saturating_sub(day.width() + TOODLE_LEFT_OVERLAP) + APP_LEFT_PADDING;
-    let twirl_x = middle_x.saturating_sub(day.width()) + APP_LEFT_PADDING;
+    // Twirl sits to the right of toodle, bottom-aligned with it.
+    let twirl_x = toodle_x + toodle.width() + WIDGET_GAP;
+    let twirl_y = (toodle_y + toodle.height()).saturating_sub(twirl.height());
     let wavey_x = APP_LEFT_PADDING + 32;
-    let wavey_y = wavey_y.saturating_sub(6);
+    let wavey_y = wavey_y + 4;
     let day_x = wavey.width().saturating_sub(day.width()) + APP_LEFT_PADDING;
     let fwends_x = middle_x + middle_w + WIDGET_GAP + APP_LEFT_PADDING - FWENDS_LEFT_APRON;
     let fwends_y = 0;
@@ -752,13 +759,12 @@ fn widget_positions(
     let fizzle_x = wavey_x.saturating_sub(WIDGET_GAP + fizzle.width());
     let fizzle_y = (wavey_y + wavey.height()).saturating_sub(fizzle.height());
 
-    // Budgit sits in the otherwise-empty top-left corner above the day column.
-    let budgit_x = 0;
-    let budgit_y = 0;
-
-    // Stats stacks directly beneath budgit in the same top-left column.
-    let stats_x = 0;
-    let stats_y = budgit_y + budgit.height() + WIDGET_GAP;
+    // Budgit and stats stack above toodle where twirl used to be, with stats
+    // directly on top of toodle and budgit above stats.
+    let stats_x = toodle_x;
+    let stats_y = toodle_y.saturating_sub(WIDGET_GAP + stats.height());
+    let budgit_x = toodle_x;
+    let budgit_y = stats_y.saturating_sub(WIDGET_GAP + budgit.height());
 
     // Hunger takes no layout space (it never feeds the width/height maxes), so
     // it sits in the bottom padding directly below the puter, horizontally
@@ -975,12 +981,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut needs_input_redraw = false;
         while let Some(event) = xwin.conn.poll_for_event()? {
             match event {
-                XEvent::Expose(_) => {
-                    app.render(&mut fb, &palette);
-                    xwin.draw(&fb)?;
-                    drew_frame = true;
-                    needs_input_redraw = false;
-                    pending_motion_widget = None;
+                XEvent::Expose(event) => {
+                    // Exposures arrive in batches; `count` is how many more
+                    // follow. Repaint once, on the last one.
+                    if event.count == 0 {
+                        app.render(&mut fb, &palette);
+                        xwin.draw(&fb)?;
+                        drew_frame = true;
+                        needs_input_redraw = false;
+                        pending_motion_widget = None;
+                    }
                 }
                 XEvent::KeyPress(event) => {
                     let input = xwin.keyboard.press(event.detail, event.state.into());

@@ -11,8 +11,8 @@ use x11rb::protocol::shape::{self, ConnectionExt as ShapeConnectionExt};
 use x11rb::protocol::shm::{ConnectionExt as ShmConnectionExt, Seg};
 use x11rb::protocol::xproto::ConnectionExt as XprotoConnectionExt;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ClipOrdering, ConfigureWindowAux, CreateGCAux,
-    CreateWindowAux, EventMask, Gcontext, ImageFormat, PropMode, Rectangle,
+    Atom, AtomEnum, BackingStore, ChangeWindowAttributesAux, ClipOrdering, ConfigureWindowAux,
+    CreateGCAux, CreateWindowAux, EventMask, Gcontext, Gravity, ImageFormat, PropMode, Rectangle,
     SELECTION_NOTIFY_EVENT, SelectionClearEvent, SelectionNotifyEvent, SelectionRequestEvent,
     Time, Window, WindowClass,
 };
@@ -96,7 +96,13 @@ impl XWindow {
             0,
             WindowClass::INPUT_OUTPUT,
             0,
-            &CreateWindowAux::new().event_mask(event_mask),
+            // Backing store + bit gravity ask the server to retain and
+            // restore obscured content itself, so moves don't flash
+            // undefined (black) pixels while our Expose redraw is in flight.
+            &CreateWindowAux::new()
+                .event_mask(event_mask)
+                .backing_store(BackingStore::WHEN_MAPPED)
+                .bit_gravity(Gravity::NORTH_WEST),
         )?;
         conn.change_window_attributes(
             window,
