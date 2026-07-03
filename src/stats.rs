@@ -147,22 +147,38 @@ impl Stats {
         // Back up to this week's Sunday, then walk forward to Saturday.
         let sunday = today - today_wday;
 
+        // Compute the whole pass into locals first, and only commit to
+        // `self` once every file has been read successfully. A transient IO
+        // error partway through the loop must not leave `self.files` and
+        // `self.week.counts` out of sync with each other.
+        let mut new_files: [[DayFile; PRIORITY_COUNT]; DAYS] = std::array::from_fn(|_| {
+            std::array::from_fn(|_| DayFile {
+                path: String::new(),
+                id: None,
+                count: 0,
+            })
+        });
+        let mut new_counts = self.week.counts;
         let mut changed = false;
-        for (col, day_files) in self.files.iter_mut().enumerate() {
+        for (col, day_files) in self.files.iter().enumerate() {
             let (y, m, d) = civil_from_days(sunday + col as i64);
-            for (priority, file) in day_files.iter_mut().enumerate() {
+            for (priority, file) in day_files.iter().enumerate() {
                 let path =
                     crate::toodle::done_file_path(y, m, d, crate::toodle::PRIORITY_TAGS[priority]);
                 let id = file_id(&path);
-                if path == file.path && id == file.id {
-                    continue;
-                }
-                let count = done_line_count(&path)?;
-                changed |= count != file.count;
-                *file = DayFile { path, id, count };
-                self.week.counts[col][priority] = count;
+                let (id, count) = if path == file.path && id == file.id {
+                    (id, file.count)
+                } else {
+                    let count = done_line_count(&path)?;
+                    changed |= count != file.count;
+                    (id, count)
+                };
+                new_counts[col][priority] = count;
+                new_files[col][priority] = DayFile { path, id, count };
             }
         }
+        self.files = new_files;
+        self.week.counts = new_counts;
         Ok(changed)
     }
 
@@ -236,19 +252,35 @@ impl Stats {
     }
 }
 
+/// Set while metadata reads are failing, so the error is logged once per
+/// failure episode (with a recovery note) instead of once per file per
+/// refresh tick — matching fizzle's and gauges' log-once pattern.
+static METADATA_READ_FAILING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// The file's current stat identity, or `None` if it does not exist or its
 /// metadata could not be read.
 fn file_id(path: &str) -> Option<FileId> {
+    use std::sync::atomic::Ordering;
     match fs::metadata(path) {
-        Ok(meta) => Some(FileId {
-            ino: meta.ino(),
-            size: meta.size(),
-            mtime_s: meta.mtime(),
-            mtime_ns: meta.mtime_nsec(),
-        }),
+        Ok(meta) => {
+            if METADATA_READ_FAILING.swap(false, Ordering::Relaxed) {
+                eprintln!("stats: metadata reads recovered");
+            }
+            Some(FileId {
+                ino: meta.ino(),
+                size: meta.size(),
+                mtime_s: meta.mtime(),
+                mtime_ns: meta.mtime_nsec(),
+            })
+        }
         Err(err) if err.kind() == ErrorKind::NotFound => None,
         Err(err) => {
-            eprintln!("stats: failed to read metadata for {path}: {err}");
+            if !METADATA_READ_FAILING.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "stats: failed to read metadata for {path}: {err} (suppressing repeats)"
+                );
+            }
             None
         }
     }

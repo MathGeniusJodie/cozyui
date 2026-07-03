@@ -368,10 +368,7 @@ impl Toodle {
         }
 
         if let Some(line) = checkbox_at(page_x, abs_y)
-            && self
-                .list(self.current_page_ref().section)
-                .item(self.current_page_ref().page, line)
-                .is_checkbox
+            && self.checkbox_clickable(line)
         {
             let PageRef { section, page } = self.current_page_ref();
             let checked = {
@@ -435,10 +432,7 @@ impl Toodle {
             return CursorKind::Hand;
         }
         if let Some(line) = checkbox_at(page_x, abs_y)
-            && self
-                .list(self.current_page_ref().section)
-                .item(self.current_page_ref().page, line)
-                .is_checkbox
+            && self.checkbox_clickable(line)
         {
             return CursorKind::Hand;
         }
@@ -447,6 +441,16 @@ impl Toodle {
         } else {
             CursorKind::Pointer
         }
+    }
+
+    /// Whether `line` on the front page has a clickable checkbox. Requiring
+    /// content (or an existing check) keeps a click on the empty checkbox
+    /// area of a blank line from materializing a phantom `- [x] ` todo (the
+    /// blank-item sentinel is a checkbox, so `is_checkbox` alone passes).
+    fn checkbox_clickable(&self, line: usize) -> bool {
+        let PageRef { section, page } = self.current_page_ref();
+        let item = self.list(section).item(page, line);
+        item.is_checkbox && (item.checked || !item.text.is_empty())
     }
 
     pub(crate) fn hover(&mut self, x: i16, y: i16) -> bool {
@@ -470,10 +474,15 @@ impl Toodle {
 
         let PageRef { section, page } = self.current_page_ref();
         if matches!(edit_key(input), EditKey::Backspace) && self.field.text().is_empty() {
-            if self.sections[section].list_mut().delete_item(page, line)
-                && self.sections[section].save(&todo_file(section))?
-            {
-                self.fix_ui_after_sync(PageRef { section, page });
+            // Deleting goes through the async save path like every other
+            // edit, so a backspace never blocks the UI thread on fsyncs. If a
+            // save is already in flight, begin_save (inside
+            // save_current_section) leaves the section dirty and the debounce
+            // retries once it completes — no rename race, no lost delete.
+            if self.sections[section].list_mut().delete_item(page, line) {
+                self.sections[section].mark_dirty();
+                self.last_edit = Instant::now();
+                self.save_current_section()?;
             }
             self.keep_section_page_visible(PageRef { section, page });
             self.focused_line = Some(line);
@@ -721,7 +730,7 @@ impl Toodle {
                     // Several todos can share text; follow whichever match sits
                     // closest to where focus used to be, preferring the earlier
                     // one on a tie, rather than always snapping to the first.
-                    .min_by_key(|&index| (index as isize - old_index as isize).abs() as usize)
+                    .min_by_key(|&index| (index as isize - old_index as isize).unsigned_abs())
             };
             if let Some(index) = index {
                 // Follow the focused todo to wherever it landed.
@@ -792,8 +801,7 @@ impl Toodle {
         if archived.iter().any(|section| !section.is_empty()) {
             fs::create_dir_all(done_dir())?;
         }
-        let mut staged: [(Option<AtomicWrite>, Option<(String, AtomicWrite)>); SECTION_COUNT] =
-            std::array::from_fn(|_| (None, None));
+        let mut staged: StagedArchiveWrites = std::array::from_fn(|_| (None, None));
         for (section, archived_section) in archived.iter().enumerate() {
             if archived_section.is_empty() {
                 continue;
@@ -1059,7 +1067,7 @@ impl Toodle {
     const fn dice_pos(&self) -> (usize, usize) {
         let page = &self.pages[0];
         let x = PAGE_OFFSET_X + page.width + DICE_GAP;
-        let y = page.height - self.dice.height;
+        let y = page.height.saturating_sub(self.dice.height);
         (x, y)
     }
 
@@ -1131,6 +1139,10 @@ impl crate::widget::Widget for Toodle {
         self.field.end_drag();
     }
 
+    fn hover(&mut self, x: i16, y: i16) -> bool {
+        Self::hover(self, x, y)
+    }
+
     fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
         self.cursor_at(x, y)
     }
@@ -1161,6 +1173,10 @@ struct PageRef {
     section: usize,
     page: usize,
 }
+
+/// Per-section staged archive writes: an optional done-file write and an
+/// optional (serialized text, section-file write) pair.
+type StagedArchiveWrites = [(Option<AtomicWrite>, Option<(String, AtomicWrite)>); SECTION_COUNT];
 
 fn draw_page_image(
     fb: &mut Framebuffer,

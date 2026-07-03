@@ -86,7 +86,9 @@ impl Day {
                 &pixel_fonts::POCO_SPEC,
                 &pixel_fonts::FUSION_PIXEL_8_SPEC,
             )?,
-            date: current_date_parts(),
+            // No previous date to fall back to at startup, so show a clearly
+            // invalid placeholder rather than a plausible-looking wrong date.
+            date: current_date_parts().unwrap_or_else(placeholder_date_parts),
             last_check: Instant::now(),
             calendar_mode: false,
         })
@@ -193,7 +195,11 @@ impl Day {
         }
 
         self.last_check = now;
-        let date = current_date_parts();
+        // On failure, keep showing the previously displayed date rather than
+        // overwrite it with a wrong one.
+        let Some(date) = current_date_parts() else {
+            return false;
+        };
         if date == self.date {
             return false;
         }
@@ -284,8 +290,12 @@ const fn centered_x(text_width: usize) -> usize {
     WIDTH.saturating_sub(text_width) / 2
 }
 
-fn current_date_parts() -> DateParts {
-    let tm = local_time().unwrap_or_default();
+/// Builds today's date parts from the system clock, or `None` if the
+/// underlying `localtime_r` call fails. Callers should keep showing whatever
+/// date they last had rather than fall back to a default (which would render
+/// as the bogus "January 1, 1900").
+fn current_date_parts() -> Option<DateParts> {
+    let tm = local_time()?;
     let year = tm.tm_year + 1900;
     let month_index = tm.tm_mon.clamp(0, 11) as usize;
     let month = MONTHS.get(month_index).unwrap_or(&"JANUARY").to_string();
@@ -294,7 +304,7 @@ fn current_date_parts() -> DateParts {
         .unwrap_or(&"SUNDAY")
         .to_string();
 
-    DateParts {
+    Some(DateParts {
         year: year.to_string(),
         weekday,
         day: tm.tm_mday.clamp(1, 31).to_string(),
@@ -303,6 +313,22 @@ fn current_date_parts() -> DateParts {
         month_index,
         day_num: tm.tm_mday.clamp(1, 31),
         weekday_index: tm.tm_wday.clamp(0, 6),
+    })
+}
+
+/// Used only when the clock can't be read at all and there's no previous date
+/// to fall back to (i.e. at startup). Renders as "?" rather than a plausible
+/// but wrong date like January 1, 1900.
+fn placeholder_date_parts() -> DateParts {
+    DateParts {
+        year: "????".to_string(),
+        weekday: "?".to_string(),
+        day: "?".to_string(),
+        month: "?".to_string(),
+        year_num: 0,
+        month_index: 0,
+        day_num: 1,
+        weekday_index: 0,
     }
 }
 

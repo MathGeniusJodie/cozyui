@@ -76,7 +76,11 @@ pub(crate) fn done_file_path(year: i32, month: i32, day: i32, tag: &str) -> Stri
 
 /// Path of the done-todo file for `section` today, named by date and priority.
 pub(super) fn daily_done_path(section: usize) -> String {
-    let tm = crate::localtime::local_time().unwrap_or_default();
+    let tm = crate::localtime::local_time().unwrap_or_else(|| {
+        // Should never happen; if it does, the misfiled date is at least loud.
+        eprintln!("toodle: local_time failed; filing done todos under 1900-01-01");
+        Default::default()
+    });
     done_file_path(
         tm.tm_year + 1900,
         tm.tm_mon + 1,
@@ -365,6 +369,12 @@ impl SectionStore {
     /// so the write can never be based on stale disk state. Returns whether an
     /// external change altered the list (the caller may need UI fixups).
     pub(super) fn save(&mut self, path: &str) -> Result<bool, Box<dyn Error>> {
+        // A synchronous save while the worker still holds an older snapshot
+        // would race its rename and let complete_save clobber the base with
+        // stale text; callers must wait_for_saves first.
+        if self.saving.is_some() {
+            return Err("synchronous save while a background save is in flight".into());
+        }
         let externally_changed = self.absorb_external(path)?;
         self.list.trim_trailing_blank_items();
         let text = self.list.serialized_text();

@@ -94,7 +94,12 @@ pub struct Wavey {
     dragging_knob: bool,
     last_clock_text: String,
     last_clock_check: Instant,
-    last_volume_check: Instant,
+    /// Receives system-volume readings from the off-thread poller, so the
+    /// blocking `wpctl`/`pactl` calls never run on the UI thread.
+    volume_updates: mpsc::Receiver<u8>,
+    /// One-shot result of the off-thread probe for an mpv left running by a
+    /// previous cozyui instance (blocking IPC, so not done in `load`).
+    resume_probe: mpsc::Receiver<Option<usize>>,
     title_updates: mpsc::Receiver<TitleUpdate>,
     current_title: String,
     /// Stream URL matching `current_title`, cached by the poller thread so a
@@ -107,8 +112,7 @@ pub struct Wavey {
 
 impl Wavey {
     pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
-        let volume = read_system_volume().unwrap_or(50);
-        let mut wavey = Self {
+        let wavey = Self {
             image: crate::assets::wavey(),
             font: BitmapFont::load_with_fallback(
                 &pixel_fonts::POCO_SPEC,
@@ -116,12 +120,14 @@ impl Wavey {
             )?,
             stations: load_stations(&crate::paths::config_file(STATIONS_FILE)),
             station: 0,
-            volume,
+            // Placeholder until the volume poller's first reading arrives.
+            volume: 50,
             clock_24h: false,
             dragging_knob: false,
             last_clock_text: clock_text(false),
             last_clock_check: Instant::now(),
-            last_volume_check: Instant::now(),
+            volume_updates: spawn_volume_poller(),
+            resume_probe: spawn_resume_probe(),
             title_updates: spawn_title_poller(),
             current_title: String::new(),
             current_url: None,
@@ -129,25 +135,7 @@ impl Wavey {
             last_marquee_step: Instant::now(),
             playing: false,
         };
-        wavey.resume_running_player();
         Ok(wavey)
-    }
-
-    /// Reconnect to an mpv left running in the "wavey" abduco session by a
-    /// previous cozyui instance. The station index is stamped onto mpv via
-    /// --script-opts at launch, so the running player itself records which
-    /// station it is; querying any property doubles as the liveness check.
-    fn resume_running_player(&mut self) {
-        let Some(opts) = mpv_property("script-opts") else {
-            return;
-        };
-
-        self.playing = true;
-        if let Some(station) =
-            station_from_script_opts(&opts).filter(|&station| station < self.stations.len())
-        {
-            self.station = station;
-        }
     }
 
     pub(crate) const fn width(&self) -> usize {
@@ -186,14 +174,22 @@ impl Wavey {
             }
         }
 
-        if now.duration_since(self.last_volume_check) >= VOLUME_REFRESH && !self.dragging_knob {
-            self.last_volume_check = now;
-            if let Some(volume) = read_system_volume()
-                && volume != self.volume
-            {
-                self.volume = volume;
-                dirty = true;
+        // Reconnect to an mpv left running by a previous cozyui instance,
+        // once the off-thread probe reports one.
+        if let Ok(station) = self.resume_probe.try_recv() {
+            self.playing = true;
+            if let Some(station) = station.filter(|&station| station < self.stations.len()) {
+                self.station = station;
             }
+            dirty = true;
+        }
+
+        if let Some(volume) = self.volume_updates.try_iter().last()
+            && !self.dragging_knob
+            && volume != self.volume
+        {
+            self.volume = volume;
+            dirty = true;
         }
 
         if let Some(update) = self.title_updates.try_iter().last() {
@@ -787,6 +783,41 @@ fn spawn_title_poller() -> mpsc::Receiver<TitleUpdate> {
     rx
 }
 
+/// Poll the system volume off the UI thread: `read_system_volume` shells out
+/// to `wpctl`/`pactl` synchronously, which must never block a frame. The
+/// first reading is sent immediately (it seeds the placeholder set in `load`);
+/// the thread exits once the receiver is dropped.
+fn spawn_volume_poller() -> mpsc::Receiver<u8> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            if let Some(volume) = read_system_volume()
+                && tx.send(volume).is_err()
+            {
+                return;
+            }
+            thread::sleep(VOLUME_REFRESH);
+        }
+    });
+    rx
+}
+
+/// One-shot, off-thread probe for an mpv left running in the "wavey" abduco
+/// session by a previous cozyui instance (the IPC round trip blocks, so it
+/// must not run in `load`). The station index is stamped onto mpv via
+/// --script-opts at launch, so the running player itself records which
+/// station it is; querying any property doubles as the liveness check. A
+/// message means "mpv is alive", carrying the stamped station if readable.
+fn spawn_resume_probe() -> mpsc::Receiver<Option<usize>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        if let Some(opts) = mpv_property("script-opts") {
+            let _ = tx.send(station_from_script_opts(&opts));
+        }
+    });
+    rx
+}
+
 /// Directory for the mpv socket/FIFO: `$XDG_RUNTIME_DIR` when set (per-user,
 /// mode 0700) so the fixed file names below can't be squatted by another user
 /// in the shared, world-writable `temp_dir()`; falls back to `temp_dir()` when
@@ -1204,9 +1235,14 @@ fn read_pactl_volume() -> Option<u8> {
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
-    text.split_whitespace()
-        .find_map(|word| word.strip_suffix('%')?.parse::<u8>().ok())
-        .map(|volume| volume.min(100))
+    text.split_whitespace().find_map(|word| {
+        // Parse as f64 first: pactl prints fractional percentages (e.g.
+        // "37.00%"), which `u8::parse` rejects outright, and values can
+        // exceed 100 (software-boosted volume), which would previously
+        // overflow `u8::parse` too.
+        let value: f64 = word.strip_suffix('%')?.parse().ok()?;
+        Some(value.round().clamp(0.0, 100.0) as u8)
+    })
 }
 
 fn set_system_volume(volume: u8) {

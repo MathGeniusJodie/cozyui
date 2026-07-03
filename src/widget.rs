@@ -55,6 +55,14 @@ pub(crate) trait Widget {
     fn motion(&mut self, _x: i16, _y: i16) -> bool {
         false
     }
+    /// Pointer-position report for hover effects, regardless of focus:
+    /// widget-local coordinates when this widget is topmost under the
+    /// pointer, `(-1, -1)` otherwise (so a hover can clear when the pointer
+    /// leaves or an overlapping widget is on top). Returns whether a redraw
+    /// is needed.
+    fn hover(&mut self, _x: i16, _y: i16) -> bool {
+        false
+    }
     /// Wheel scroll over the widget; returns whether it was handled.
     fn scroll(&mut self, _x: i16, _y: i16, _direction: ScrollDirection) -> bool {
         false

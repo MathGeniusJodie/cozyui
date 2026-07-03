@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt::Write as _;
 use std::fs;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::openrouter;
@@ -155,6 +156,10 @@ pub struct Fwends {
 struct PendingReply {
     rx: Receiver<Result<String, String>>,
     author: &'static str,
+    // Pid of the in-flight curl request, so erase_chat_history can cancel it
+    // instead of leaving it running for up to REQUEST_TIMEOUT_SECS after the
+    // reply is no longer wanted.
+    pid_slot: openrouter::PidSlot,
 }
 
 impl Fwends {
@@ -340,6 +345,8 @@ impl Fwends {
         match edit_key(input) {
             EditKey::Enter if self.focused => self.send(),
             EditKey::Escape => self.focused = false,
+            // Tab intentionally switches models even mid-edit, mirroring
+            // Right-arrow, rather than doing focus navigation.
             EditKey::Tab | EditKey::Right => self.select_next_model(),
             EditKey::Left => {
                 self.selected_model = self
@@ -433,9 +440,11 @@ impl Fwends {
 
         let text = format!("{}: {text}", user_name());
         let (tx, rx) = mpsc::channel();
+        let pid_slot: openrouter::PidSlot = Arc::new(Mutex::new(None));
         self.pending = Some(PendingReply {
             rx,
             author: model.name,
+            pid_slot: Arc::clone(&pid_slot),
         });
 
         thread::spawn(move || {
@@ -447,14 +456,28 @@ impl Fwends {
             } else {
                 model.id
             };
-            let result =
-                send_openrouter_request(model_id, &system_prompt, &history, &text, thinking);
+            let result = send_openrouter_request(
+                model_id,
+                &system_prompt,
+                &history,
+                &text,
+                thinking,
+                &pid_slot,
+            );
             let _ = tx.send(result);
         });
     }
 
     fn erase_chat_history(&mut self) {
-        self.pending = None;
+        if let Some(pending) = self.pending.take()
+            && let Some(pid) = *pending.pid_slot.lock().unwrap()
+        {
+            // Best-effort: kill the in-flight curl so it doesn't keep running
+            // for up to REQUEST_TIMEOUT_SECS after we've discarded the chat
+            // that wanted its reply. Safe to ignore failure (e.g. it already
+            // exited between the check and the kill).
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
         self.messages = vec![intro_message()];
         self.messages_changed();
     }
@@ -555,11 +578,9 @@ impl Fwends {
                 style.top_cap,
                 style.bottom_cap,
             );
-            for dx in 0..w {
+            for (dx, &sx) in source_x.iter().enumerate() {
                 let px = x + dx;
-                let Some(color) =
-                    palette.resolve_index(image.at(source_x[dx], sy), px, py as usize)
-                else {
+                let Some(color) = palette.resolve_index(image.at(sx, sy), px, py as usize) else {
                     continue;
                 };
                 fb.set_pixel(px, py as usize, color);
@@ -1219,14 +1240,12 @@ fn send_openrouter_request(
     history: &[Message],
     latest_text: &str,
     thinking: bool,
+    pid_slot: &openrouter::PidSlot,
 ) -> Result<String, String> {
-    let response = openrouter::post(&chat_body(
-        model,
-        system_prompt,
-        history,
-        latest_text,
-        thinking,
-    ))?;
+    let response = openrouter::post_cancelable(
+        &chat_body(model, system_prompt, history, latest_text, thinking),
+        Some(pid_slot),
+    )?;
     extract_content(&response).map_err(|err| format!("{err}: {}", compact_error(&response)))
 }
 

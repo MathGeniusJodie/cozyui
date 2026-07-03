@@ -591,6 +591,20 @@ impl XWindow {
         let byte_len = rect.w * rect.h * Framebuffer::BYTES_PER_PIXEL;
         if let Some(index) = self.free_shm_index()? {
             let shm_image = &mut self.shm_images[index];
+            // This slice is only sound while fb and shm_images resize in
+            // lockstep; guard against that invariant breaking silently.
+            debug_assert!(
+                byte_len <= shm_image.mmap.len(),
+                "blit_rect: byte_len {byte_len} exceeds shm mmap len {}",
+                shm_image.mmap.len()
+            );
+            if byte_len > shm_image.mmap.len() {
+                eprintln!(
+                    "blit_rect: byte_len {byte_len} exceeds shm mmap len {}, skipping blit",
+                    shm_image.mmap.len()
+                );
+                return Ok(());
+            }
             fb.present_rect_into(rect, &mut shm_image.mmap[..byte_len], &self.lut);
             self.conn.shm_put_image(
                 self.window,
@@ -778,6 +792,10 @@ impl XWindow {
     /// PropertyNotify carries one chunk (read-and-delete to request the next),
     /// and a zero-length chunk ends the transfer.
     fn read_incr_chunks(&mut self, property: Atom) -> Result<Option<String>, Box<dyn Error>> {
+        // Cap total transfer size so a misbehaving (or malicious) selection
+        // owner streaming chunks continuously can't grow `data` unbounded or
+        // starve the deadline check below (which only runs between drains).
+        const MAX_PASTE_BYTES: usize = 16 * 1024 * 1024;
         self.conn.flush()?;
         let mut data = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -808,6 +826,14 @@ impl XWindow {
                         data.extend(bytes);
                         if data.len() == before {
                             return Ok(String::from_utf8(data).ok());
+                        }
+                        if data.len() > MAX_PASTE_BYTES {
+                            eprintln!("clipboard paste exceeded {MAX_PASTE_BYTES} bytes, aborting");
+                            return Ok(None);
+                        }
+                        if Instant::now() >= deadline {
+                            eprintln!("clipboard paste timed out mid-INCR transfer");
+                            return Ok(None);
                         }
                     }
                     XEvent::SelectionRequest(event) => self.handle_selection_request(event)?,

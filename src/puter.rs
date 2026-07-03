@@ -358,7 +358,7 @@ impl Puter {
                 continue;
             };
             let cell = indexed.cell;
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER | Flags::HIDDEN) {
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::HIDDEN) {
                 continue;
             }
             let x = art_x(SCREEN_SOURCE_X) + point.column.0 * cell_w;
@@ -435,7 +435,7 @@ impl Puter {
             palette_color::CREAM,
         );
         draw_mode_buttons(fb, &self.button_sprites, palette);
-        draw_lights(fb, self.settings, palette);
+        draw_lights(fb, self.settings);
         fb.draw_sprite(
             &self.power_button,
             art_x(POWER_BUTTON_X) as isize,
@@ -526,12 +526,9 @@ impl Puter {
         }
     }
 
-    /// The active terminal, or `None` (with a diagnostic) if it hasn't been
-    /// started yet. Call sites should degrade gracefully rather than panic.
-    fn terminal(&self) -> Option<&Terminal> {
-        if self.terminal.is_none() {
-            eprintln!("puter: terminal not started; ignoring request");
-        }
+    /// The active terminal, or `None` if it hasn't been started yet. Call
+    /// sites degrade gracefully rather than panic.
+    const fn terminal(&self) -> Option<&Terminal> {
         self.terminal.as_ref()
     }
 
@@ -1121,13 +1118,13 @@ fn draw_mode_buttons(fb: &mut Framebuffer, button_sprites: &Sprite, palette: &Pa
     }
 }
 
-fn draw_lights(fb: &mut Framebuffer, settings: DisplaySettings, palette: &Palette) {
+fn draw_lights(fb: &mut Framebuffer, settings: DisplaySettings) {
     for light in LIGHTS {
-        draw_light(fb, light, settings.light_state(light.kind), palette);
+        draw_light(fb, light, settings.light_state(light.kind));
     }
 }
 
-fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState, _palette: &Palette) {
+fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState) {
     let (shell, core, top) = match state {
         LightState::Off => (
             (COLOR_LIGHT_OFF),
@@ -1146,9 +1143,9 @@ fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState, _palette: &
         ),
     };
 
-    fill_source_rect(fb, light.x, light.y, LIGHT_W, LIGHT_H, shell);
-    fill_source_rect(fb, light.x, light.y, LIGHT_W, 1, top);
-    fill_source_rect(fb, light.x + 1, light.y + 2, LIGHT_W - 2, LIGHT_H - 3, core);
+    fb.fill_rect(light.x, light.y, LIGHT_W, LIGHT_H, shell);
+    fb.fill_rect(light.x, light.y, LIGHT_W, 1, top);
+    fb.fill_rect(light.x + 1, light.y + 2, LIGHT_W - 2, LIGHT_H - 3, core);
 }
 
 /// `NamedColor`'s first 16 discriminants (Black..=BrightWhite) line up
@@ -1344,10 +1341,6 @@ const SOURCE_PALETTE_RGB: [(u8, u8, u8); 16] = [
     (23, 67, 75),
     (31, 14, 28),
 ];
-
-fn fill_source_rect(fb: &mut Framebuffer, x: usize, y: usize, w: usize, h: usize, color: Index) {
-    fb.fill_rect(x, y, w, h, color);
-}
 
 fn draw_glyph(
     fb: &mut Framebuffer,

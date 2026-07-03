@@ -73,7 +73,9 @@ impl Config {
     /// the `Label = amount` lines beneath it are that period's monthly
     /// expenses. A period's burn rate applies from its date until the next
     /// period begins, so editing a later period never rewrites past spending.
-    /// `#` starts a comment and blank lines are ignored.
+    /// `#` starts a comment only at the start of the (trimmed) line or when
+    /// preceded by whitespace, so a `#` inside a label (e.g. `Repair (unit
+    /// #4)`) doesn't truncate the line. Blank lines are ignored.
     fn parse(text: &str) -> Result<Self, Box<dyn Error>> {
         let mut periods: Vec<Period> = Vec::new();
         let mut skip_period = false;
@@ -82,7 +84,7 @@ impl Config {
         let mut templates_dir = DEFAULT_TEMPLATES_DIR.to_string();
 
         for raw in text.lines() {
-            let line = raw.split('#').next().unwrap_or("").trim();
+            let line = strip_comment(raw).trim();
             if line.is_empty() {
                 continue;
             }
@@ -123,9 +125,12 @@ impl Config {
             }
             if label.eq_ignore_ascii_case("dollars per svg") {
                 let value = value.trim_matches('$').trim();
-                dollars_per_svg = value
-                    .parse()
-                    .map_err(|_| format!("budgit.conf: bad amount for {label}: {value}"))?;
+                match value.parse() {
+                    Ok(amount) => dollars_per_svg = amount,
+                    Err(_) => {
+                        eprintln!("budgit.conf: skipping bad amount for {label}: {value}");
+                    }
+                }
                 continue;
             }
             let amount: f64 = match value.parse() {
@@ -158,6 +163,29 @@ impl Config {
     }
 }
 
+/// Strips a trailing `#` comment from a line. A `#` only starts a comment at
+/// the start of the (trimmed) line, or when it stands as its own token (set
+/// off by whitespace on both sides, or trailing at end of line). That keeps a
+/// `#` embedded in a title or label (e.g. `Repair (unit #4)`) from being
+/// mistaken for a comment marker, since there it's glued to the digit that
+/// follows rather than set off by whitespace.
+fn strip_comment(raw: &str) -> &str {
+    if raw.trim_start().starts_with('#') {
+        return "";
+    }
+    let bytes = raw.as_bytes();
+    for i in 1..bytes.len() {
+        let preceded_by_space = (bytes[i - 1] as char).is_whitespace();
+        let followed_by_space_or_end = bytes
+            .get(i + 1)
+            .is_none_or(|b| (*b as char).is_whitespace());
+        if bytes[i] == b'#' && preceded_by_space && followed_by_space_or_end {
+            return &raw[..i];
+        }
+    }
+    raw
+}
+
 /// Sums the ledger CSV in `budgit.csv` into the starting balance. Income is
 /// positive, expenses negative. Columns are `title,amount,date`; the header
 /// row, blank lines, and `#` comments are skipped, and the date is optional
@@ -176,7 +204,7 @@ fn load_ledger_balance() -> Result<f64, Box<dyn Error>> {
 fn sum_ledger(text: &str) -> Result<f64, Box<dyn Error>> {
     let mut balance = 0.0;
     for (i, raw) in text.lines().enumerate() {
-        let line = raw.split('#').next().unwrap_or("").trim();
+        let line = strip_comment(raw).trim();
         if line.is_empty() {
             continue;
         }
@@ -225,10 +253,56 @@ fn parse_date(value: &str) -> Result<(i32, i32, i32), Box<dyn Error>> {
             .ok_or_else(|| format!("budgit.conf: bad date: {value}").into())
     };
     let (y, m, d) = (next()?, next()?, next()?);
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    if !(1..=12).contains(&m) || !(1..=days_in_month(y, m)).contains(&d) {
         return Err(format!("budgit.conf: bad date: {value}").into());
     }
     Ok((y, m, d))
+}
+
+/// Number of days in `month` (1-based) of `year`, with the Gregorian
+/// leap-year rule.
+fn days_in_month(year: i32, month: i32) -> i32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        _ => 28,
+    }
+}
+
+/// Whether `year` is a Gregorian leap year.
+fn is_leap_year(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+/// Vertical layout for the widget's sections, shared by [`Budgit::load`]
+/// (which only needs the total `height`) and [`Budgit::render`] (which needs
+/// each section's starting `y`) so the two can't drift apart.
+struct Layout {
+    label_y: usize,
+    balance_y: usize,
+    fraction_y: usize,
+    stats_y: usize,
+    height: usize,
+}
+
+/// Computes the layout given the balance line's ink height (which depends on
+/// the digits actually being drawn; see the two call sites).
+fn compute_layout(label_font: &BitmapFont, stat_font: &BitmapFont, balance_h: usize) -> Layout {
+    let label_y = TOP_GAP;
+    let balance_y = label_y + label_font.cell_h() + LABEL_GAP;
+    let fraction_y = balance_y + balance_h + FRACTION_GAP;
+    let stats_y = fraction_y + label_font.cell_h() + STATS_GAP;
+    // The last stat row contributes its full text height rather than the row
+    // advance, so the widget ends exactly at the bottom of the last row.
+    let height = stats_y + 3 * STAT_ROW_H + label_font.cell_h().max(stat_font.cell_h());
+    Layout {
+        label_y,
+        balance_y,
+        fraction_y,
+        stats_y,
+        height,
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -287,22 +361,14 @@ impl Budgit {
             config.dollars_per_svg,
         );
 
-        // Mirror the vertical layout in `render`: label, balance ink, fraction,
-        // stat rows. The balance line's height comes from digit ink bounds so
-        // it matches what actually gets drawn. The last stat row contributes
-        // its full text height rather than the row advance.
+        // The balance line's height comes from digit ink bounds (a
+        // representative worst case, since the real balance isn't known yet)
+        // so the reserved height matches what `render` actually draws; see
+        // `compute_layout`.
         let balance_h = balance_font
             .text_ink_bounds("-$0123456789,")
             .map_or_else(|| balance_font.cell_h(), |b| b.height());
-        let height = TOP_GAP
-            + label_font.cell_h()
-            + LABEL_GAP
-            + balance_h
-            + FRACTION_GAP
-            + label_font.cell_h()
-            + STATS_GAP
-            + 3 * STAT_ROW_H
-            + label_font.cell_h().max(stat_font.cell_h());
+        let height = compute_layout(&label_font, &stat_font, balance_h).height;
 
         Ok(Self {
             label_font,
@@ -358,24 +424,36 @@ impl Budgit {
     pub(crate) fn render(&self, fb: &mut Framebuffer, _palette: &Palette) {
         let view = self.view.get();
         let muted = palette_color::CREAM;
-        let mut y = TOP_GAP;
 
-        // "MONEY LEFT" label.
-        self.draw_centered(fb, &self.label_font, "MONEY LEFT", y, muted);
-        y += self.label_font.cell_h() + LABEL_GAP;
-
-        // Big balance (dollars) in the calendar's big font, positioned by its
-        // ink bounds so the tall cell box doesn't blow out the layout.
+        // Big balance (dollars) is positioned by its ink bounds so the tall
+        // cell box doesn't blow out the layout; the layout math (shared with
+        // `load`'s height computation) is derived from that ink height.
         let balance_h = self
             .balance_font
             .text_ink_bounds(&view.dollars)
             .map_or_else(|| self.balance_font.cell_h(), |b| b.height());
-        self.draw_centered_tight(fb, &self.balance_font, &view.dollars, y, view.color);
-        y += balance_h + FRACTION_GAP;
+        let layout = compute_layout(&self.label_font, &self.stat_font, balance_h);
+
+        // "MONEY LEFT" label.
+        self.draw_centered(fb, &self.label_font, "MONEY LEFT", layout.label_y, muted);
+
+        // Big balance (dollars) in the calendar's big font.
+        self.draw_centered_tight(
+            fb,
+            &self.balance_font,
+            &view.dollars,
+            layout.balance_y,
+            view.color,
+        );
 
         // Fractional cents underneath, bold and in the balance color.
-        self.draw_centered(fb, &self.label_font, &view.fraction, y, view.color);
-        y += self.label_font.cell_h() + STATS_GAP;
+        self.draw_centered(
+            fb,
+            &self.label_font,
+            &view.fraction,
+            layout.fraction_y,
+            view.color,
+        );
 
         // Stat rows.
         let rows = [
@@ -384,6 +462,7 @@ impl Budgit {
             ("Days left", view.days_left.as_str()),
             ("~ svgs completed", view.svgs_completed.as_str()),
         ];
+        let mut y = layout.stats_y;
         for (label, value) in rows {
             self.draw_row(fb, label, value, y);
             y += STAT_ROW_H;
@@ -710,6 +789,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_allows_hash_inside_label() {
+        let text = "[2026-01-01]\nRepair (unit #4) = 50\n";
+        let cfg = Config::parse(text).unwrap();
+        assert_eq!(
+            cfg.periods[0].expenses[0],
+            ("Repair (unit #4)".to_string(), 50.0)
+        );
+    }
+
+    #[test]
+    fn parse_keeps_default_on_bad_dollars_per_svg() {
+        let text = "dollars per svg = oops\n[2026-01-01]\nRent = 700\n";
+        let cfg = Config::parse(text).unwrap();
+        assert_eq!(cfg.dollars_per_svg, 0.0);
+    }
+
+    #[test]
+    fn parse_date_rejects_invalid_day_for_month() {
+        assert!(parse_date("2026-02-30").is_err());
+        assert!(parse_date("2026-04-31").is_err());
+        assert!(parse_date("2026-02-29").is_err()); // not a leap year
+        assert!(parse_date("2024-02-29").is_ok()); // leap year
+    }
+
+    #[test]
     fn ledger_sums_signed_amounts_and_skips_header_and_comments() {
         let csv = "\
             # a comment\n\
@@ -718,6 +822,12 @@ mod tests {
             Rent,-700,\n\
             Coffee,-4.5\n";
         assert!((sum_ledger(csv).unwrap() - 1295.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ledger_allows_hash_inside_title() {
+        let csv = "Repair (unit #4),-50,2026-01-15\n";
+        assert!((sum_ledger(csv).unwrap() - (-50.0)).abs() < 1e-9);
     }
 
     #[test]

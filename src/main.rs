@@ -21,7 +21,6 @@ mod gauges;
 mod hunger;
 mod localtime;
 mod openrouter;
-#[allow(dead_code)]
 mod paths;
 mod puter;
 mod stats;
@@ -90,6 +89,7 @@ pub(crate) mod app_color {
 
 /// Mouse cursor shapes, drawn from the baked `cursor_*` sprites. `Disabled`
 /// is baked and ready but nothing is disabled yet, so no hit-test maps to it.
+/// Order matters: `Disabled` must stay last for `CURSOR_KIND_COUNT` below.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum CursorKind {
@@ -99,7 +99,7 @@ pub(crate) enum CursorKind {
     Disabled,
 }
 
-pub(crate) const CURSOR_KIND_COUNT: usize = 4;
+pub(crate) const CURSOR_KIND_COUNT: usize = CursorKind::Disabled as usize + 1;
 
 const WHEEL_UP: u8 = 4;
 const WHEEL_DOWN: u8 = 5;
@@ -523,15 +523,22 @@ impl App {
             return Some(self.focus);
         }
 
-        if self.rect_for(WidgetId::Toodle).contains(x, y) {
-            let (x, y) = self.rect_for(WidgetId::Toodle).local(x, y);
-            self.widgets.toodle.hover(x, y).then_some(WidgetId::Toodle)
-        } else {
-            self.widgets
-                .toodle
-                .hover(-1, -1)
-                .then_some(WidgetId::Toodle)
+        // Hover effects: the topmost widget under the pointer gets the local
+        // position; every other widget is told the pointer is elsewhere, so a
+        // stale hover can't stick when the pointer moves onto an overlapping
+        // widget drawn on top.
+        let hovered = self.widget_at(x, y);
+        let mut changed = None;
+        for widget in WidgetId::visible() {
+            let (hover_x, hover_y) = match hovered {
+                Some((hit, local_x, local_y)) if hit == widget => (local_x, local_y),
+                _ => (-1, -1),
+            };
+            if self.widgets.get_mut(widget).hover(hover_x, hover_y) {
+                changed = Some(widget);
+            }
         }
+        changed
     }
 
     fn scroll_up(&mut self, x: i16, y: i16) -> Option<WidgetId> {

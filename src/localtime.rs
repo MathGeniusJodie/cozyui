@@ -54,8 +54,19 @@ pub fn epoch_for_civil(
     tm.tm_min = min;
     tm.tm_sec = sec;
     tm.tm_isdst = -1;
+    // `mktime` returns -1 both on failure and for the one valid instant that
+    // is actually -1 (1969-12-31 23:59:59 UTC in date-only offsets). Clear
+    // errno first so a -1 result can be disambiguated: `mktime` only sets
+    // errno on genuine failure, so if it's still 0 the -1 was the real epoch
+    // value, not an error.
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
     let result = unsafe { libc::mktime(&mut tm) };
-    (result != -1).then_some(result as i64)
+    if result == -1 && unsafe { *libc::__errno_location() } != 0 {
+        return None;
+    }
+    Some(result as i64)
 }
 
 /// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
