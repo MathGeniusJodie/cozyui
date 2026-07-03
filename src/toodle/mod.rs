@@ -294,7 +294,24 @@ impl Toodle {
             }
 
             let layout = Self::line_layout(&self.font, line);
-            let lines = layout.wrap(&todo.text);
+            // Externally-rewritten todo files can hold text that wraps past
+            // the two-line layout; clamp what we draw so it can't spill into
+            // the todo below, and mark the crop with dots ("..." because the
+            // fonts have no '…' glyph), shedding characters until they fit.
+            // Cursor placement and hit-testing still use the full wrap, so
+            // overflow text is reachable but not painted.
+            let mut lines = layout.wrap(&todo.text);
+            if lines.len() > 2 {
+                lines.truncate(2);
+                let dots_width = self.font.text_width("...");
+                let last = &mut lines[1];
+                while !last.is_empty()
+                    && self.font.text_width(last) + dots_width > max_text_width(line)
+                {
+                    last.pop();
+                }
+                last.push_str("...");
+            }
             if self.focused_line == Some(line) {
                 layout.draw_selection_lines(
                     fb,
@@ -1049,6 +1066,10 @@ impl Toodle {
         let todo = self.list(section).item(page, line);
         let layout = Self::line_layout(&self.font, line);
         let (cursor_x, cursor_y) = layout.cursor_position(&todo.text, self.field.cursor());
+        // A cursor sitting in overflow text (wrapped past the two drawn
+        // lines) would place the pencil inside the todo below; pin it to the
+        // second line's row instead.
+        let cursor_y = cursor_y.min(LINE_Y[line] - TEXT_Y_OFFSET + WRAPPED_SECOND_LINE_OFFSET_Y);
         Some((line, cursor_x, cursor_y, layout.wrap(&todo.text).len() > 1))
     }
 
