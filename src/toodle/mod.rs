@@ -820,7 +820,7 @@ impl Toodle {
 
         PageRef {
             section: SECTION_COUNT - 1,
-            page: self.list(SECTION_COUNT - 1).page_count() - 1,
+            page: self.list(SECTION_COUNT - 1).page_count().saturating_sub(1),
         }
     }
 
@@ -835,7 +835,7 @@ impl Toodle {
 
     fn keep_section_page_visible(&mut self, page: PageRef) {
         let section_pages = self.list(page.section).page_count();
-        self.page = self.page_index_for(page.section, page.page.min(section_pages - 1));
+        self.page = self.page_index_for(page.section, page.page.min(section_pages.saturating_sub(1)));
     }
 
     /// Gold-star tally for the current priority: todos already archived into

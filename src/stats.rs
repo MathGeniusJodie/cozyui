@@ -5,6 +5,8 @@
 
 use std::error::Error;
 use std::fs;
+use std::io::ErrorKind;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -49,9 +51,28 @@ struct WeekCounts {
     counts: [[usize; PRIORITY_COUNT]; DAYS],
 }
 
+/// Identity of one done file's on-disk version, so the periodic refresh only
+/// re-reads a file whose stat changed (same scheme as toodle's `DoneCounts`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileId {
+    ino: u64,
+    size: u64,
+    mtime_s: i64,
+    mtime_ns: i64,
+}
+
+/// One day+priority done file with its cached line count.
+struct DayFile {
+    path: String,
+    id: Option<FileId>,
+    count: usize,
+}
+
 pub struct Stats {
     font: BitmapFont,
     week: WeekCounts,
+    /// Count cache, `files[day][priority]`, keyed by path + stat identity.
+    files: [[DayFile; PRIORITY_COUNT]; DAYS],
     last_check: Instant,
     logged_error: bool,
 }
@@ -62,12 +83,23 @@ impl Stats {
             &pixel_fonts::PIXOLDE_SPEC,
             &pixel_fonts::FUSION_PIXEL_8_SPEC,
         )?;
-        Ok(Self {
+        let mut stats = Self {
             font,
-            week: read_week_counts()?,
+            week: WeekCounts {
+                counts: [[0; PRIORITY_COUNT]; DAYS],
+            },
+            files: std::array::from_fn(|_| {
+                std::array::from_fn(|_| DayFile {
+                    path: String::new(),
+                    id: None,
+                    count: 0,
+                })
+            }),
             last_check: Instant::now(),
             logged_error: false,
-        })
+        };
+        stats.refresh_week_counts()?;
+        Ok(stats)
     }
 
     #[allow(clippy::unused_self)]
@@ -92,24 +124,47 @@ impl Stats {
             return false;
         }
         self.last_check = now;
-        let week = match read_week_counts() {
-            Ok(week) => {
+        match self.refresh_week_counts() {
+            Ok(changed) => {
                 self.logged_error = false;
-                week
+                changed
             }
             Err(err) => {
                 if !self.logged_error {
                     eprintln!("stats: failed to read week counts: {err}");
                     self.logged_error = true;
                 }
-                return false;
+                false
             }
-        };
-        if week == self.week {
-            return false;
         }
-        self.week = week;
-        true
+    }
+
+    /// Re-count any done file whose path (midnight/week rollover) or stat
+    /// identity changed; unchanged files keep their cached count without being
+    /// re-read. Returns whether any count changed.
+    fn refresh_week_counts(&mut self) -> Result<bool, Box<dyn Error>> {
+        let tm = crate::localtime::local_time().unwrap_or_default();
+        let today = days_from_civil(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+        let today_wday = i64::from(tm.tm_wday.rem_euclid(7));
+        // Back up to this week's Sunday, then walk forward to Saturday.
+        let sunday = today - today_wday;
+
+        let mut changed = false;
+        for (col, day_files) in self.files.iter_mut().enumerate() {
+            let (y, m, d) = civil_from_days(sunday + col as i64);
+            for (priority, file) in day_files.iter_mut().enumerate() {
+                let path = crate::toodle::done_file_path(y, m, d, PRIORITY_TAGS[priority]);
+                let id = file_id(&path)?;
+                if path == file.path && id == file.id {
+                    continue;
+                }
+                let count = done_line_count(&path)?;
+                changed |= count != file.count;
+                *file = DayFile { path, id, count };
+                self.week.counts[col][priority] = count;
+            }
+        }
+        Ok(changed)
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, _palette: &Palette) {
@@ -151,7 +206,7 @@ impl Stats {
                     }
                     let seg_h = ((count * chart_h) / max_total)
                         .max(MIN_SEGMENT_H)
-                        .min(y - chart_top);
+                        .min(y.saturating_sub(chart_top));
                     if seg_h == 0 {
                         continue;
                     }
@@ -182,25 +237,18 @@ impl Stats {
     }
 }
 
-/// Reads the completed-todo counts for the current week (Sunday through
-/// Saturday) from the done directory.
-fn read_week_counts() -> Result<WeekCounts, Box<dyn Error>> {
-    let tm = crate::localtime::local_time().unwrap_or_default();
-    let today = days_from_civil(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
-    let today_wday = i64::from(tm.tm_wday.rem_euclid(7));
-    // Back up to this week's Sunday, then walk forward to Saturday.
-    let sunday = today - today_wday;
-
-    let mut counts = [[0usize; PRIORITY_COUNT]; DAYS];
-    for (col, day_counts) in counts.iter_mut().enumerate() {
-        let (y, m, d) = civil_from_days(sunday + col as i64);
-        for (priority, tag) in PRIORITY_TAGS.iter().enumerate() {
-            let path = crate::toodle::done_file_path(y, m, d, tag);
-            day_counts[priority] = done_line_count(&path)?;
-        }
+/// The file's current stat identity, or `None` if it does not exist.
+fn file_id(path: &str) -> Result<Option<FileId>, Box<dyn Error>> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(Some(FileId {
+            ino: meta.ino(),
+            size: meta.size(),
+            mtime_s: meta.mtime(),
+            mtime_ns: meta.mtime_nsec(),
+        })),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
     }
-
-    Ok(WeekCounts { counts })
 }
 
 fn done_line_count(path: &str) -> Result<usize, Box<dyn Error>> {

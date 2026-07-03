@@ -223,7 +223,9 @@ impl Puter {
             match BUTTON_TARGETS[pressed].action {
                 ButtonAction::Power => quit = true,
                 ButtonAction::Lock => {
-                    if let Err(err) = std::process::Command::new("xflock4").spawn() {
+                    if let Err(err) =
+                        crate::util::spawn_and_reap(&mut std::process::Command::new("xflock4"))
+                    {
                         eprintln!("puter: failed to spawn xflock4: {err}");
                     }
                 }
@@ -664,7 +666,9 @@ impl GlyphAtlas {
         let cols = self.width / GLYPH_W;
         let sx = (code % cols) * GLYPH_W + x;
         let sy = (code / cols) * GLYPH_H + y;
-        self.pixels[sy * self.width + sx]
+        // `ch` comes from arbitrary pty output; degrade to blank rather than
+        // panic if the baked atlas ever disagrees with the sizing constants.
+        self.pixels.get(sy * self.width + sx).copied().unwrap_or(false)
     }
 }
 
@@ -1346,11 +1350,11 @@ fn button_at(x: i16, y: i16) -> Option<usize> {
 }
 
 const fn art_x(x: usize) -> usize {
-    x - ART_CROP_X
+    x.saturating_sub(ART_CROP_X)
 }
 
 const fn art_y(y: usize) -> usize {
-    y - ART_CROP_Y
+    y.saturating_sub(ART_CROP_Y)
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use xkbcommon::xkb::keysyms;
 
 use super::input::{EditKey, KeyInput, edit_key};
@@ -9,7 +11,8 @@ const UNDO_LIMIT: usize = 100;
 pub struct TextEdit {
     cursor: usize,
     anchor: Option<usize>,
-    undo: Vec<String>,
+    /// Snapshots of (text, cursor) taken before each mutation.
+    undo: VecDeque<(String, usize)>,
     drag_anchor: Option<usize>,
 }
 
@@ -130,14 +133,14 @@ impl TextEdit {
                     };
                 }
                 keysyms::KEY_z | keysyms::KEY_Z => {
-                    let Some(previous) = self.undo.pop() else {
+                    let Some((previous, cursor)) = self.undo.pop_back() else {
                         return TextEditOutcome::Handled {
                             changed: false,
                             copy: None,
                         };
                     };
                     *text = previous;
-                    self.cursor = char_len(text);
+                    self.cursor = cursor.min(char_len(text));
                     self.anchor = None;
                     return TextEditOutcome::Handled {
                         changed: true,
@@ -207,9 +210,9 @@ impl TextEdit {
 
     fn save_undo(&mut self, text: &str) {
         if self.undo.len() == UNDO_LIMIT {
-            self.undo.remove(0);
+            self.undo.pop_front();
         }
-        self.undo.push(text.to_string());
+        self.undo.push_back((text.to_string(), self.cursor));
     }
 
     /// Forget the undo history; called when the buffer is swapped out from

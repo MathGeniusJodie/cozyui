@@ -15,7 +15,11 @@ use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
 /// Where the last-eaten meal time is persisted so an "eaten" acknowledgement
 /// survives restarts.
-const STATE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hunger.txt");
+const STATE_FILE: &str = "hunger.txt";
+
+fn state_path() -> String {
+    crate::paths::config_file(STATE_FILE)
+}
 
 /// Number of apples in the bar; each apple has four bite levels, so the bar
 /// resolves the countdown into `APPLES * 4` steps.
@@ -178,7 +182,7 @@ impl Hunger {
 }
 
 fn load_state() -> Option<f64> {
-    match fs::read_to_string(STATE_PATH) {
+    match fs::read_to_string(state_path()) {
         Ok(text) => match text.trim().parse().ok() {
             Some(value) => Some(value),
             None => {
@@ -191,7 +195,7 @@ fn load_state() -> Option<f64> {
 }
 
 fn save_state(eaten_through: f64) -> Result<(), Box<dyn Error>> {
-    crate::util::atomic_write(STATE_PATH, format!("{eaten_through}\n"))?;
+    crate::util::atomic_write(&state_path(), format!("{eaten_through}\n"))?;
     Ok(())
 }
 

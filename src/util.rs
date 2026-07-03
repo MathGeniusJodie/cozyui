@@ -13,28 +13,36 @@ pub(crate) fn now_secs() -> f64 {
 }
 
 /// xorshift64 state, seeded lazily from the nanosecond clock. Not secure;
-/// good enough for cosmetic randomness, and (unlike reading the clock per
-/// call) consecutive draws are decorrelated.
+/// good enough for cosmetic randomness. The compare-exchange loop keeps the
+/// step atomic, so concurrent draws never return the same value.
 static RNG_STATE: AtomicU64 = AtomicU64::new(0);
 
 fn next_random() -> u64 {
     let mut state = RNG_STATE.load(Ordering::Relaxed);
-    if state == 0 {
-        state = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0x9E37_79B9_7F4A_7C15, |d| d.as_nanos() as u64)
-            | 1;
+    loop {
+        let mut next = if state == 0 {
+            // Seeded nonzero; xorshift never reaches 0 from a nonzero state.
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0x9E37_79B9_7F4A_7C15, |d| d.as_nanos() as u64)
+                | 1
+        } else {
+            state
+        };
+        next ^= next << 13;
+        next ^= next >> 7;
+        next ^= next << 17;
+        match RNG_STATE.compare_exchange_weak(state, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(actual) => state = actual,
+        }
     }
-    state ^= state << 13;
-    state ^= state >> 7;
-    state ^= state << 17;
-    RNG_STATE.store(state, Ordering::Relaxed);
-    state
 }
 
 /// A pseudo-random value in `0.0..1.0`.
 pub(crate) fn random_unit() -> f32 {
-    (next_random() % 10_000) as f32 / 10_000.0
+    // Top 24 bits: the full granularity an f32 mantissa can hold.
+    (next_random() >> 40) as f32 / (1u32 << 24) as f32
 }
 
 /// A pseudo-random index in `0..len` (returns 0 when `len` is 0).
@@ -49,6 +57,16 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn unique_temp_path(path: &str) -> String {
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     format!("{path}.tmp.{}.{seq}", std::process::id())
+}
+
+/// Spawn `command`, reaping the child on a background thread so it never
+/// lingers as a zombie until cozyui exits.
+pub(crate) fn spawn_and_reap(command: &mut std::process::Command) -> io::Result<()> {
+    let mut child = command.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// Single-quote `arg` for safe interpolation into a `sh -c` command line,

@@ -421,8 +421,7 @@ impl Wavey {
             "mpv --input-terminal=no --input-ipc-server=\"$COZYUI_MPV_IPC\" \
              --script-opts={script_opts} {quoted_args}"
         );
-        ensure_player_session();
-        queue_player_command(&command_line);
+        start_player(command_line);
         self.playing = true;
     }
 
@@ -813,6 +812,19 @@ fn player_fifo_path() -> PathBuf {
     std::env::temp_dir().join("cozyui-mpv-wavey.cmd")
 }
 
+/// Session setup plus command hand-off, on a background thread: the `mkfifo`/
+/// `abduco` `.status()` calls block until those children exit, which must not
+/// stall the UI thread (`play_station` runs inside `click`). The ordering
+/// matters — the FIFO and its reader loop must exist before the command write,
+/// or the shell redirection would create a plain file — so both steps share
+/// one thread.
+fn start_player(command_line: String) {
+    std::thread::spawn(move || {
+        ensure_player_session();
+        queue_player_command(&command_line);
+    });
+}
+
 /// One persistent "wavey" abduco session running a shell loop that reads mpv
 /// command lines from the FIFO and runs them. The loop outlives each mpv, so
 /// the session name never has to be recycled and `abduco -a wavey` works from
@@ -1162,17 +1174,20 @@ fn read_pactl_volume() -> Option<u8> {
 }
 
 fn set_system_volume(volume: u8) {
-    if Command::new("wpctl")
-        .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{volume}%")])
-        .spawn()
-        .is_ok()
-    {
-        return;
-    }
+    // Off-thread so the UI never blocks, and waited on so (a) no zombies and
+    // (b) a wpctl that exists but fails at runtime still falls back to pactl.
+    std::thread::spawn(move || {
+        let wpctl = Command::new("wpctl")
+            .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{volume}%")])
+            .status();
+        if wpctl.is_ok_and(|status| status.success()) {
+            return;
+        }
 
-    let _ = Command::new("pactl")
-        .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("{volume}%")])
-        .spawn();
+        let _ = Command::new("pactl")
+            .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("{volume}%")])
+            .status();
+    });
 }
 
 fn clock_text(clock_24h: bool) -> String {

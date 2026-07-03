@@ -148,8 +148,23 @@ impl Fizzle {
 }
 
 /// Read charge percentage and whether the battery is discharging from sysfs.
+/// The device directory is cached after the first hit; the scan only reruns
+/// if reading from the cached device fails (e.g. it was unplugged).
 fn read_battery() -> Option<(u8, bool)> {
+    static DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+    let mut cached = DIR.lock().ok()?;
+    if let Some(dir) = cached.as_ref()
+        && let Some(reading) = read_battery_at(dir)
+    {
+        return Some(reading);
+    }
     let dir = battery_dir()?;
+    let reading = read_battery_at(&dir);
+    *cached = reading.is_some().then_some(dir);
+    reading
+}
+
+fn read_battery_at(dir: &std::path::Path) -> Option<(u8, bool)> {
     let capacity = fs::read_to_string(dir.join("capacity")).ok()?;
     let charge = capacity.trim().parse::<u8>().ok()?.min(100);
     let status = fs::read_to_string(dir.join("status")).unwrap_or_default();

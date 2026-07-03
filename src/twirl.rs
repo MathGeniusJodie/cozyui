@@ -323,23 +323,33 @@ fn play_jingle() {
     play_wav("cozyui-twirl-jingle.wav", synth_jingle());
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn play_wav(name: &str, samples: Vec<i16>) {
-    let path = std::env::temp_dir().join(name);
+    // Unique path per playback: a fixed name in shared /tmp is race-able, and
+    // the file must survive until the player has read it anyway.
+    let Some(base) = std::env::temp_dir().join(name).to_str().map(str::to_owned) else {
+        return;
+    };
+    let path = crate::util::unique_temp_path(&base);
     if fs::write(&path, wav_bytes(&samples)).is_err() {
         return;
     }
 
-    for player in AUDIO_PLAYERS {
-        let mut command = Command::new(player.command);
-        for arg in player.args {
-            command.arg(arg);
+    // Waiting doubles as reaping (no zombies) and tells us when the wav file
+    // can be deleted; blocking is fine off the UI thread.
+    std::thread::spawn(move || {
+        for player in AUDIO_PLAYERS {
+            let mut command = Command::new(player.command);
+            for arg in player.args {
+                command.arg(arg);
+            }
+            command.arg(&path);
+            if let Ok(mut child) = command.spawn() {
+                let _ = child.wait();
+                break;
+            }
         }
-        command.arg(&path);
-        if command.spawn().is_ok() {
-            break;
-        }
-    }
+        let _ = fs::remove_file(&path);
+    });
 }
 
 struct AudioPlayer {
