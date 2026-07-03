@@ -13,7 +13,7 @@ use crate::{CursorKind, Framebuffer, Index, Paint, Palette, Rect, Sprite, Swap, 
 mod store;
 
 use store::{
-    AtomicWrite, DoneCounts, LINE_COUNT, SECTION_COUNT, SectionStore, TodoList,
+    AtomicWrite, DoneCounts, LINE_COUNT, SECTION_COUNT, SaveWorker, SectionStore, TodoList,
     archive_transaction_path, daily_done_path, done_dir, recover_archive_transaction, todo_file,
     toodle_root, write_archive_transaction_marker,
 };
@@ -105,6 +105,9 @@ pub struct Toodle {
     // Per-priority count of todos archived into today's done files, used for
     // the gold star.
     done_counts: DoneCounts,
+    // Runs section saves (write + fsync + rename) off the UI thread; results
+    // are folded back in by maintain().
+    save_worker: SaveWorker,
     page: usize,
     focused_line: Option<usize>,
     // The todo the dice last landed on, as (section, page, line). Drawn crimson
@@ -167,6 +170,7 @@ impl Toodle {
                 SectionStore::load(&todo_file(3))?,
             ],
             done_counts: DoneCounts::load()?,
+            save_worker: SaveWorker::spawn(),
             page: 0,
             focused_line: None,
             highlighted: None,
@@ -583,8 +587,14 @@ impl Toodle {
 
     fn save_current_section(&mut self) -> Result<(), Box<dyn Error>> {
         let current_page = self.current_page_ref();
-        let externally_changed =
-            self.sections[current_page.section].save(&todo_file(current_page.section))?;
+        let section = current_page.section;
+        // Async save: the fsync-heavy disk work happens on the save worker.
+        // If a save for this section is already in flight the section stays
+        // dirty and maintain()'s debounce retries once it completes.
+        let (externally_changed, text) = self.sections[section].begin_save(&todo_file(section))?;
+        if let Some(text) = text {
+            self.save_worker.submit(section, todo_file(section), text);
+        }
         if externally_changed {
             self.fix_ui_after_sync(current_page);
         } else {
@@ -597,6 +607,7 @@ impl Toodle {
     /// backing files and write debounced edits once typing has paused. Call
     /// regularly; returns whether anything visible changed (redraw needed).
     pub(crate) fn maintain(&mut self) -> Result<bool, Box<dyn Error>> {
+        self.drain_save_results();
         let mut changed = false;
         if self.last_poll.elapsed() >= DISK_POLL_INTERVAL {
             self.last_poll = Instant::now();
@@ -605,9 +616,51 @@ impl Toodle {
         if self.sections.iter().any(SectionStore::is_dirty)
             && self.last_edit.elapsed() >= SAVE_DEBOUNCE
         {
-            changed |= self.flush_saves()?;
+            changed |= self.queue_saves()?;
         }
         Ok(changed)
+    }
+
+    /// Fold in finished background saves: success adopts the written version
+    /// as the synced base, failure re-flags the section dirty for a retry.
+    /// Neither changes anything visible.
+    fn drain_save_results(&mut self) {
+        while let Some((section, result)) = self.save_worker.try_result() {
+            self.sections[section].complete_save(result);
+        }
+    }
+
+    /// Block until no background save is in flight; the synchronous flush and
+    /// archive paths must not race the worker's renames.
+    fn wait_for_saves(&mut self) {
+        while self.sections.iter().any(SectionStore::is_saving) {
+            let Some((section, result)) = self.save_worker.wait_result() else {
+                return;
+            };
+            self.sections[section].complete_save(result);
+        }
+    }
+
+    /// Queue an async save for every dirty section without one in flight.
+    /// Each save first absorbs unseen external changes to its file, so this
+    /// can alter the lists; returns whether that happened.
+    fn queue_saves(&mut self) -> Result<bool, Box<dyn Error>> {
+        let current_page = self.current_page_ref();
+        let mut externally_changed = false;
+        for section in 0..SECTION_COUNT {
+            if !self.sections[section].is_dirty() {
+                continue;
+            }
+            let (changed, text) = self.sections[section].begin_save(&todo_file(section))?;
+            externally_changed |= changed;
+            if let Some(text) = text {
+                self.save_worker.submit(section, todo_file(section), text);
+            }
+        }
+        if externally_changed {
+            self.fix_ui_after_sync(current_page);
+        }
+        Ok(externally_changed)
     }
 
     /// One reconciliation pass: fold in external edits to the four todo files
@@ -625,10 +678,12 @@ impl Toodle {
         Ok(lists_changed || counts_changed)
     }
 
-    /// Write all pending edits now (shutdown, structural changes). Each save
-    /// first absorbs any unseen external change to its file, so this can also
-    /// alter the lists; returns whether that happened.
+    /// Write all pending edits now, synchronously (shutdown). Waits out any
+    /// in-flight background saves first. Each save absorbs any unseen
+    /// external change to its file, so this can also alter the lists;
+    /// returns whether that happened.
     pub(crate) fn flush_saves(&mut self) -> Result<bool, Box<dyn Error>> {
+        self.wait_for_saves();
         let current_page = self.current_page_ref();
         let mut externally_changed = false;
         for section in 0..SECTION_COUNT {
@@ -695,6 +750,9 @@ impl Toodle {
     }
 
     fn archive_completed_todos(&mut self) -> Result<(), Box<dyn Error>> {
+        // The transaction below renames section files itself; it must not
+        // interleave with the save worker's renames.
+        self.wait_for_saves();
         // Fold in external edits first so the sweep operates on what is really
         // on disk, not a stale view.
         self.sync_with_disk()?;

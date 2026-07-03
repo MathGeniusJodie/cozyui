@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use unicode_segmentation::UnicodeSegmentation;
 use xkbcommon::xkb::keysyms;
 
 use super::input::{EditKey, KeyInput, edit_key};
@@ -19,6 +20,14 @@ pub struct TextEdit {
 pub enum TextEditOutcome {
     Handled { changed: bool, copy: Option<String> },
     Unhandled,
+}
+
+/// `Handled` with no copy text — the common case.
+const fn handled(changed: bool) -> TextEditOutcome {
+    TextEditOutcome::Handled {
+        changed,
+        copy: None,
+    }
 }
 
 impl TextEdit {
@@ -95,10 +104,7 @@ impl TextEdit {
             match input.sym_raw() {
                 keysyms::KEY_a | keysyms::KEY_A => {
                     self.select_all(text);
-                    return TextEditOutcome::Handled {
-                        changed: false,
-                        copy: None,
-                    };
+                    return handled(false);
                 }
                 keysyms::KEY_c | keysyms::KEY_C => {
                     return TextEditOutcome::Handled {
@@ -108,10 +114,7 @@ impl TextEdit {
                 }
                 keysyms::KEY_x | keysyms::KEY_X => {
                     let Some(copy) = self.selected_text(text) else {
-                        return TextEditOutcome::Handled {
-                            changed: false,
-                            copy: None,
-                        };
+                        return handled(false);
                     };
                     self.save_undo(text);
                     self.delete_selection(text);
@@ -122,32 +125,19 @@ impl TextEdit {
                 }
                 keysyms::KEY_v | keysyms::KEY_V => {
                     let Some(paste) = clipboard_text else {
-                        return TextEditOutcome::Handled {
-                            changed: false,
-                            copy: None,
-                        };
+                        return handled(false);
                     };
-                    let changed = self.insert_text(text, paste, &mut can_replace);
-                    return TextEditOutcome::Handled {
-                        changed,
-                        copy: None,
-                    };
+                    return handled(self.insert_text(text, paste, &mut can_replace));
                 }
                 keysyms::KEY_z | keysyms::KEY_Z => {
                     let Some((previous, cursor)) = self.undo.pop_back() else {
-                        return TextEditOutcome::Handled {
-                            changed: false,
-                            copy: None,
-                        };
+                        return handled(false);
                     };
                     *text = previous;
                     self.cursor = cursor.min(char_len(text));
                     self.anchor = None;
                     self.drag_anchor = None;
-                    return TextEditOutcome::Handled {
-                        changed: true,
-                        copy: None,
-                    };
+                    return handled(true);
                 }
                 _ => {}
             }
@@ -156,47 +146,23 @@ impl TextEdit {
         match input.sym_raw() {
             keysyms::KEY_Left | keysyms::KEY_KP_Left => {
                 self.move_cursor(text, -1, input.shift());
-                TextEditOutcome::Handled {
-                    changed: false,
-                    copy: None,
-                }
+                handled(false)
             }
             keysyms::KEY_Right | keysyms::KEY_KP_Right => {
                 self.move_cursor(text, 1, input.shift());
-                TextEditOutcome::Handled {
-                    changed: false,
-                    copy: None,
-                }
+                handled(false)
             }
             keysyms::KEY_Home | keysyms::KEY_KP_Home => {
                 self.move_to(text, 0, input.shift());
-                TextEditOutcome::Handled {
-                    changed: false,
-                    copy: None,
-                }
+                handled(false)
             }
             keysyms::KEY_End | keysyms::KEY_KP_End => {
                 self.move_to(text, char_len(text), input.shift());
-                TextEditOutcome::Handled {
-                    changed: false,
-                    copy: None,
-                }
+                handled(false)
             }
             _ => match edit_key(input) {
-                EditKey::Insert(ch) => {
-                    let changed = self.insert_char(text, ch, &mut can_replace);
-                    TextEditOutcome::Handled {
-                        changed,
-                        copy: None,
-                    }
-                }
-                EditKey::Backspace => {
-                    let changed = self.backspace(text);
-                    TextEditOutcome::Handled {
-                        changed,
-                        copy: None,
-                    }
-                }
+                EditKey::Insert(ch) => handled(self.insert_char(text, ch, &mut can_replace)),
+                EditKey::Backspace => handled(self.backspace(text)),
                 _ => TextEditOutcome::Unhandled,
             },
         }
@@ -224,25 +190,35 @@ impl TextEdit {
         self.undo.clear();
     }
 
+    /// Step one grapheme cluster left or right (`delta` is ±1), so multi-
+    /// codepoint clusters (flags, ZWJ emoji, combining marks) are never
+    /// entered mid-cluster.
     fn move_cursor(&mut self, text: &str, delta: isize, selecting: bool) {
-        let len = char_len(text);
         let cursor = if delta < 0 {
-            self.cursor.saturating_sub(delta.unsigned_abs())
+            prev_grapheme_start(text, self.cursor)
         } else {
-            (self.cursor + delta as usize).min(len)
+            next_grapheme_end(text, self.cursor)
         };
-        self.move_to(text, cursor, selecting);
+        self.move_impl(text, cursor, selecting, true);
     }
 
     fn move_to(&mut self, text: &str, cursor: usize, selecting: bool) {
+        self.move_impl(text, cursor, selecting, false);
+    }
+
+    fn move_impl(&mut self, text: &str, cursor: usize, selecting: bool, collapse_to_edge: bool) {
         let cursor = cursor.min(char_len(text));
         if selecting {
             self.anchor.get_or_insert(self.cursor);
         } else if let Some((start, end)) = self.selection_range() {
-            self.cursor = if cursor < self.cursor { start } else { end };
             self.anchor = None;
             self.drag_anchor = None;
-            return;
+            // Plain Left/Right on a selection collapses to its edge; absolute
+            // moves (Home/End) still go to their target.
+            if collapse_to_edge {
+                self.cursor = if cursor < self.cursor { start } else { end };
+                return;
+            }
         } else {
             self.anchor = None;
         }
@@ -290,12 +266,15 @@ impl TextEdit {
         // `can_replace` (char/line limits) only gets harder to satisfy as more
         // text is inserted, so the longest accepted prefix can be found with a
         // binary search over prefix length instead of a linear scan that
-        // clones the buffer once per character.
+        // clones the buffer once per character. NOTE: this requires the
+        // predicate to be monotone in prefix length (accepting a prefix
+        // implies accepting every shorter one); a non-monotone predicate
+        // would silently yield a wrong accepted length.
+        let insert_byte = char_to_byte(&base, insert_at);
         let build = |count: usize| -> String {
             let mut candidate = base.clone();
             let prefix: String = filtered_chars[..count].iter().collect();
-            let byte = char_to_byte(&base, insert_at);
-            candidate.insert_str(byte, &prefix);
+            candidate.insert_str(insert_byte, &prefix);
             candidate
         };
 
@@ -343,10 +322,13 @@ impl TextEdit {
         }
 
         self.save_undo(text);
-        let start = char_to_byte(text, self.cursor - 1);
+        // Delete the whole preceding grapheme cluster, not one codepoint of
+        // it — otherwise a flag or ZWJ emoji decays into mojibake.
+        let start_char = prev_grapheme_start(text, self.cursor);
+        let start = char_to_byte(text, start_char);
         let end = char_to_byte(text, self.cursor);
         text.replace_range(start..end, "");
-        self.cursor -= 1;
+        self.cursor = start_char;
         true
     }
 
@@ -365,6 +347,29 @@ pub fn char_len(text: &str) -> usize {
     text.chars().count()
 }
 
+/// Char index of the start of the grapheme cluster strictly before the
+/// cursor (or containing it, when the cursor sits mid-cluster). 0 at the
+/// start of the text.
+fn prev_grapheme_start(text: &str, cursor: usize) -> usize {
+    let byte = char_to_byte(text, cursor);
+    text.grapheme_indices(true)
+        .take_while(|(start, _)| *start < byte)
+        .last()
+        .map_or(0, |(start, _)| text[..start].chars().count())
+}
+
+/// Char index just past the grapheme cluster at (or containing) the cursor.
+/// `char_len(text)` at the end of the text.
+fn next_grapheme_end(text: &str, cursor: usize) -> usize {
+    let byte = char_to_byte(text, cursor);
+    text.grapheme_indices(true)
+        .find(|(start, grapheme)| start + grapheme.len() > byte)
+        .map_or_else(
+            || char_len(text),
+            |(start, grapheme)| text[..start + grapheme.len()].chars().count(),
+        )
+}
+
 pub fn char_to_byte(text: &str, char_index: usize) -> usize {
     text.char_indices()
         .nth(char_index)
@@ -373,4 +378,50 @@ pub fn char_to_byte(text: &str, char_index: usize) -> usize {
 
 pub fn slice_chars(text: &str, start: usize, end: usize) -> &str {
     &text[char_to_byte(text, start)..char_to_byte(text, end)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backspace_deletes_whole_grapheme_cluster() {
+        let mut edit = TextEdit::default();
+        // Flag emoji: two regional-indicator codepoints, one grapheme.
+        let mut text = String::from("a\u{1F1FA}\u{1F1F8}");
+        edit.set_cursor(char_len(&text), &text);
+        assert!(edit.backspace(&mut text));
+        assert_eq!(text, "a");
+        assert_eq!(edit.cursor(), 1);
+    }
+
+    #[test]
+    fn arrows_step_over_grapheme_clusters() {
+        let mut edit = TextEdit::default();
+        // e + combining acute: two codepoints, one grapheme.
+        let text = "e\u{0301}x";
+        edit.set_cursor(0, text);
+        edit.move_cursor(text, 1, false);
+        assert_eq!(edit.cursor(), 2);
+        edit.move_cursor(text, 1, false);
+        assert_eq!(edit.cursor(), 3);
+        edit.move_cursor(text, -1, false);
+        assert_eq!(edit.cursor(), 2);
+        edit.move_cursor(text, -1, false);
+        assert_eq!(edit.cursor(), 0);
+    }
+
+    #[test]
+    fn home_and_end_reach_text_boundaries_with_selection() {
+        let mut edit = TextEdit::default();
+        let text = "hello world";
+        // Select "lo w" (indices 3..7).
+        edit.set_cursor(3, text);
+        edit.move_impl(text, 7, true, false);
+        assert_eq!(edit.selection_range(), Some((3, 7)));
+        // End goes to the end of the text, not the selection edge.
+        edit.move_to(text, char_len(text), false);
+        assert_eq!(edit.cursor(), char_len(text));
+        assert_eq!(edit.selection_range(), None);
+    }
 }

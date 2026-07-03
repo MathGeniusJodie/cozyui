@@ -11,6 +11,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::mpsc;
 
 pub(super) const LINE_COUNT: usize = 6;
 pub(super) const SECTION_COUNT: usize = 4;
@@ -282,6 +283,10 @@ pub(super) struct SectionStore {
     base: String,
     fingerprint: Option<Fingerprint>,
     dirty: bool,
+    /// Text handed to the save worker and not yet confirmed written; while
+    /// set, disk syncing is suspended (the file is about to be replaced by
+    /// our own rename, which must not read as an external change).
+    saving: Option<String>,
 }
 
 impl SectionStore {
@@ -297,6 +302,7 @@ impl SectionStore {
             base,
             fingerprint,
             dirty: false,
+            saving: None,
         })
     }
 
@@ -321,6 +327,13 @@ impl SectionStore {
     /// in-app edits are preserved by a three-way merge and re-flagged dirty so
     /// the merged result is written back. Returns whether the list changed.
     pub(super) fn absorb_external(&mut self, path: &str) -> Result<bool, Box<dyn Error>> {
+        if self.saving.is_some() {
+            // Our own rename is in flight; the fingerprint is stale by
+            // construction. complete_save re-arms syncing with the written
+            // version, and any genuinely external rewrite after that still
+            // mismatches it and is folded in on the next poll.
+            return Ok(false);
+        }
         // Stat before reading: if the file changes again mid-read, the stale
         // fingerprint recorded here guarantees the next poll re-syncs.
         let disk_fingerprint = fingerprint(path)?;
@@ -360,6 +373,50 @@ impl SectionStore {
         self.fingerprint = Some(written);
         self.dirty = false;
         Ok(externally_changed)
+    }
+
+    pub(super) fn is_saving(&self) -> bool {
+        self.saving.is_some()
+    }
+
+    /// Start an asynchronous save: absorb any external change first (so the
+    /// write is never based on stale disk state), then return the serialized
+    /// text for the caller to hand to the [`SaveWorker`]. The text is `None`
+    /// when a save is already in flight — `dirty` is left set so the debounce
+    /// retries after that save completes. Returns whether the absorb altered
+    /// the list (the caller may need UI fixups).
+    pub(super) fn begin_save(
+        &mut self,
+        path: &str,
+    ) -> Result<(bool, Option<String>), Box<dyn Error>> {
+        if self.saving.is_some() {
+            return Ok((false, None));
+        }
+        let externally_changed = self.absorb_external(path)?;
+        self.list.trim_trailing_blank_items();
+        let text = self.list.serialized_text();
+        self.saving = Some(text.clone());
+        self.dirty = false;
+        Ok((externally_changed, Some(text)))
+    }
+
+    /// Fold in the save worker's outcome: on success the written text becomes
+    /// the new synced base; on failure the section is re-flagged dirty so the
+    /// next debounce retries.
+    pub(super) fn complete_save(&mut self, result: Result<Fingerprint, String>) {
+        let Some(text) = self.saving.take() else {
+            return;
+        };
+        match result {
+            Ok(written) => {
+                self.base = text;
+                self.fingerprint = Some(written);
+            }
+            Err(err) => {
+                eprintln!("toodle background save failed: {err}");
+                self.dirty = true;
+            }
+        }
     }
 
     /// Adopt state that was already committed to disk elsewhere (the archive
@@ -514,7 +571,75 @@ impl AtomicWrite {
     pub(super) fn commit(self) -> Result<Fingerprint, Box<dyn Error>> {
         let written = fingerprint(&self.temp_path)?.ok_or("staged temp file vanished")?;
         fs::rename(&self.temp_path, &self.path)?;
+        // The rename itself is not durable until the directory is fsynced;
+        // without this, a crash right after "saved" can silently revert the
+        // file to its previous version on some filesystems.
+        sync_parent_dir(&self.path)?;
         Ok(written)
+    }
+}
+
+/// fsync the directory containing `path`, making a just-committed rename in
+/// it durable.
+fn sync_parent_dir(path: &str) -> io::Result<()> {
+    let parent = Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Background writer running section saves (write, fsync, rename, directory
+/// fsync) off the UI thread; done inline from the input path, the fsyncs
+/// caused visible frame hitches on slow disks. Jobs and results both carry
+/// the section index; the single worker thread keeps saves ordered.
+pub(super) struct SaveWorker {
+    jobs: mpsc::Sender<SaveJob>,
+    results: mpsc::Receiver<(usize, Result<Fingerprint, String>)>,
+}
+
+struct SaveJob {
+    section: usize,
+    path: String,
+    text: String,
+}
+
+impl SaveWorker {
+    pub(super) fn spawn() -> Self {
+        let (jobs, job_rx) = mpsc::channel::<SaveJob>();
+        let (result_tx, results) = mpsc::channel();
+        std::thread::spawn(move || {
+            // Exits when the Toodle (and with it the job sender) is dropped.
+            while let Ok(job) = job_rx.recv() {
+                let result = AtomicWrite::stage(&job.path, job.text.as_bytes())
+                    .and_then(AtomicWrite::commit)
+                    .map_err(|err| err.to_string());
+                if result_tx.send((job.section, result)).is_err() {
+                    return;
+                }
+            }
+        });
+        Self { jobs, results }
+    }
+
+    pub(super) fn submit(&self, section: usize, path: String, text: String) {
+        let _ = self.jobs.send(SaveJob {
+            section,
+            path,
+            text,
+        });
+    }
+
+    pub(super) fn try_result(&self) -> Option<(usize, Result<Fingerprint, String>)> {
+        self.results.try_recv().ok()
+    }
+
+    /// Blocking receive, for the flush paths that must not proceed while a
+    /// save is still in flight.
+    pub(super) fn wait_result(&self) -> Option<(usize, Result<Fingerprint, String>)> {
+        self.results.recv().ok()
     }
 }
 
@@ -556,8 +681,14 @@ pub(super) fn recover_archive_transaction(marker_path: &str) -> Result<(), Box<d
 
     for record in records.iter().map(ArchiveWriteRecord::from_json) {
         let record = record?;
-        if Path::new(&record.temp_path).exists() {
-            fs::rename(&record.temp_path, &record.path)?;
+        // Probe by renaming rather than checking existence first: a missing
+        // temp file (NotFound) just means that write was already committed,
+        // and an exists-then-rename pair could race a concurrent instance
+        // running the same recovery and abort it halfway.
+        match fs::rename(&record.temp_path, &record.path) {
+            Ok(()) => sync_parent_dir(&record.path)?,
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
         }
     }
 

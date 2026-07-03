@@ -813,7 +813,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
-        for widget in WidgetId::ALL {
+        for widget in WidgetId::visible() {
             if app.update_widget(widget)? {
                 app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
                 drew_frame = true;

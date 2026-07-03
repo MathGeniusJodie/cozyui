@@ -6,7 +6,7 @@ use std::fs;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::localtime::days_from_civil;
 use crate::palette_color;
@@ -255,8 +255,7 @@ pub struct Budgit {
     svgs_completed: f64,
     /// Receives fresh estimates from the off-thread ripgrep scanner.
     svg_rx: Receiver<f64>,
-    view: BudgetView,
-    last_check: Instant,
+    view: crate::util::Refresh<BudgetView>,
     /// Widget height, computed from the fonts so it ends exactly at the last
     /// stat row (mirrors the layout math in `render`).
     height: usize,
@@ -314,8 +313,7 @@ impl Budgit {
             dollars_per_svg: config.dollars_per_svg,
             svgs_completed,
             svg_rx,
-            view,
-            last_check: Instant::now(),
+            view: crate::util::Refresh::new(view),
             height,
         })
     }
@@ -335,31 +333,30 @@ impl Budgit {
     }
 
     pub(crate) fn update(&mut self) -> bool {
-        let now = Instant::now();
         // Drain any estimates produced by the background counter, keeping the
         // most recent. This never blocks the render thread.
         while let Ok(completed) = self.svg_rx.try_recv() {
             self.svgs_completed = completed;
         }
-        if now.duration_since(self.last_check) < REFRESH {
-            return false;
-        }
-        self.last_check = now;
-        let view = compute_view(
+        let (start_balance, svgs_completed, dollars_per_svg) = (
             self.start_balance,
-            &self.periods,
-            crate::util::now_secs(),
             self.svgs_completed,
             self.dollars_per_svg,
         );
-        if view == self.view {
-            return false;
-        }
-        self.view = view;
-        true
+        let periods = &self.periods;
+        self.view.refresh(REFRESH, || {
+            compute_view(
+                start_balance,
+                periods,
+                crate::util::now_secs(),
+                svgs_completed,
+                dollars_per_svg,
+            )
+        })
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, _palette: &Palette) {
+        let view = self.view.get();
         let muted = palette_color::CREAM;
         let mut y = TOP_GAP;
 
@@ -371,33 +368,21 @@ impl Budgit {
         // ink bounds so the tall cell box doesn't blow out the layout.
         let balance_h = self
             .balance_font
-            .text_ink_bounds(&self.view.dollars)
+            .text_ink_bounds(&view.dollars)
             .map_or_else(|| self.balance_font.cell_h(), |b| b.height());
-        self.draw_centered_tight(
-            fb,
-            &self.balance_font,
-            &self.view.dollars,
-            y,
-            self.view.color,
-        );
+        self.draw_centered_tight(fb, &self.balance_font, &view.dollars, y, view.color);
         y += balance_h + FRACTION_GAP;
 
         // Fractional cents underneath, bold and in the balance color.
-        self.draw_centered(
-            fb,
-            &self.label_font,
-            &self.view.fraction,
-            y,
-            self.view.color,
-        );
+        self.draw_centered(fb, &self.label_font, &view.fraction, y, view.color);
         y += self.label_font.cell_h() + STATS_GAP;
 
         // Stat rows.
         let rows = [
-            ("Monthly", self.view.monthly.as_str()),
-            ("Daily", self.view.daily.as_str()),
-            ("Days left", self.view.days_left.as_str()),
-            ("~ svgs completed", self.view.svgs_completed.as_str()),
+            ("Monthly", view.monthly.as_str()),
+            ("Daily", view.daily.as_str()),
+            ("Days left", view.days_left.as_str()),
+            ("~ svgs completed", view.svgs_completed.as_str()),
         ];
         for (label, value) in rows {
             self.draw_row(fb, label, value, y);

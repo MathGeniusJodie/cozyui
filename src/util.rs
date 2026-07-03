@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{self, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Seconds since the Unix epoch (0.0 if the clock is before the epoch).
 pub(crate) fn now_secs() -> f64 {
@@ -75,8 +75,61 @@ pub(crate) fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
+/// A value that's recomputed on a fixed interval, only reporting a change
+/// when the recomputed value actually differs from the cached one. Several
+/// widgets poll some external state (clock, sysfs, filesystem) on every
+/// render tick but only want to redraw when the derived view changes; this
+/// factors out the common "elapsed check, recompute, compare, store" shape.
+pub(crate) struct Refresh<T> {
+    last_check: Instant,
+    value: T,
+}
+
+impl<T: PartialEq> Refresh<T> {
+    /// Starts the throttle clock at construction time, so the first
+    /// `refresh` call waits a full `interval` before recomputing — matching
+    /// the existing widgets' first-tick behavior (they all seed `last_check`
+    /// with `Instant::now()` at load time).
+    pub(crate) fn new(value: T) -> Self {
+        Self {
+            last_check: Instant::now(),
+            value,
+        }
+    }
+
+    pub(crate) fn get(&self) -> &T {
+        &self.value
+    }
+
+    /// Overwrites the cached value immediately, bypassing the throttle. For
+    /// updates triggered directly (e.g. a click) that shouldn't wait for the
+    /// next tick.
+    pub(crate) fn set(&mut self, value: T) {
+        self.value = value;
+    }
+
+    /// If `interval` has elapsed since the last check, recomputes via
+    /// `compute` and updates the cached value if it changed. Returns whether
+    /// the value changed; does nothing (and returns `false`) if `interval`
+    /// hasn't elapsed yet.
+    pub(crate) fn refresh(&mut self, interval: Duration, compute: impl FnOnce() -> T) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.last_check) < interval {
+            return false;
+        }
+        self.last_check = now;
+        let value = compute();
+        if value == self.value {
+            return false;
+        }
+        self.value = value;
+        true
+    }
+}
+
 /// Write `contents` to `path` atomically: write to a unique temp file in the
-/// same directory, fsync, then rename over the destination.
+/// same directory, fsync, rename over the destination, then fsync the
+/// directory (without which a crash shortly after can revert the rename).
 pub(crate) fn atomic_write(path: &str, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let temp_path = unique_temp_path(path);
     let result = (|| {
@@ -86,7 +139,14 @@ pub(crate) fn atomic_write(path: &str, contents: impl AsRef<[u8]>) -> io::Result
             .open(&temp_path)?;
         file.write_all(contents.as_ref())?;
         file.sync_all()?;
-        fs::rename(&temp_path, path)
+        fs::rename(&temp_path, path)?;
+        let parent = std::path::Path::new(path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
+        if let Some(parent) = parent {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp_path);

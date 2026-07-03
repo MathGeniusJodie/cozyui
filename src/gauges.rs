@@ -213,7 +213,7 @@ fn draw_needle(fb: &mut Framebuffer, cx: f32, cy: f32, pct: u8) {
 
 fn set_px(fb: &mut Framebuffer, x: f32, y: f32, color: Index) {
     let (x, y) = (x.round() as isize, y.round() as isize);
-    if x >= 0 && y >= 0 {
+    if x >= 0 && y >= 0 && (x as usize) < fb.width && (y as usize) < fb.height {
         fb.set_pixel(x as usize, y as usize, color);
     }
 }

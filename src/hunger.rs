@@ -5,7 +5,7 @@
 
 use std::error::Error;
 use std::fs;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::localtime;
 use crate::palette_color;
@@ -63,8 +63,7 @@ pub struct Hunger {
     /// meal schedule.
     target: f64,
     span: f64,
-    view: HungerView,
-    last_check: Instant,
+    view: crate::util::Refresh<HungerView>,
 }
 
 impl Hunger {
@@ -98,8 +97,7 @@ impl Hunger {
             height,
             target,
             span,
-            view,
-            last_check: Instant::now(),
+            view: crate::util::Refresh::new(view),
         })
     }
 
@@ -117,24 +115,17 @@ impl Hunger {
     }
 
     pub(crate) fn update(&mut self) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.last_check) < REFRESH {
-            return false;
-        }
-        self.last_check = now;
-        let view = render_view(self.target, self.span, crate::util::now_secs());
-        if view == self.view {
-            return false;
-        }
-        self.view = view;
-        true
+        let (target, span) = (self.target, self.span);
+        self.view.refresh(REFRESH, || {
+            render_view(target, span, crate::util::now_secs())
+        })
     }
 
     /// Click to "eat". Only acts when the bar has emptied (the meal is due);
     /// refills the bar to count down to the next meal. Returns whether the
     /// widget changed and needs redrawing.
     pub(crate) fn click(&mut self) -> bool {
-        if !self.view.is_empty() {
+        if !self.view.get().is_empty() {
             return false;
         }
         let now = crate::util::now_secs();
@@ -144,17 +135,18 @@ impl Hunger {
             return false;
         }
         (self.target, self.span) = meal_window(eaten_through);
-        self.view = render_view(self.target, self.span, now);
+        self.view.set(render_view(self.target, self.span, now));
         true
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
+        let view = self.view.get();
         let apple_w = self.apple_100.width;
         for slot in 0..APPLES {
             let x = (slot * (apple_w + APPLE_GAP)) as isize;
             // The leftmost apples are eaten last: slot 0 holds the lowest
             // quarter-units, so the bar drains from right to left.
-            let level = self.view.fill.saturating_sub(slot * 4).min(4);
+            let level = view.fill.saturating_sub(slot * 4).min(4);
             match level {
                 4 => fb.draw_sprite(&self.apple_100, x, 0, palette),
                 3 => fb.draw_sprite(&self.apple_75, x, 0, palette),
@@ -165,18 +157,14 @@ impl Hunger {
             }
         }
 
-        let color = if self.view.is_empty() {
+        let color = if view.is_empty() {
             palette_color::CRIMSON
         } else {
             palette_color::CREAM
         };
-        let text_x = self
-            .width
-            .saturating_sub(self.font.text_width(&self.view.label))
-            / 2;
+        let text_x = self.width.saturating_sub(self.font.text_width(&view.label)) / 2;
         let text_y = self.apple_100.height + BAR_TEXT_GAP;
-        self.font
-            .draw_text(fb, &self.view.label, text_x, text_y, color);
+        self.font.draw_text(fb, &view.label, text_x, text_y, color);
     }
 }
 

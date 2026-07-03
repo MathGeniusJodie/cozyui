@@ -51,6 +51,9 @@ pub struct XWindow {
     /// Per-row opaque runs backing `shape_rects`, so partial redraws only
     /// rescan the dirty rows instead of the whole framebuffer.
     shape_rows: Vec<Vec<(usize, usize)>>,
+    /// Reusable scratch buffer for `row_runs`, so scanning a row that hasn't
+    /// changed doesn't allocate a fresh `Vec` every partial redraw.
+    row_scratch: Vec<(usize, usize)>,
     /// ARGB cursors baked from the `cursor_*` sprites, indexed by
     /// `CursorKind as usize`. `None` when the server lacks RENDER cursors.
     cursors: Option<[Cursor; CURSOR_KIND_COUNT]>,
@@ -168,6 +171,7 @@ impl XWindow {
             shaped,
             shape_rects: None,
             shape_rows: Vec::new(),
+            row_scratch: Vec::new(),
             cursors: None,
             current_cursor: None,
             pending_events: VecDeque::new(),
@@ -353,7 +357,9 @@ impl XWindow {
     /// main loop can sleep instead of polling. Pending requests are flushed
     /// first; without that the server may never produce the reply or event the
     /// wait is for. Spurious early wake-ups (EINTR) are fine — the caller
-    /// re-checks all its event sources every iteration.
+    /// re-checks all its event sources every iteration. A genuine poll error
+    /// (anything other than EINTR/EAGAIN) is propagated instead of silently
+    /// swallowed.
     #[cfg(unix)]
     pub(crate) fn wait_for_event(&self, timeout: Duration) -> Result<(), Box<dyn Error>> {
         self.conn.flush()?;
@@ -363,7 +369,13 @@ impl XWindow {
             revents: 0,
         };
         let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-        unsafe { libc::poll(&raw mut pfd, 1, millis) };
+        let ret = unsafe { libc::poll(&raw mut pfd, 1, millis) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if !matches!(err.raw_os_error(), Some(libc::EINTR) | Some(libc::EAGAIN)) {
+                return Err(err.into());
+            }
+        }
         Ok(())
     }
 
@@ -448,9 +460,9 @@ impl XWindow {
         };
         let mut changed = full;
         for y in y0..y1 {
-            let runs = row_runs(fb.row(y));
-            if runs != self.shape_rows[y] {
-                self.shape_rows[y] = runs;
+            row_runs_into(fb.row(y), &mut self.row_scratch);
+            if self.row_scratch != self.shape_rows[y] {
+                std::mem::swap(&mut self.row_scratch, &mut self.shape_rows[y]);
                 changed = true;
             }
         }
@@ -1016,24 +1028,26 @@ fn rects_equal(a: &[Rectangle], b: &[Rectangle]) -> bool {
             .all(|(p, q)| p.x == q.x && p.y == q.y && p.width == q.width && p.height == q.height)
 }
 
-/// (x, width) spans of non-`TRANSPARENT` pixels in one row.
-fn row_runs(row: &[u8]) -> Vec<(usize, usize)> {
-    let mut runs = Vec::new();
+/// (x, width) spans of non-`TRANSPARENT` pixels in one row, written into
+/// `out` (which is cleared first). Reusing a scratch buffer across calls
+/// avoids allocating a fresh `Vec` for every row scanned on every partial
+/// redraw.
+fn row_runs_into(row: &[u8], out: &mut Vec<(usize, usize)>) {
+    out.clear();
     let mut start = None;
     for (x, &index) in row.iter().enumerate() {
         match (index != TRANSPARENT, start) {
             (true, None) => start = Some(x),
             (false, Some(s)) => {
-                runs.push((s, x - s));
+                out.push((s, x - s));
                 start = None;
             }
             _ => {}
         }
     }
     if let Some(s) = start {
-        runs.push((s, row.len() - s));
+        out.push((s, row.len() - s));
     }
-    runs
 }
 
 fn selection_property(event: SelectionRequestEvent) -> Atom {

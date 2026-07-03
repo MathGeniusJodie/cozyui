@@ -169,14 +169,22 @@ fn emoji_to_ascii(emoji: &str) -> Option<&'static str> {
 
 /// Replace every known emoji in `s` with its ASCII equivalent.
 ///
-/// Walks grapheme clusters when the `unicode-segmentation` feature is
-/// available; falls back to `char` boundaries otherwise. Unknown emoji
-/// pass through unchanged.
+/// Walks `char` boundaries (see `split_graphemes` below), so ZWJ-joined
+/// sequences won't merge into a single lookup key. When a char is replaced,
+/// any variation selector (U+FE0E/U+FE0F) immediately following it is
+/// dropped too, since it's just a presentation hint for the emoji we already
+/// consumed. Unknown emoji pass through unchanged.
 pub fn replace_emoji(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for g in split_graphemes(s) {
+    let mut graphemes = split_graphemes(s).peekable();
+    while let Some(g) = graphemes.next() {
         match EMOJI_TO_ASCII.get(g) {
-            Some(&ascii) => out.push_str(ascii),
+            Some(&ascii) => {
+                out.push_str(ascii);
+                while matches!(graphemes.peek(), Some(&"\u{FE0E}") | Some(&"\u{FE0F}")) {
+                    graphemes.next();
+                }
+            }
             None => out.push_str(g),
         }
     }
@@ -210,6 +218,13 @@ mod tests {
         assert_eq!(replace_emoji("😭😭😭"), "D;D;D;");
         assert_eq!(replace_emoji("hi 🌞"), "hi :sun_with_face:");
         assert_eq!(replace_emoji("plain text"), "plain text");
+    }
+
+    #[test]
+    fn replace_drops_variation_selector() {
+        // "❤️" is U+2764 (mapped) followed by U+FE0F (variation selector);
+        // the selector must not leak into the output.
+        assert_eq!(replace_emoji("❤\u{FE0F}"), "<3");
     }
 
     #[test]

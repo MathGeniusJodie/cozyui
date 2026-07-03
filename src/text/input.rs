@@ -25,7 +25,7 @@ pub struct KeyInput {
 
 impl KeyInput {
     #[cfg(test)]
-    fn new_for_test(sym: u32, text: impl Into<String>, state: u16) -> Self {
+    pub(crate) fn new_for_test(sym: u32, text: impl Into<String>, state: u16) -> Self {
         Self {
             sym: xkb::Keysym::new(sym),
             text: text.into(),
@@ -63,7 +63,7 @@ impl KeyInput {
 
     /// Ctrl+V (plain paste).
     pub(crate) fn is_plain_paste_shortcut(&self) -> bool {
-        self.ctrl() && self.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
+        self.ctrl() && !self.shift() && self.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
     }
 }
 

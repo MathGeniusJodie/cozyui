@@ -138,15 +138,28 @@ mod tests {
         TextLayout::new(font, 0, 0, 6 * 8, LinePlacement::Uniform { line_h: 10 })
     }
 
+    /// Type one letter through the real key-handling path.
+    fn type_letter(field: &mut TextField, layout: &TextLayout, letter: char) {
+        let sym = u32::from(letter as u8);
+        let input = KeyInput::new_for_test(sym, letter.to_string(), 0);
+        field.handle_key(&input, None, layout);
+    }
+
     #[test]
-    fn field_enforces_char_and_line_limits() {
+    fn field_enforces_char_limit_when_typing() {
         let font = font();
         let mut field = TextField::new(3, 1);
         let layout = uniform_layout(&font);
-        field.set_text("ab");
-        field.set_cursor_end();
-        // Typing more than max_chars is rejected by the fits predicate.
-        assert!(field.cursor() <= 3);
+        // Typing up to max_chars lands in the buffer...
+        for letter in ['a', 'b', 'c'] {
+            type_letter(&mut field, &layout, letter);
+        }
+        assert_eq!(field.text(), "abc");
+        assert_eq!(field.cursor(), 3);
+        // ...and anything past it is rejected.
+        type_letter(&mut field, &layout, 'd');
+        assert_eq!(field.text(), "abc");
+        assert_eq!(field.cursor(), 3);
         // Selection round-trips through the layout.
         let (x, y) = field.cursor_position(&layout);
         assert_eq!(field.index_at(&layout, x, y), field.cursor());

@@ -208,7 +208,33 @@ impl Day {
             .map_or_else(|| font.cell_h(), |bounds| bounds.height())
     }
 
+    /// Shared implementation for `draw_centered_tight`/`draw_centered`: center
+    /// `text` horizontally and draw it at `y`. When `tight` is set, both axes
+    /// are centered on the glyphs' actual ink bounds rather than the font's
+    /// nominal advance/cell metrics (skips drawing if `text` has no ink).
     #[allow(clippy::unused_self)]
+    fn draw_centered_impl(
+        &self,
+        fb: &mut Framebuffer,
+        font: &BitmapFont,
+        text: &str,
+        y: usize,
+        color: Index,
+        tight: bool,
+    ) {
+        if tight {
+            let Some(bounds) = font.text_ink_bounds(text) else {
+                return;
+            };
+            let x = centered_x(bounds.width()).saturating_add_signed(-bounds.min_x);
+            let draw_y = y.saturating_sub(bounds.min_y);
+            font.draw_text(fb, text, x, draw_y, color);
+        } else {
+            let x = centered_x(font.text_width(text));
+            font.draw_text(fb, text, x, y, color);
+        }
+    }
+
     fn draw_centered_tight(
         &self,
         fb: &mut Framebuffer,
@@ -217,15 +243,9 @@ impl Day {
         y: usize,
         color: Index,
     ) {
-        let Some(bounds) = font.text_ink_bounds(text) else {
-            return;
-        };
-        let x = centered_x(bounds.width()).saturating_add_signed(-bounds.min_x);
-        let draw_y = y.saturating_sub(bounds.min_y);
-        font.draw_text(fb, text, x, draw_y, color);
+        self.draw_centered_impl(fb, font, text, y, color, true);
     }
 
-    #[allow(clippy::unused_self)]
     fn draw_centered(
         &self,
         fb: &mut Framebuffer,
@@ -234,8 +254,7 @@ impl Day {
         y: usize,
         color: Index,
     ) {
-        let x = centered_x(font.text_width(text));
-        font.draw_text(fb, text, x, y, color);
+        self.draw_centered_impl(fb, font, text, y, color, false);
     }
 
     fn draw_calendar_cell(

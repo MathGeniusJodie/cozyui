@@ -451,6 +451,8 @@ impl Wavey {
         let Ok(mut stream) = UnixStream::connect(mpv_ipc_path()) else {
             return;
         };
+        let _ = stream.set_read_timeout(Some(TITLE_READ_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(TITLE_READ_TIMEOUT));
         let message = serde_json::json!({ "command": command }).to_string();
         if stream.write_all(message.as_bytes()).is_ok() {
             let _ = stream.write_all(b"\n");
@@ -785,19 +787,49 @@ fn spawn_title_poller() -> mpsc::Receiver<TitleUpdate> {
     rx
 }
 
+/// Directory for the mpv socket/FIFO: `$XDG_RUNTIME_DIR` when set (per-user,
+/// mode 0700) so the fixed file names below can't be squatted by another user
+/// in the shared, world-writable `temp_dir()`; falls back to `temp_dir()` when
+/// the runtime dir isn't available (e.g. no session manager).
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 fn mpv_ipc_path() -> PathBuf {
-    // Fixed (non-pid) path on purpose: a restarted cozyui reconnects to an
+    // Fixed (non-pid) name on purpose: a restarted cozyui reconnects to an
     // mpv left running in the persistent player session. kill_player anchors
     // its pkill pattern on this exact path, so it can only ever match the
     // wavey mpv, not unrelated mpv processes.
-    std::env::temp_dir().join("cozyui-mpv-wavey.sock")
+    runtime_dir().join("cozyui-mpv-wavey.sock")
 }
 
 /// SIGKILL the wavey mpv (matched by its IPC socket argument)
 /// so the session loop frees up immediately instead of waiting for a
 /// graceful quit. The pattern anchors on the full socket path, so it can
 /// only match the wavey mpv, never an unrelated mpv.
+///
+/// Non-blocking: `stop_player` runs inside `click` on the UI thread, so the
+/// pkill child is spawned and reaped on a background thread instead of
+/// waited on synchronously. Callers that need the old mpv gone before doing
+/// more work (see `start_player`) should use `kill_player_blocking` instead,
+/// from a thread that isn't the UI thread.
 fn kill_player() {
+    let pattern = format!("mpv .*{}", mpv_ipc_path().display());
+    let _ = crate::util::spawn_and_reap(
+        Command::new("pkill")
+            .args(["-9", "-f", &pattern])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+}
+
+/// Same as `kill_player`, but waits for `pkill` to finish before returning.
+/// Only call this off the UI thread: `start_player` uses it to guarantee the
+/// old mpv is gone before the new one is queued onto the same socket path.
+fn kill_player_blocking() {
     let pattern = format!("mpv .*{}", mpv_ipc_path().display());
     let _ = Command::new("pkill")
         .args(["-9", "-f", &pattern])
@@ -811,17 +843,23 @@ fn station_from_script_opts(opts: &serde_json::Value) -> Option<usize> {
 }
 
 fn player_fifo_path() -> PathBuf {
-    std::env::temp_dir().join("cozyui-mpv-wavey.cmd")
+    // Fixed name, same reasoning as `mpv_ipc_path`: a restarted cozyui must
+    // find the same FIFO to talk to the persistent player session.
+    runtime_dir().join("cozyui-mpv-wavey.cmd")
 }
 
 /// Session setup plus command hand-off, on a background thread: the `mkfifo`/
 /// `abduco` `.status()` calls block until those children exit, which must not
 /// stall the UI thread (`play_station` runs inside `click`). The ordering
-/// matters — the FIFO and its reader loop must exist before the command write,
-/// or the shell redirection would create a plain file — so both steps share
-/// one thread.
+/// matters — the previous mpv must be dead before the FIFO and its reader
+/// loop exist (both would otherwise be racing over the same socket path), and
+/// the FIFO must exist before the command write, or the shell redirection
+/// would create a plain file — so all three steps share one thread.
+/// `play_station` also fires a non-blocking `stop_player` first for prompt UI
+/// state reset, but the authoritative, ordered kill happens here.
 fn start_player(command_line: String) {
     std::thread::spawn(move || {
+        kill_player_blocking();
         ensure_player_session();
         queue_player_command(&command_line);
     });
