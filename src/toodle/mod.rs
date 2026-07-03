@@ -12,12 +12,12 @@ use crate::{CursorKind, Framebuffer, Index, Paint, Palette, Rect, Sprite, Swap, 
 
 mod store;
 
-pub(crate) use store::{PRIORITY_TAGS, done_file_path};
 use store::{
     AtomicWrite, DoneCounts, LINE_COUNT, SECTION_COUNT, SectionStore, TodoList,
     archive_transaction_path, daily_done_path, done_dir, recover_archive_transaction, todo_file,
     toodle_root, write_archive_transaction_marker,
 };
+pub(crate) use store::{PRIORITY_TAGS, done_file_path};
 
 /// toodle's two-line todo layout: a lone line sits on the baseline; once the
 /// text wraps, the first line lifts and the second drops.
@@ -656,8 +656,7 @@ impl Toodle {
                 // spot is as good as another, so stay put.
                 None
             } else {
-                let old_index = current_page.page * LINE_COUNT
-                    + self.focused_line.unwrap_or(0);
+                let old_index = current_page.page * LINE_COUNT + self.focused_line.unwrap_or(0);
                 self.list(current_page.section)
                     .items
                     .iter()
@@ -667,9 +666,7 @@ impl Toodle {
                     // Several todos can share text; follow whichever match sits
                     // closest to where focus used to be, preferring the earlier
                     // one on a tie, rather than always snapping to the first.
-                    .min_by_key(|&index| {
-                        (index as isize - old_index as isize).abs() as usize
-                    })
+                    .min_by_key(|&index| (index as isize - old_index as isize).abs() as usize)
             };
             if let Some(index) = index {
                 // Follow the focused todo to wherever it landed.
@@ -877,7 +874,8 @@ impl Toodle {
 
     fn keep_section_page_visible(&mut self, page: PageRef) {
         let section_pages = self.list(page.section).page_count();
-        self.page = self.page_index_for(page.section, page.page.min(section_pages.saturating_sub(1)));
+        self.page =
+            self.page_index_for(page.section, page.page.min(section_pages.saturating_sub(1)));
     }
 
     /// Gold-star tally for the current priority: todos already archived into

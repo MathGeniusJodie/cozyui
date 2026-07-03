@@ -12,7 +12,6 @@ use crate::palette_color;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
-
 /// Where the last-eaten meal time is persisted so an "eaten" acknowledgement
 /// survives restarts.
 const STATE_FILE: &str = "hunger.txt";
@@ -266,7 +265,10 @@ fn meals_for_day(day_offset: i64) -> impl Iterator<Item = f64> {
 
 /// The earliest meal time strictly after `t`.
 fn next_meal(t: f64) -> f64 {
-    (-2..=2).flat_map(meals_for_day).find(|&m| m > t).unwrap_or(t)
+    (-2..=2)
+        .flat_map(meals_for_day)
+        .find(|&m| m > t)
+        .unwrap_or(t)
 }
 
 /// The latest meal time at or before `t`. Meal times are generated in
@@ -418,4 +420,3 @@ mod tests {
         assert_eq!(after - meal, 3.25 * 3600.0);
     }
 }
-

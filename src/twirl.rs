@@ -264,8 +264,7 @@ impl Twirl {
     }
 
     fn add_random_value(&mut self) -> Result<(), Box<dyn Error>> {
-        let segment =
-            (crate::util::random_unit() * SEGMENT_COUNT as f32) as usize % SEGMENT_COUNT;
+        let segment = (crate::util::random_unit() * SEGMENT_COUNT as f32) as usize % SEGMENT_COUNT;
         self.add_segment_value(segment)
     }
 
@@ -320,7 +319,9 @@ fn load_total(path: &str) -> Result<u64, Box<dyn Error>> {
             let bad_path = format!("{path}.bad");
             match std::fs::rename(path, &bad_path) {
                 Ok(()) => eprintln!("twirl: renamed corrupt {path} to {bad_path}"),
-                Err(err) => eprintln!("twirl: failed to rename corrupt {path} to {bad_path}: {err}"),
+                Err(err) => {
+                    eprintln!("twirl: failed to rename corrupt {path} to {bad_path}: {err}")
+                }
             }
             Ok(0)
         }
@@ -509,4 +510,3 @@ mod tests {
         assert_eq!(segment_value(SEGMENT_COUNT - 1).unwrap(), 100);
     }
 }
-

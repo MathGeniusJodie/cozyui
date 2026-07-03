@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 use crate::{Framebuffer, Index, Palette, Rect, Sprite, TRANSPARENT};
 
-
 /// Tallest the candle ever gets: this many wax slices stacked between the
 /// holder and the flaming top. Charge scales the slice count down to zero.
 const MAX_MIDDLE: usize = 4;

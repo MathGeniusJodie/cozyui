@@ -151,7 +151,8 @@ impl Stats {
         for (col, day_files) in self.files.iter_mut().enumerate() {
             let (y, m, d) = civil_from_days(sunday + col as i64);
             for (priority, file) in day_files.iter_mut().enumerate() {
-                let path = crate::toodle::done_file_path(y, m, d, crate::toodle::PRIORITY_TAGS[priority]);
+                let path =
+                    crate::toodle::done_file_path(y, m, d, crate::toodle::PRIORITY_TAGS[priority]);
                 let id = file_id(&path);
                 if path == file.path && id == file.id {
                     continue;
@@ -308,4 +309,3 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 }
-

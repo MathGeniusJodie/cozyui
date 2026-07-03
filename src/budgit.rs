@@ -186,7 +186,10 @@ fn sum_ledger(text: &str) -> Result<f64, Box<dyn Error>> {
         // title, which may itself contain commas.
         let mut fields: Vec<&str> = line.split(',').collect();
         if fields.len() < 2 {
-            eprintln!("budgit.csv: skipping malformed line {}: too few columns", i + 1);
+            eprintln!(
+                "budgit.csv: skipping malformed line {}: too few columns",
+                i + 1
+            );
             continue;
         }
         if fields.len() >= 3 {
@@ -781,4 +784,3 @@ mod tests {
         assert_eq!(view.days_left, "0d");
     }
 }
-

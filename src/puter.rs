@@ -18,7 +18,9 @@ use xkbcommon::xkb::keysyms;
 
 use crate::palette_color;
 use crate::text::KeyInput;
-use crate::{CursorKind, Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Sprite, TRANSPARENT};
+use crate::{
+    CursorKind, Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Sprite, TRANSPARENT,
+};
 
 const GLYPH_W: usize = 6;
 const GLYPH_H: usize = 12;
@@ -271,10 +273,7 @@ impl Puter {
             let y = y as usize;
             let screen_x = art_x(SCREEN_SOURCE_X);
             let screen_y = art_y(SCREEN_SOURCE_Y);
-            if x >= screen_x
-                && x < screen_x + SCREEN_W
-                && y >= screen_y
-                && y < screen_y + SCREEN_H
+            if x >= screen_x && x < screen_x + SCREEN_W && y >= screen_y && y < screen_y + SCREEN_H
             {
                 return CursorKind::Text;
             }
@@ -418,7 +417,9 @@ impl Puter {
             *self.chrome_cache.borrow_mut() = Some((self.settings, chrome_fb));
         }
         let cache = self.chrome_cache.borrow();
-        let (_, chrome_fb) = cache.as_ref().expect("just populated above if it was stale");
+        let (_, chrome_fb) = cache
+            .as_ref()
+            .expect("just populated above if it was stale");
         fb.blit_from(chrome_fb, 0, 0);
     }
 
@@ -690,7 +691,10 @@ impl GlyphAtlas {
     fn load() -> Self {
         Self {
             width: crate::assets::GLYPH_ATLAS_WIDTH,
-            pixels: crate::assets::GLYPH_ATLAS_MASK.iter().map(|&b| b != 0).collect(),
+            pixels: crate::assets::GLYPH_ATLAS_MASK
+                .iter()
+                .map(|&b| b != 0)
+                .collect(),
         }
     }
 
@@ -705,7 +709,10 @@ impl GlyphAtlas {
         let sy = (code / cols) * GLYPH_H + y;
         // `ch` comes from arbitrary pty output; degrade to blank rather than
         // panic if the baked atlas ever disagrees with the sizing constants.
-        self.pixels.get(sy * self.width + sx).copied().unwrap_or(false)
+        self.pixels
+            .get(sy * self.width + sx)
+            .copied()
+            .unwrap_or(false)
     }
 }
 
@@ -1394,8 +1401,8 @@ fn screen_point(x: i16, y: i16, size: &WindowSize) -> Option<Point> {
 
     let column =
         ((x - screen_x) / size.cell_width as usize).min((size.num_cols as usize).saturating_sub(1));
-    let line =
-        ((y - screen_y) / size.cell_height as usize).min((size.num_lines as usize).saturating_sub(1));
+    let line = ((y - screen_y) / size.cell_height as usize)
+        .min((size.num_lines as usize).saturating_sub(1));
     Some(Point::new(Line(line as i32), Column(column)))
 }
 

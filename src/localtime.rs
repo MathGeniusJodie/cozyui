@@ -18,8 +18,7 @@ pub struct Tm {
 
 /// Current local time broken into fields, or `None` if the conversion fails.
 pub fn local_time() -> Option<Tm> {
-    let seconds =
-        SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as libc::time_t;
+    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as libc::time_t;
     let mut out: libc::tm = unsafe { std::mem::zeroed() };
     let result = unsafe { libc::localtime_r(&raw const seconds, &raw mut out) };
     (!result.is_null()).then_some(Tm {
@@ -39,7 +38,14 @@ pub fn local_time() -> Option<Tm> {
 /// [`Tm::tm_mon`]; an out-of-range `mday` (e.g. day 32) is normalized by
 /// `mktime` by rolling into the next month, which callers can rely on.
 /// `None` if the conversion fails.
-pub fn epoch_for_civil(year: i32, mon: i32, mday: i32, hour: i32, min: i32, sec: i32) -> Option<i64> {
+pub fn epoch_for_civil(
+    year: i32,
+    mon: i32,
+    mday: i32,
+    hour: i32,
+    min: i32,
+    sec: i32,
+) -> Option<i64> {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     tm.tm_year = year - 1900;
     tm.tm_mon = mon;

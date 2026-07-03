@@ -1340,8 +1340,7 @@ mod tests {
     fn bench_message_layouts() {
         use std::time::Instant;
 
-        let palette =
-            crate::assets::palette();
+        let palette = crate::assets::palette();
         let mut fwends = Fwends::load(&palette).unwrap();
         for i in 0..60 {
             fwends.messages.push(Message::user(format!(

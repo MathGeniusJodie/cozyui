@@ -58,9 +58,7 @@ impl KeyInput {
 
     /// Ctrl+Shift+V (terminal-style paste).
     pub(crate) fn is_paste_shortcut(&self) -> bool {
-        self.ctrl()
-            && self.shift()
-            && self.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
+        self.ctrl() && self.shift() && self.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
     }
 
     /// Ctrl+V (plain paste).

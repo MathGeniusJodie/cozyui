@@ -22,7 +22,9 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
 
 use crate::text::input as text_input;
-use crate::{CURSOR_KIND_COUNT, CursorKind, Framebuffer, Palette, Rect, Sprite, TRANSPARENT, assets};
+use crate::{
+    CURSOR_KIND_COUNT, CursorKind, Framebuffer, Palette, Rect, Sprite, TRANSPARENT, assets,
+};
 use pixel_graphics::PresentLut;
 
 pub struct XWindow {
@@ -292,8 +294,13 @@ impl XWindow {
         }
 
         let pixmap = self.conn.generate_id()?;
-        self.conn
-            .create_pixmap(32, pixmap, self.window, sprite.width as u16, sprite.height as u16)?;
+        self.conn.create_pixmap(
+            32,
+            pixmap,
+            self.window,
+            sprite.width as u16,
+            sprite.height as u16,
+        )?;
         let gc = self.conn.generate_id()?;
         self.conn.create_gc(gc, pixmap, &CreateGCAux::new())?;
         self.conn.put_image(
@@ -309,8 +316,12 @@ impl XWindow {
             &data,
         )?;
         let picture = self.conn.generate_id()?;
-        self.conn
-            .render_create_picture(picture, pixmap, format, &render::CreatePictureAux::new())?;
+        self.conn.render_create_picture(
+            picture,
+            pixmap,
+            format,
+            &render::CreatePictureAux::new(),
+        )?;
         let cursor = self.conn.generate_id()?;
         self.conn
             .render_create_cursor(cursor, picture, hot_x as u16, hot_y as u16)?;
@@ -768,7 +779,14 @@ impl XWindow {
                     {
                         let reply = self
                             .conn
-                            .get_property(true, self.window, property, AtomEnum::ANY, 0, u32::MAX / 4)?
+                            .get_property(
+                                true,
+                                self.window,
+                                property,
+                                AtomEnum::ANY,
+                                0,
+                                u32::MAX / 4,
+                            )?
                             .reply()?;
                         self.conn.flush()?;
                         let Some(bytes) = reply.value8() else {

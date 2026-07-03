@@ -331,4 +331,3 @@ mod tests {
         assert_eq!(cpu_percent((2000, 1700), (1000, 850)), None);
     }
 }
-

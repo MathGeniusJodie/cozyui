@@ -410,17 +410,15 @@ impl App {
         let fwends_rect = self.rects[WidgetId::Fwends.index()];
         // Fwends' top is pinned FWENDS_TOP below the window's top edge, so its
         // height must leave that much room or its rect overruns the screen.
-        if !fwends.set_height(screen_h.saturating_sub(FWENDS_TOP)) && fwends_rect.h == fwends.height()
+        if !fwends.set_height(screen_h.saturating_sub(FWENDS_TOP))
+            && fwends_rect.h == fwends.height()
         {
             return false;
         }
 
         self.rects[WidgetId::Fwends.index()].h = fwends.height();
-        self.fbs[WidgetId::Fwends.index()] = Framebuffer::new(
-            fwends_rect.w,
-            fwends.height(),
-            fwends.fill_color(palette),
-        );
+        self.fbs[WidgetId::Fwends.index()] =
+            Framebuffer::new(fwends_rect.w, fwends.height(), fwends.fill_color(palette));
         true
     }
 
@@ -571,12 +569,12 @@ impl App {
             .rev()
             .filter(|widget| widget.is_visible())
             .find_map(|widget| {
-            let rect = self.rect_for(widget);
-            rect.contains(x, y).then(|| {
-                let (x, y) = rect.local(x, y);
-                (widget, x, y)
+                let rect = self.rect_for(widget);
+                rect.contains(x, y).then(|| {
+                    let (x, y) = rect.local(x, y);
+                    (widget, x, y)
+                })
             })
-        })
     }
 
     /// Ticks one widget's periodic update; returns whether it needs a redraw.
@@ -985,4 +983,3 @@ fn sync_window_layout(
     xwin.resize(fb.width, fb.height)?;
     Ok(true)
 }
-

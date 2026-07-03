@@ -406,13 +406,14 @@ impl Wavey {
         if let Err(err) = fs::remove_file(&ipc_path)
             && err.kind() != std::io::ErrorKind::NotFound
         {
-            eprintln!("wavey: failed to remove mpv IPC socket {}: {err}", ipc_path.display());
+            eprintln!(
+                "wavey: failed to remove mpv IPC socket {}: {err}",
+                ipc_path.display()
+            );
         }
         self.current_title.clear();
-        let script_opts = crate::util::shell_quote(&format!(
-            "cozyui-wavey-station={}",
-            self.station
-        ));
+        let script_opts =
+            crate::util::shell_quote(&format!("cozyui-wavey-station={}", self.station));
         let quoted_args = mpv_args
             .split_whitespace()
             .map(crate::util::shell_quote)
