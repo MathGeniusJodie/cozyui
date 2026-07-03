@@ -2,7 +2,7 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use crate::app_color;
-use crate::localtime::local_time;
+use crate::localtime::{self, local_time};
 use crate::palette_color;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT, draw_filled_circle};
@@ -332,23 +332,25 @@ fn placeholder_date_parts() -> DateParts {
     }
 }
 
-const fn first_weekday_of_month(date: &DateParts) -> usize {
-    let weekday = date.weekday_index;
-    let offset = (date.day_num - 1).rem_euclid(7);
-    (weekday - offset).rem_euclid(7) as usize
+/// Weekday index (0 = Sunday) of the 1st of the month, derived from the
+/// shared civil-date math in [`crate::localtime`] rather than a separate
+/// calendar implementation. `days_from_civil` counts from 1970-01-01, a
+/// Thursday (index 4), so weekday = (days_from_civil + 4) mod 7.
+fn first_weekday_of_month(date: &DateParts) -> usize {
+    let days = localtime::days_from_civil(date.year_num, date.month_index as i32 + 1, 1);
+    (days + 4).rem_euclid(7) as usize
 }
 
-const fn days_in_month(year: i32, month_index: usize) -> i32 {
-    match month_index {
-        0 | 2 | 4 | 6 | 7 | 9 | 11 => 31,
-        3 | 5 | 8 | 10 => 30,
-        1 if is_leap_year(year) => 29,
-        _ => 28,
-    }
-}
-
-const fn is_leap_year(year: i32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+/// Number of days in `month_index`'s month (0-based), via the day count
+/// between its 1st and the following month's 1st.
+fn days_in_month(year: i32, month_index: usize) -> i32 {
+    let (next_year, next_month) = if month_index == 11 {
+        (year + 1, 1)
+    } else {
+        (year, month_index as i32 + 2)
+    };
+    (localtime::days_from_civil(next_year, next_month, 1)
+        - localtime::days_from_civil(year, month_index as i32 + 1, 1)) as i32
 }
 
 const fn short_month_name(month_index: usize) -> &'static str {

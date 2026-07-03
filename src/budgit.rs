@@ -4,8 +4,7 @@
 use std::error::Error;
 use std::fs;
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::localtime::days_from_civil;
@@ -577,24 +576,18 @@ fn compute_view(
 /// also keeps the receiver-dropped exit path exercised. The thread exits when
 /// the receiver is dropped.
 fn spawn_svg_counter(done_dir: String, templates_dir: String) -> Receiver<f64> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let avg = avg_paths_per_svg(&done_dir);
-        let mut stamp = None;
-        let mut completed = 0.0;
-        loop {
-            let current = svg_dir_stamp(&templates_dir);
-            if stamp != Some(current) {
-                stamp = Some(current);
-                completed = compute_svgs_completed(&templates_dir, avg);
-            }
-            if tx.send(completed).is_err() {
-                break;
-            }
-            thread::sleep(SVG_REFRESH);
+    let mut avg = None;
+    let mut stamp = None;
+    let mut completed = 0.0;
+    crate::util::spawn_poller(SVG_REFRESH, move || {
+        let avg = *avg.get_or_insert_with(|| avg_paths_per_svg(&done_dir));
+        let current = svg_dir_stamp(&templates_dir);
+        if stamp != Some(current) {
+            stamp = Some(current);
+            completed = compute_svgs_completed(&templates_dir, avg);
         }
-    });
-    rx
+        Some(completed)
+    })
 }
 
 /// Change stamp for the templates folder: the `.svg` count and newest mtime at

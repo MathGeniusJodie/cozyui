@@ -17,7 +17,7 @@ pub(super) const LINE_COUNT: usize = 6;
 pub(super) const SECTION_COUNT: usize = 4;
 /// Cap on how many pages a single category can show; extra overflow pages are
 /// simply not navigable.
-pub(super) const MAX_PAGES_PER_SECTION: usize = 4;
+pub(super) const MAX_PAGES_PER_SECTION: usize = 3;
 
 /// Config file naming the directory that holds every toodle markdown file. The
 /// first non-blank, non-comment line is the root path (`~` expands to `$HOME`).

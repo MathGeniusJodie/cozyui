@@ -773,20 +773,13 @@ struct TitleUpdate {
 /// the UI thread; a wedged mpv then can't stall rendering. The thread exits
 /// once the receiver is dropped.
 fn spawn_title_poller() -> mpsc::Receiver<TitleUpdate> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        loop {
-            let title = current_mpv_title().unwrap_or_default();
-            let url = (!title.is_empty())
-                .then(|| mpv_property("path").as_ref().and_then(json_string))
-                .flatten();
-            if tx.send(TitleUpdate { title, url }).is_err() {
-                return;
-            }
-            thread::sleep(TITLE_REFRESH);
-        }
-    });
-    rx
+    crate::util::spawn_poller(TITLE_REFRESH, || {
+        let title = current_mpv_title().unwrap_or_default();
+        let url = (!title.is_empty())
+            .then(|| mpv_property("path").as_ref().and_then(json_string))
+            .flatten();
+        Some(TitleUpdate { title, url })
+    })
 }
 
 /// Poll the system volume off the UI thread: `read_system_volume` shells out
@@ -794,18 +787,7 @@ fn spawn_title_poller() -> mpsc::Receiver<TitleUpdate> {
 /// first reading is sent immediately (it seeds the placeholder set in `load`);
 /// the thread exits once the receiver is dropped.
 fn spawn_volume_poller() -> mpsc::Receiver<u8> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        loop {
-            if let Some(volume) = read_system_volume()
-                && tx.send(volume).is_err()
-            {
-                return;
-            }
-            thread::sleep(VOLUME_REFRESH);
-        }
-    });
-    rx
+    crate::util::spawn_poller(VOLUME_REFRESH, read_system_volume)
 }
 
 /// One-shot, off-thread probe for an mpv left running in the "wavey" abduco

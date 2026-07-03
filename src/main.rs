@@ -848,17 +848,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut needs_input_redraw = false;
         while let Some(event) = xwin.poll_event()? {
             match event {
-                XEvent::Expose(event) => {
-                    // Exposures arrive in batches; `count` is how many more
-                    // follow. Repaint once, on the last one.
-                    if event.count == 0 {
-                        app.render(&mut fb, &palette);
-                        xwin.draw(&fb)?;
-                        drew_frame = true;
-                        needs_input_redraw = false;
-                        pending_motion_widget = None;
-                    }
-                }
                 XEvent::KeyPress(event) => {
                     let input = xwin.keyboard.press(event.detail, event.state.into());
                     let paste_text = if app.wants_clipboard(&input) {

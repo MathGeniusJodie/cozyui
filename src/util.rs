@@ -3,6 +3,7 @@
 use std::fs;
 use std::io::{self, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Directory for per-user runtime files (sockets, request bodies):
@@ -137,6 +138,29 @@ impl<T: PartialEq> Refresh<T> {
         self.value = value;
         true
     }
+}
+
+/// Spawns a background thread that repeatedly calls `poll` and sends any
+/// `Some` result down the returned channel, sleeping `interval` after each
+/// call (so a slow `poll` never overlaps the next). Ticks where `poll`
+/// returns `None` are skipped (no send) but still wait out the interval.
+/// The thread exits once the receiver is dropped.
+pub(crate) fn spawn_poller<T: Send + 'static>(
+    interval: Duration,
+    mut poll: impl FnMut() -> Option<T> + Send + 'static,
+) -> mpsc::Receiver<T> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        loop {
+            if let Some(value) = poll()
+                && tx.send(value).is_err()
+            {
+                break;
+            }
+            std::thread::sleep(interval);
+        }
+    });
+    rx
 }
 
 /// Write `contents` to `path` atomically: write to a unique temp file in the

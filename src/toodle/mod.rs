@@ -29,7 +29,7 @@ const TODO_LINE_PLACEMENT: LinePlacement = LinePlacement::Split {
 
 const CHECK_VARIANTS: usize = 4;
 
-const VISIBLE_PAGE_COUNT: usize = 4;
+const VISIBLE_PAGE_COUNT: usize = 3;
 const PAGE_OFFSET_X: usize = 14;
 /// Gap between the front page's right edge and the dice button.
 const DICE_GAP: usize = 8;
@@ -146,7 +146,6 @@ impl Toodle {
             pages: [
                 crate::assets::toodle_top(),
                 crate::assets::toodle_2nd(),
-                crate::assets::toodle_page(),
                 crate::assets::toodle_page(),
             ],
             checkboxes: crate::assets::checkboxes(),

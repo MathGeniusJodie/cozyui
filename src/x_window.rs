@@ -15,7 +15,7 @@ use x11rb::protocol::xproto::ConnectionExt as XprotoConnectionExt;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, BackingStore, ChangeWindowAttributesAux, ClipOrdering, ConfigureWindowAux,
     CreateGCAux, CreateWindowAux, Cursor, EventMask, Gcontext, Gravity, ImageFormat, ImageOrder,
-    PropMode, Property, Rectangle, SELECTION_NOTIFY_EVENT, SelectionClearEvent,
+    Pixmap, PropMode, Property, Rectangle, SELECTION_NOTIFY_EVENT, SelectionClearEvent,
     SelectionNotifyEvent, SelectionRequestEvent, Timestamp, Window, WindowClass,
 };
 use x11rb::wrapper::ConnectionExt as _;
@@ -32,6 +32,12 @@ pub struct XWindow {
     pub(crate) window: Window,
     gc: Gcontext,
     depth: u8,
+    /// Server-side copy of the last presented frame, installed as the
+    /// window's `background_pixmap`: the server repaints exposed regions
+    /// from it by itself, so a WM dragging the window around (the splitwm
+    /// dock rides the canvas edge) costs us no exposure traffic, no
+    /// re-render and no re-upload per move.
+    back_pix: Pixmap,
     pub(crate) keyboard: text_input::Keyboard,
     upload_buffer: Vec<u8>,
     /// Two SHM segments used alternately: while the server is still reading
@@ -113,8 +119,11 @@ impl XWindow {
         let depth = screen.root_depth;
         let window = conn.generate_id()?;
         let gc = conn.generate_id()?;
-        let event_mask = EventMask::EXPOSURE
-            | EventMask::KEY_PRESS
+        // No EXPOSURE: exposed regions repaint server-side from the
+        // window's background pixmap (`back_pix`), so exposure events would
+        // only be wakeups with nothing to do — at their worst during a WM
+        // window drag, which exposes per pointer motion.
+        let event_mask = EventMask::KEY_PRESS
             | EventMask::KEY_RELEASE
             | EventMask::BUTTON_PRESS
             | EventMask::BUTTON_RELEASE
@@ -134,9 +143,11 @@ impl XWindow {
             0,
             WindowClass::INPUT_OUTPUT,
             0,
-            // Backing store + bit gravity ask the server to retain and
-            // restore obscured content itself, so moves don't flash
-            // undefined (black) pixels while our Expose redraw is in flight.
+            // Backing store + bit gravity are best-effort hints (Xorg
+            // ignores backing store by default); the background pixmap
+            // below is what actually keeps moves/exposes flash-free. They
+            // still cover the brief window between a WM-initiated resize
+            // and `resize_backing` recreating the pixmap.
             &CreateWindowAux::new()
                 .event_mask(event_mask)
                 .backing_store(BackingStore::WHEN_MAPPED)
@@ -147,6 +158,10 @@ impl XWindow {
             &ChangeWindowAttributesAux::new().event_mask(event_mask),
         )?;
         conn.create_gc(gc, window, &CreateGCAux::new())?;
+        // The GC's default foreground (0 = black) matches the undefined
+        // pixels a fresh window shows anyway, so the pixmap starts out
+        // indistinguishable from the pre-first-draw window today.
+        let back_pix = Self::create_back_pixmap(&conn, window, gc, depth, width, height)?;
 
         conn.change_property8(
             PropMode::REPLACE,
@@ -166,6 +181,7 @@ impl XWindow {
             window,
             gc,
             depth,
+            back_pix,
             keyboard,
             upload_buffer: Vec::new(),
             shm_images,
@@ -495,6 +511,37 @@ impl XWindow {
         Ok(())
     }
 
+    /// Create a window-sized pixmap, black-filled so it never shows stale
+    /// bits, and install it as the window's background. The server paints
+    /// exposed regions from it without our involvement (see `back_pix`).
+    fn create_back_pixmap(
+        conn: &XCBConnection,
+        window: Window,
+        gc: Gcontext,
+        depth: u8,
+        width: usize,
+        height: usize,
+    ) -> Result<Pixmap, Box<dyn Error>> {
+        let (w, h) = (width.max(1) as u16, height.max(1) as u16);
+        let pixmap = conn.generate_id()?;
+        conn.create_pixmap(depth, pixmap, window, w, h)?;
+        conn.poly_fill_rectangle(
+            pixmap,
+            gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: w,
+                height: h,
+            }],
+        )?;
+        conn.change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new().background_pixmap(pixmap),
+        )?;
+        Ok(pixmap)
+    }
+
     /// Full barrier: round-trip to the server, after which every outstanding
     /// `shm_put_image` has been executed and its completion event is queued.
     /// Draining the queue (rather than force-clearing `busy`) consumes those
@@ -558,9 +605,9 @@ impl XWindow {
         self.resize_backing(width, height)
     }
 
-    /// Recreates the SHM backing buffer to match a size the window already
-    /// has (e.g. reported by a `ConfigureNotify` from the WM), without
-    /// requesting a new geometry from the server.
+    /// Recreates the SHM backing buffer and background pixmap to match a
+    /// size the window already has (e.g. reported by a `ConfigureNotify`
+    /// from the WM), without requesting a new geometry from the server.
     pub(crate) fn resize_backing(
         &mut self,
         width: usize,
@@ -574,6 +621,11 @@ impl XWindow {
             self.conn.shm_detach(shm_image.seg)?;
         }
         self.shm_images = Self::open_shm_images_logged(&self.conn, width, height);
+        // A background pixmap smaller than the window would tile; replace it
+        // before the caller's full-frame draw fills the new one.
+        self.conn.free_pixmap(self.back_pix)?;
+        self.back_pix =
+            Self::create_back_pixmap(&self.conn, self.window, self.gc, self.depth, width, height)?;
         self.conn.flush()?;
         Ok(())
     }
@@ -592,9 +644,12 @@ impl XWindow {
         self.blit_rect(fb, rect)
     }
 
-    /// Present `rect` of the framebuffer to the window, via SHM when
-    /// available, else a `put_image` upload. Callers must pass a rect that
-    /// lies within `fb`; `draw_rect` clips before getting here.
+    /// Present `rect` of the framebuffer, via SHM when available, else a
+    /// `put_image` upload. Pixels land in `back_pix` (the window's
+    /// background), and a `clear_area` tells the server to show that region
+    /// — the copy the server keeps is what it also repaints exposes from.
+    /// Callers must pass a rect that lies within `fb`; `draw_rect` clips
+    /// before getting here.
     fn blit_rect(&mut self, fb: &Framebuffer, rect: Rect) -> Result<(), Box<dyn Error>> {
         let byte_len = rect.w * rect.h * Framebuffer::BYTES_PER_PIXEL;
         if let Some(index) = self.free_shm_index()? {
@@ -615,7 +670,7 @@ impl XWindow {
             }
             fb.present_rect_into(rect, &mut shm_image.mmap[..byte_len], &self.lut);
             self.conn.shm_put_image(
-                self.window,
+                self.back_pix,
                 self.gc,
                 rect.w as u16,
                 rect.h as u16,
@@ -634,7 +689,7 @@ impl XWindow {
                 0,
             )?;
             shm_image.busy = true;
-            self.conn.flush()?;
+            self.show_background(rect)?;
             return Ok(());
         }
 
@@ -642,7 +697,7 @@ impl XWindow {
         fb.present_rect_into(rect, &mut self.upload_buffer, &self.lut);
         self.conn.put_image(
             ImageFormat::Z_PIXMAP,
-            self.window,
+            self.back_pix,
             self.gc,
             rect.w as u16,
             rect.h as u16,
@@ -651,6 +706,21 @@ impl XWindow {
             0,
             self.depth,
             &self.upload_buffer,
+        )?;
+        self.show_background(rect)?;
+        Ok(())
+    }
+
+    /// Repaint `rect` of the window from its background pixmap (a no-expose
+    /// `ClearArea`) — how a freshly blitted region becomes visible.
+    fn show_background(&self, rect: Rect) -> Result<(), Box<dyn Error>> {
+        self.conn.clear_area(
+            false,
+            self.window,
+            rect.x as i16,
+            rect.y as i16,
+            rect.w as u16,
+            rect.h as u16,
         )?;
         self.conn.flush()?;
         Ok(())

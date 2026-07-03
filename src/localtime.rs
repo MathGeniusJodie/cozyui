@@ -6,8 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// never touch the platform struct (whose layout varies across libcs).
 #[derive(Default)]
 pub struct Tm {
-    #[allow(dead_code)] // kept for completeness; not every caller needs seconds
-    pub(crate) tm_sec: i32,
     pub(crate) tm_min: i32,
     pub(crate) tm_hour: i32,
     pub(crate) tm_mday: i32,
@@ -22,7 +20,6 @@ pub fn local_time() -> Option<Tm> {
     let mut out: libc::tm = unsafe { std::mem::zeroed() };
     let result = unsafe { libc::localtime_r(&raw const seconds, &raw mut out) };
     (!result.is_null()).then_some(Tm {
-        tm_sec: out.tm_sec,
         tm_min: out.tm_min,
         tm_hour: out.tm_hour,
         tm_mday: out.tm_mday,
