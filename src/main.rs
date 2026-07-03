@@ -6,10 +6,8 @@
 use std::error::Error;
 use std::time::Duration;
 
-use x11rb::connection::Connection;
 use x11rb::protocol::Event as XEvent;
 use x11rb::protocol::xproto::ButtonIndex;
-use xkbcommon::xkb::keysyms;
 
 mod assets;
 #[cfg(test)]
@@ -30,12 +28,15 @@ mod stats;
 mod text;
 mod toodle;
 mod twirl;
+mod util;
 mod wavey;
+mod widget;
 mod x_window;
 
 pub(crate) use pixel_graphics::{
     Framebuffer, Index, Paint, Palette, Rect, Rgb, Sprite, Swap, TRANSPARENT,
 };
+use widget::{ScrollDirection, Widget};
 use x_window::XWindow;
 
 #[allow(dead_code)]
@@ -173,6 +174,29 @@ impl WidgetId {
 }
 
 struct App {
+    widgets: Widgets,
+    desk: Sprite,
+    // Indexed by WidgetId::index().
+    fbs: [Framebuffer; WIDGET_COUNT],
+    rects: [Rect; WIDGET_COUNT],
+    focus: WidgetId,
+    puter_pressed: bool,
+    quit_requested: bool,
+    text_drag: Option<WidgetId>,
+    /// Widget that just lost focus and needs one repaint to drop its
+    /// focus-only visuals (text cursor, selection highlight).
+    blurred: Option<WidgetId>,
+    /// Floor imposed by the actual X window height (set from ConfigureNotify
+    /// when the WM/user makes the window taller than the content needs), so
+    /// the bottom-anchored widgets stay pinned to the real bottom edge
+    /// instead of leaving a gap below them.
+    min_height: usize,
+}
+
+/// The concrete widgets. Everything generic goes through `get`/`get_mut`
+/// (`&dyn Widget`); widget-specific plumbing (terminal events, reply channel,
+/// toodle maintenance, twirl spin) uses the fields directly.
+struct Widgets {
     puter: puter::Puter,
     toodle: toodle::Toodle,
     fwends: fwends::Fwends,
@@ -184,61 +208,65 @@ struct App {
     stats: stats::Stats,
     hunger: hunger::Hunger,
     gauges: gauges::Gauges,
-    desk: Sprite,
-    // Indexed by WidgetId::index().
-    fbs: [Framebuffer; WIDGET_COUNT],
-    rects: [Rect; WIDGET_COUNT],
-    focus: WidgetId,
-    puter_pressed: bool,
-    quit_requested: bool,
-    text_drag: Option<WidgetId>,
-    /// Floor imposed by the actual X window height (set from ConfigureNotify
-    /// when the WM/user makes the window taller than the content needs), so
-    /// the bottom-anchored widgets stay pinned to the real bottom edge
-    /// instead of leaving a gap below them.
-    min_height: usize,
+}
+
+impl Widgets {
+    fn get(&self, id: WidgetId) -> &dyn Widget {
+        match id {
+            WidgetId::Puter => &self.puter,
+            WidgetId::Toodle => &self.toodle,
+            WidgetId::Fwends => &self.fwends,
+            WidgetId::Twirl => &self.twirl,
+            WidgetId::Wavey => &self.wavey,
+            WidgetId::Fizzle => &self.fizzle,
+            WidgetId::Day => &self.day,
+            WidgetId::Budgit => &self.budgit,
+            WidgetId::Stats => &self.stats,
+            WidgetId::Hunger => &self.hunger,
+            WidgetId::Gauges => &self.gauges,
+        }
+    }
+
+    fn get_mut(&mut self, id: WidgetId) -> &mut dyn Widget {
+        match id {
+            WidgetId::Puter => &mut self.puter,
+            WidgetId::Toodle => &mut self.toodle,
+            WidgetId::Fwends => &mut self.fwends,
+            WidgetId::Twirl => &mut self.twirl,
+            WidgetId::Wavey => &mut self.wavey,
+            WidgetId::Fizzle => &mut self.fizzle,
+            WidgetId::Day => &mut self.day,
+            WidgetId::Budgit => &mut self.budgit,
+            WidgetId::Stats => &mut self.stats,
+            WidgetId::Hunger => &mut self.hunger,
+            WidgetId::Gauges => &mut self.gauges,
+        }
+    }
 }
 
 impl App {
     fn load(palette: &Palette) -> Result<Self, Box<dyn Error>> {
-        let puter = puter::Puter::load(palette)?;
-        let toodle = toodle::Toodle::load(palette)?;
-        let fwends = fwends::Fwends::load(palette)?;
-        let twirl = twirl::Twirl::load(palette)?;
-        let wavey = wavey::Wavey::load(palette)?;
-        let fizzle = fizzle::Fizzle::load(palette)?;
-        let day = day::Day::load(palette)?;
-        let budgit = budgit::Budgit::load(palette)?;
-        let stats = stats::Stats::load(palette)?;
-        let hunger = hunger::Hunger::load(palette)?;
-        let gauges = gauges::Gauges::load(palette)?;
+        let widgets = Widgets {
+            puter: puter::Puter::load(palette)?,
+            toodle: toodle::Toodle::load(palette)?,
+            fwends: fwends::Fwends::load(palette)?,
+            twirl: twirl::Twirl::load(palette)?,
+            wavey: wavey::Wavey::load(palette)?,
+            fizzle: fizzle::Fizzle::load(palette)?,
+            day: day::Day::load(palette)?,
+            budgit: budgit::Budgit::load(palette)?,
+            stats: stats::Stats::load(palette)?,
+            hunger: hunger::Hunger::load(palette)?,
+            gauges: gauges::Gauges::load(palette)?,
+        };
         let desk = assets::desk();
-        let sizes: [(usize, usize); WIDGET_COUNT] = [
-            (puter.width(), puter.height()),
-            (toodle.width(), toodle.height()),
-            (fwends.width(), fwends.height()),
-            (twirl.width(), twirl.height()),
-            (wavey.width(), wavey.height()),
-            (fizzle.width(), fizzle.height()),
-            (day.width(), day.height()),
-            (budgit.width(), budgit.height()),
-            (stats.width(), stats.height()),
-            (hunger.width(), hunger.height()),
-            (gauges.width(), gauges.height()),
-        ];
-        let fills: [Index; WIDGET_COUNT] = [
-            puter.fill_color(palette),
-            toodle.fill_color(palette),
-            fwends.fill_color(palette),
-            twirl.fill_color(palette),
-            wavey.fill_color(palette),
-            fizzle.fill_color(palette),
-            day.fill_color(palette),
-            budgit.fill_color(palette),
-            stats.fill_color(palette),
-            hunger.fill_color(palette),
-            gauges.fill_color(palette),
-        ];
+        let mut sizes = [(0, 0); WIDGET_COUNT];
+        let mut fills: [Index; WIDGET_COUNT] = [0; WIDGET_COUNT];
+        for id in WidgetId::ALL {
+            let widget = widgets.get(id);
+            sizes[id.index()] = (widget.width(), widget.height());
+            fills[id.index()] = widget.fill_color(palette);
+        }
         // Positions start at (0, 0); sync_dynamic_layout below lays everything
         // out through the same path used after every dynamic change.
         let rects = std::array::from_fn(|i| {
@@ -251,17 +279,7 @@ impl App {
         });
 
         let mut app = Self {
-            puter,
-            toodle,
-            fwends,
-            twirl,
-            wavey,
-            fizzle,
-            day,
-            budgit,
-            stats,
-            hunger,
-            gauges,
+            widgets,
             desk,
             fbs,
             rects,
@@ -269,6 +287,7 @@ impl App {
             puter_pressed: false,
             quit_requested: false,
             text_drag: None,
+            blurred: None,
             min_height: 0,
         };
         app.sync_dynamic_layout(palette);
@@ -276,44 +295,27 @@ impl App {
     }
 
     fn width(&self) -> usize {
-        let rect = |widget: WidgetId| self.rect_for(widget);
-        let width = (rect(WidgetId::Toodle)
-            .x
-            .saturating_add(rect(WidgetId::Toodle).w))
-        .max(self.desk.width)
-        .max(rect(WidgetId::Twirl).x + rect(WidgetId::Twirl).w)
-        .max(rect(WidgetId::Wavey).x + rect(WidgetId::Wavey).w)
-        .max(rect(WidgetId::Day).x + rect(WidgetId::Day).w)
-        .max(rect(WidgetId::Budgit).x + rect(WidgetId::Budgit).w)
-        .max(rect(WidgetId::Stats).x + rect(WidgetId::Stats).w)
-        .max(rect(WidgetId::Gauges).x + rect(WidgetId::Gauges).w);
-        if SHOW_FWENDS {
-            width.max(rect(WidgetId::Fwends).x + rect(WidgetId::Fwends).w)
-        } else {
-            width
+        let mut width = self.desk.width;
+        for widget in WidgetId::visible().iter().copied() {
+            let rect = self.rect_for(widget);
+            width = width.max(rect.x.saturating_add(rect.w));
         }
+        width
     }
 
     fn height(&self) -> usize {
         required_screen_height(&self.widget_heights(), self.desk.height, self.min_height)
     }
 
-    /// Widget heights, indexed by `WidgetId::index()`. Fwends contributes its
-    /// minimum height since its actual height is sized to the window.
+    /// Widget layout heights, indexed by `WidgetId::index()`. Fwends
+    /// contributes its minimum height since its actual height is sized to the
+    /// window.
     fn widget_heights(&self) -> [usize; WIDGET_COUNT] {
-        [
-            self.puter.height(),
-            self.toodle.height(),
-            self.fwends.min_height(),
-            self.twirl.height(),
-            self.wavey.height(),
-            self.fizzle.height(),
-            self.day.height(),
-            self.budgit.height(),
-            self.stats.height(),
-            self.hunger.height(),
-            self.gauges.height(),
-        ]
+        let mut heights = [0; WIDGET_COUNT];
+        for id in WidgetId::ALL {
+            heights[id.index()] = self.widgets.get(id).layout_height();
+        }
+        heights
     }
 
     /// Records the actual X window height (from a ConfigureNotify) so the
@@ -342,7 +344,7 @@ impl App {
     }
 
     fn start(&mut self, window_id: u64) -> Result<(), Box<dyn Error>> {
-        self.puter.start_terminal(window_id)
+        self.widgets.puter.start_terminal(window_id)
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
@@ -354,52 +356,9 @@ impl App {
 
     fn render_widget(&mut self, fb: &mut Framebuffer, palette: &Palette, widget: WidgetId) {
         let widget_fb = &mut self.fbs[widget.index()];
-        match widget {
-            WidgetId::Puter => {
-                widget_fb.clear(self.puter.fill_color(palette));
-                self.puter.render(widget_fb, palette);
-            }
-            WidgetId::Toodle => {
-                widget_fb.clear(self.toodle.fill_color(palette));
-                self.toodle.render(widget_fb, palette);
-            }
-            WidgetId::Fwends => {
-                widget_fb.clear(self.fwends.fill_color(palette));
-                self.fwends.render(widget_fb, palette);
-            }
-            WidgetId::Twirl => {
-                widget_fb.clear(self.twirl.fill_color(palette));
-                self.twirl.render(widget_fb, palette);
-            }
-            WidgetId::Wavey => {
-                widget_fb.clear(self.wavey.fill_color(palette));
-                self.wavey.render(widget_fb, palette);
-            }
-            WidgetId::Fizzle => {
-                widget_fb.clear(self.fizzle.fill_color(palette));
-                self.fizzle.render(widget_fb, palette);
-            }
-            WidgetId::Day => {
-                widget_fb.clear(self.day.fill_color(palette));
-                self.day.render(widget_fb, palette);
-            }
-            WidgetId::Budgit => {
-                widget_fb.clear(self.budgit.fill_color(palette));
-                self.budgit.render(widget_fb, palette);
-            }
-            WidgetId::Stats => {
-                widget_fb.clear(self.stats.fill_color(palette));
-                self.stats.render(widget_fb, palette);
-            }
-            WidgetId::Hunger => {
-                widget_fb.clear(self.hunger.fill_color(palette));
-                self.hunger.render(widget_fb, palette);
-            }
-            WidgetId::Gauges => {
-                widget_fb.clear(self.gauges.fill_color(palette));
-                self.gauges.render(widget_fb, palette);
-            }
-        }
+        let w = self.widgets.get_mut(widget);
+        widget_fb.clear(w.fill_color(palette));
+        w.render(widget_fb, palette);
         let rect = self.rects[widget.index()];
         fb.blit_from(&self.fbs[widget.index()], rect.x, rect.y);
     }
@@ -434,15 +393,15 @@ impl App {
 
     fn sync_dynamic_layout(&mut self, palette: &Palette) -> bool {
         let mut changed = false;
-        let toodle_w = self.toodle.width();
-        let toodle_h = self.toodle.height();
+        let toodle_w = self.widgets.toodle.width();
+        let toodle_h = self.widgets.toodle.height();
 
         let toodle = &mut self.rects[WidgetId::Toodle.index()];
         if toodle.w != toodle_w || toodle.h != toodle_h {
             toodle.w = toodle_w;
             toodle.h = toodle_h;
             self.fbs[WidgetId::Toodle.index()] =
-                Framebuffer::new(toodle_w, toodle_h, self.toodle.fill_color(palette));
+                Framebuffer::new(toodle_w, toodle_h, self.widgets.toodle.fill_color(palette));
             changed = true;
         }
 
@@ -457,17 +416,21 @@ impl App {
         changed
     }
 
-    fn sync_fwends_height(&mut self, height: usize, palette: &Palette) -> bool {
+    fn sync_fwends_height(&mut self, screen_h: usize, palette: &Palette) -> bool {
+        let fwends = &mut self.widgets.fwends;
         let fwends_rect = self.rects[WidgetId::Fwends.index()];
-        if !self.fwends.set_height(height) && fwends_rect.h == self.fwends.height() {
+        // Fwends' top is pinned FWENDS_TOP below the window's top edge, so its
+        // height must leave that much room or its rect overruns the screen.
+        if !fwends.set_height(screen_h.saturating_sub(FWENDS_TOP)) && fwends_rect.h == fwends.height()
+        {
             return false;
         }
 
-        self.rects[WidgetId::Fwends.index()].h = self.fwends.height();
+        self.rects[WidgetId::Fwends.index()].h = fwends.height();
         self.fbs[WidgetId::Fwends.index()] = Framebuffer::new(
             fwends_rect.w,
-            self.fwends.height(),
-            self.fwends.fill_color(palette),
+            fwends.height(),
+            fwends.fill_color(palette),
         );
         true
     }
@@ -481,11 +444,11 @@ impl App {
     }
 
     fn drain_events(&self) -> puter::TerminalEvents {
-        self.puter.drain_terminal_events()
+        self.widgets.puter.drain_terminal_events()
     }
 
     fn drain_replies(&mut self) -> bool {
-        SHOW_FWENDS && self.fwends.drain_reply()
+        SHOW_FWENDS && self.widgets.fwends.drain_reply()
     }
 
     fn handle_key_press(
@@ -493,23 +456,18 @@ impl App {
         input: &text::KeyInput,
         clipboard_text: Option<&str>,
     ) -> Result<Option<String>, Box<dyn Error>> {
-        match self.focus {
-            WidgetId::Puter => Ok(self.puter.handle_key_press(input, clipboard_text)),
-            WidgetId::Toodle => self.toodle.handle_key_press(input, clipboard_text),
-            WidgetId::Fwends if SHOW_FWENDS => {
-                Ok(self.fwends.handle_key_press(input, clipboard_text))
-            }
-            #[allow(clippy::match_same_arms)]
-            WidgetId::Fwends => Ok(None),
-            WidgetId::Twirl
-            | WidgetId::Wavey
-            | WidgetId::Fizzle
-            | WidgetId::Day
-            | WidgetId::Budgit
-            | WidgetId::Stats
-            | WidgetId::Hunger
-            | WidgetId::Gauges => Ok(None),
+        if !self.focus.is_visible() {
+            return Ok(None);
         }
+        self.widgets
+            .get_mut(self.focus)
+            .handle_key_press(input, clipboard_text)
+    }
+
+    /// Whether this key press needs the clipboard fetched for the focused
+    /// widget (it is that widget's paste shortcut).
+    fn wants_clipboard(&self, input: &text::KeyInput) -> bool {
+        self.focus.is_visible() && self.widgets.get(self.focus).wants_clipboard(input)
     }
 
     /// Returns text the clicked widget wants copied to the clipboard.
@@ -519,64 +477,40 @@ impl App {
         let Some((widget, x, y)) = self.widget_at(x, y) else {
             return Ok(None);
         };
-        self.focus = widget;
-        match widget {
-            WidgetId::Puter => {
-                self.puter_pressed = true;
-                self.puter.press_button(x, y, state);
-            }
-            WidgetId::Toodle => {
-                if self.toodle.click(x, y)? {
-                    self.twirl.spin();
-                }
-                if self.toodle.text_dragging() {
-                    self.text_drag = Some(WidgetId::Toodle);
-                }
-            }
-            WidgetId::Fwends => {
-                self.fwends.click(x, y);
-                if self.fwends.text_dragging() {
-                    self.text_drag = Some(WidgetId::Fwends);
-                }
-            }
-            WidgetId::Twirl => self.twirl.click(x, y),
-            WidgetId::Wavey => {
-                return Ok(self.wavey.click(x, y));
-            }
-            WidgetId::Fizzle | WidgetId::Budgit | WidgetId::Stats | WidgetId::Gauges => {}
-            WidgetId::Hunger => {
-                self.hunger.click();
-            }
-            WidgetId::Day => self.day.toggle_mode(),
+        if self.focus != widget {
+            self.widgets.get_mut(self.focus).blur();
+            self.blurred = Some(self.focus);
         }
-        Ok(None)
+        self.focus = widget;
+        self.puter_pressed = widget == WidgetId::Puter;
+        let outcome = self.widgets.get_mut(widget).click(x, y, state)?;
+        if outcome.spin_twirl {
+            self.widgets.twirl.spin();
+        }
+        if outcome.text_drag {
+            self.text_drag = Some(widget);
+        }
+        Ok(outcome.copy_text)
+    }
+
+    /// The widget that just lost focus and needs a repaint, if any.
+    fn take_blurred(&mut self) -> Option<WidgetId> {
+        self.blurred.take()
     }
 
     fn release(&mut self, x: i16, y: i16) -> Option<WidgetId> {
         if let Some(widget) = self.text_drag.take() {
-            match widget {
-                WidgetId::Toodle => self.toodle.end_text_drag(),
-                WidgetId::Fwends => self.fwends.end_text_drag(),
-                WidgetId::Puter
-                | WidgetId::Twirl
-                | WidgetId::Wavey
-                | WidgetId::Fizzle
-                | WidgetId::Day
-                | WidgetId::Budgit
-                | WidgetId::Stats
-                | WidgetId::Hunger
-                | WidgetId::Gauges => {}
-            }
+            self.widgets.get_mut(widget).end_text_drag();
             return Some(widget);
         }
 
-        if self.focus == WidgetId::Wavey && self.wavey.release() {
+        if self.focus == WidgetId::Wavey && self.widgets.wavey.release() {
             return Some(WidgetId::Wavey);
         }
 
         if self.puter_pressed {
             let (x, y) = self.rect_for(WidgetId::Puter).local(x, y);
-            if self.puter.release_button(x, y) {
+            if self.widgets.puter.release_button(x, y) {
                 self.quit_requested = true;
             }
             self.puter_pressed = false;
@@ -588,47 +522,28 @@ impl App {
 
     fn motion(&mut self, x: i16, y: i16) -> Option<WidgetId> {
         if let Some(widget) = self.text_drag {
-            let changed = match widget {
-                WidgetId::Toodle => {
-                    let (local_x, local_y) = self.rect_for(WidgetId::Toodle).local(x, y);
-                    self.toodle.drag_text(local_x, local_y)
-                }
-                WidgetId::Fwends => {
-                    let (local_x, local_y) = self.rect_for(WidgetId::Fwends).local(x, y);
-                    self.fwends.drag_text(local_x, local_y)
-                }
-                WidgetId::Puter
-                | WidgetId::Twirl
-                | WidgetId::Wavey
-                | WidgetId::Fizzle
-                | WidgetId::Day
-                | WidgetId::Budgit
-                | WidgetId::Stats
-                | WidgetId::Hunger
-                | WidgetId::Gauges => false,
-            };
-            return changed.then_some(widget);
+            let (local_x, local_y) = self.rect_for(widget).local(x, y);
+            return self
+                .widgets
+                .get_mut(widget)
+                .drag_text(local_x, local_y)
+                .then_some(widget);
         }
 
-        if self.focus == WidgetId::Puter {
-            let (local_x, local_y) = self.rect_for(WidgetId::Puter).local(x, y);
-            if self.puter.motion(local_x, local_y) {
-                return Some(WidgetId::Puter);
-            }
-        }
-
-        if self.focus == WidgetId::Wavey {
-            let (local_x, local_y) = self.rect_for(WidgetId::Wavey).local(x, y);
-            if self.wavey.motion(local_x, local_y) {
-                return Some(WidgetId::Wavey);
-            }
+        // Focus-follow motion (puter text selection, wavey knob drag).
+        let (local_x, local_y) = self.rect_for(self.focus).local(x, y);
+        if self.widgets.get_mut(self.focus).motion(local_x, local_y) {
+            return Some(self.focus);
         }
 
         if self.rect_for(WidgetId::Toodle).contains(x, y) {
             let (x, y) = self.rect_for(WidgetId::Toodle).local(x, y);
-            self.toodle.hover(x, y).then_some(WidgetId::Toodle)
+            self.widgets.toodle.hover(x, y).then_some(WidgetId::Toodle)
         } else {
-            self.toodle.hover(-1, -1).then_some(WidgetId::Toodle)
+            self.widgets
+                .toodle
+                .hover(-1, -1)
+                .then_some(WidgetId::Toodle)
         }
     }
 
@@ -642,40 +557,10 @@ impl App {
 
     fn scroll(&mut self, x: i16, y: i16, direction: ScrollDirection) -> Option<WidgetId> {
         let (widget, x, y) = self.widget_at(x, y)?;
-        let handled = match (widget, direction) {
-            (WidgetId::Fwends, ScrollDirection::Up) => {
-                self.fwends.scroll_up(x, y);
-                true
-            }
-            (WidgetId::Fwends, ScrollDirection::Down) => {
-                self.fwends.scroll_down(x, y);
-                true
-            }
-            (WidgetId::Puter, ScrollDirection::Up) => {
-                self.puter.scroll_up();
-                true
-            }
-            (WidgetId::Puter, ScrollDirection::Down) => {
-                self.puter.scroll_down();
-                true
-            }
-            (WidgetId::Wavey, ScrollDirection::Up) => self.wavey.scroll_up(x, y),
-            (WidgetId::Wavey, ScrollDirection::Down) => self.wavey.scroll_down(x, y),
-            (
-                WidgetId::Toodle
-                | WidgetId::Twirl
-                | WidgetId::Fizzle
-                | WidgetId::Day
-                | WidgetId::Budgit
-                | WidgetId::Stats
-                | WidgetId::Hunger
-                | WidgetId::Gauges,
-                _,
-            ) => {
-                return None;
-            }
-        };
-        handled.then_some(widget)
+        self.widgets
+            .get_mut(widget)
+            .scroll(x, y, direction)
+            .then_some(widget)
     }
 
     /// Which cursor shape fits whatever is under the pointer.
@@ -686,20 +571,10 @@ impl App {
         let Some((widget, x, y)) = self.widget_at(x, y) else {
             return CursorKind::Pointer;
         };
-        match widget {
-            WidgetId::Puter => self.puter.cursor_at(x, y),
-            WidgetId::Toodle => self.toodle.cursor_at(x, y),
-            WidgetId::Fwends => self.fwends.cursor_at(x, y),
-            WidgetId::Twirl => self.twirl.cursor_at(x, y),
-            WidgetId::Wavey => self.wavey.cursor_at(x, y),
-            // Clicking anywhere on these triggers their action.
-            WidgetId::Day | WidgetId::Hunger => CursorKind::Hand,
-            WidgetId::Fizzle | WidgetId::Budgit | WidgetId::Stats | WidgetId::Gauges => {
-                CursorKind::Pointer
-            }
-        }
+        self.widgets.get(widget).cursor_at(x, y)
     }
 
+    /// The topmost visible widget under `(x, y)`, front to back.
     fn widget_at(&self, x: i16, y: i16) -> Option<(WidgetId, i16, i16)> {
         [
             WidgetId::Wavey,
@@ -710,6 +585,9 @@ impl App {
             WidgetId::Toodle,
             WidgetId::Hunger,
             WidgetId::Puter,
+            WidgetId::Budgit,
+            WidgetId::Stats,
+            WidgetId::Gauges,
         ]
         .into_iter()
         .filter(|widget| widget.is_visible())
@@ -722,12 +600,20 @@ impl App {
         })
     }
 
+    /// Ticks one widget's periodic update; returns whether it needs a redraw.
+    /// Puter, Fwends, and Toodle keep the trait's do-nothing default: they are
+    /// driven separately in the main loop (terminal events, reply channel, and
+    /// save/relayout housekeeping).
+    fn update_widget(&mut self, widget: WidgetId) -> Result<bool, Box<dyn Error>> {
+        self.widgets.get_mut(widget).update()
+    }
+
     fn shutdown(&mut self) {
-        if let Err(err) = self.toodle.flush_saves() {
+        if let Err(err) = self.widgets.toodle.flush_saves() {
             eprintln!("toodle save failed on shutdown: {err}");
         }
-        self.wavey.shutdown();
-        self.puter.shutdown_terminal();
+        self.widgets.wavey.shutdown();
+        self.widgets.puter.shutdown_terminal();
     }
 }
 
@@ -765,6 +651,9 @@ const DESK_Y: isize = -39;
 /// content-driven rather than set by the window manager.
 const TOP_PADDING: usize = 25;
 
+/// How far below the window's top edge Fwends' top is pinned.
+const FWENDS_TOP: usize = 10;
+
 /// Widget (x, y) top-left positions, indexed by `WidgetId::index()`.
 /// Converts the bottom-anchored `widget_xy` table for a `screen_h`-tall
 /// window: top = screen_h - y - height.
@@ -779,8 +668,8 @@ fn widget_positions(
         let top = (screen_h as isize - y - h).max(0) as usize;
         positions[widget.index()] = (x, top);
     }
-    // Fwends stays pinned 10px below the window's top edge.
-    positions[WidgetId::Fwends.index()].1 = 10;
+    // Fwends stays pinned just below the window's top edge.
+    positions[WidgetId::Fwends.index()].1 = FWENDS_TOP;
     positions
 }
 
@@ -918,12 +807,6 @@ pub(crate) fn draw_filled_ellipse(
     }
 }
 
-#[derive(Clone, Copy)]
-enum ScrollDirection {
-    Up,
-    Down,
-}
-
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn Error>> {
     let palette = assets::palette();
@@ -953,50 +836,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
-        if app.twirl.update()? {
-            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Twirl)?;
-            drew_frame = true;
-        }
-
-        if app.wavey.update() {
-            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Wavey)?;
-            drew_frame = true;
-        }
-
-        if app.fizzle.update() {
-            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Fizzle)?;
-            drew_frame = true;
-        }
-
-        if app.day.update() {
-            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Day)?;
-            drew_frame = true;
-        }
-
-        if app.budgit.update() {
-            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Budgit)?;
-            drew_frame = true;
-        }
-
-        if app.stats.update() {
-            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Stats)?;
-            drew_frame = true;
-        }
-
-        if app.hunger.update() {
-            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Hunger)?;
-            drew_frame = true;
-        }
-
-        if app.gauges.update() {
-            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Gauges)?;
-            drew_frame = true;
+        for widget in WidgetId::ALL {
+            if app.update_widget(widget)? {
+                app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
+                drew_frame = true;
+            }
         }
 
         // Toodle housekeeping: debounced saves hit disk shortly after typing
         // pauses, and external edits to the todo files are folded in. The
         // latter can change the page-stack size, so it may need a relayout.
-        if app.toodle.maintain()? {
+        if app.widgets.toodle.maintain()? {
             if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
                 app.render(&mut fb, &palette);
                 xwin.draw(&fb)?;
@@ -1012,7 +862,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // faster than they display and makes typing lag. We update state for
         // every event but repaint the focused widget at most once per batch.
         let mut needs_input_redraw = false;
-        while let Some(event) = xwin.conn.poll_for_event()? {
+        while let Some(event) = xwin.poll_event()? {
             match event {
                 XEvent::Expose(event) => {
                     // Exposures arrive in batches; `count` is how many more
@@ -1027,7 +877,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 XEvent::KeyPress(event) => {
                     let input = xwin.keyboard.press(event.detail, event.state.into());
-                    let paste_text = if should_load_clipboard_for_paste(app.focus, &input) {
+                    let paste_text = if app.wants_clipboard(&input) {
                         xwin.clipboard_text()?
                     } else {
                         None
@@ -1126,13 +976,18 @@ fn redraw_after_input(
     xwin: &mut XWindow,
     palette: &Palette,
 ) -> Result<(), Box<dyn Error>> {
+    let blurred = app.take_blurred();
     if sync_window_layout(app, fb, xwin, palette)? {
         app.render(fb, palette);
         xwin.draw(fb)?;
-    } else {
-        app.render_focused_widget(fb, palette);
-        xwin.draw_rect(fb, app.focused_rect())?;
+        return Ok(());
     }
+    // The widget that just lost focus repaints once so its cursor disappears.
+    if let Some(widget) = blurred {
+        app.render_and_draw_widget(fb, xwin, palette, widget)?;
+    }
+    app.render_focused_widget(fb, palette);
+    xwin.draw_rect(fb, app.focused_rect())?;
     Ok(())
 }
 
@@ -1151,25 +1006,3 @@ fn sync_window_layout(
     Ok(true)
 }
 
-fn is_paste_shortcut(input: &text::KeyInput) -> bool {
-    input.ctrl() && input.shift() && input.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
-}
-
-fn is_plain_paste_shortcut(input: &text::KeyInput) -> bool {
-    input.ctrl() && input.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
-}
-
-fn should_load_clipboard_for_paste(focus: WidgetId, input: &text::KeyInput) -> bool {
-    match focus {
-        WidgetId::Puter => is_paste_shortcut(input),
-        WidgetId::Toodle | WidgetId::Fwends => is_plain_paste_shortcut(input),
-        WidgetId::Twirl
-        | WidgetId::Wavey
-        | WidgetId::Fizzle
-        | WidgetId::Day
-        | WidgetId::Budgit
-        | WidgetId::Stats
-        | WidgetId::Hunger
-        | WidgetId::Gauges => false,
-    }
-}

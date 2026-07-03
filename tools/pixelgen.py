@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate cozyui-style pixel art from a text prompt.
 
-Calls black-forest-labs/flux.2-pro via OpenRouter, passing wavey.png,
-puter_o_lc.png and assets/lamp_on.png as style references, then downscales
+Calls black-forest-labs/flux.2-pro via OpenRouter, passing assets/wavey.png,
+assets/puter_o_lc.png and assets/lamp_on.png as style references, then downscales
 the result to the requested pixel grid and quantizes it to the na16 palette.
 
 Usage:
@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -27,12 +28,12 @@ from PIL import Image, ImageChops
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 REFERENCE_IMAGES = [
-    REPO_ROOT / "wavey.png",
-    REPO_ROOT / "puter_o_lc.png",
+    REPO_ROOT / "assets" / "wavey.png",
+    REPO_ROOT / "assets" / "puter_o_lc.png",
     REPO_ROOT / "assets" / "lamp_on.png",
 ]
 
-# na16 palette, extracted from na16-1x.png
+# na16 palette, extracted from assets/na16-1x.png
 NA16 = [
     "#1f0e1c", "#3e2137", "#584563", "#70377f",
     "#17434b", "#34859d", "#7ec4c1", "#8c8fae",
@@ -114,7 +115,11 @@ def trim_padding(im: Image.Image, fuzz: int = 32) -> Image.Image:
     corners = [im.getpixel(p) for p in
                [(0, 0), (im.width - 1, 0), (0, im.height - 1),
                 (im.width - 1, im.height - 1)]]
-    bg_color = max(set(corners), key=corners.count)
+    # Break ties deterministically: highest count first, then the
+    # lexicographically greatest color, so equal-count corners always pick
+    # the same background regardless of set/dict iteration order.
+    counts = {color: corners.count(color) for color in corners}
+    bg_color = max(counts, key=lambda color: (counts[color], color))
     diff = ImageChops.difference(im, Image.new("RGB", im.size, bg_color))
     bbox = diff.convert("L").point(lambda v: 255 if v > fuzz else 0).getbbox()
     if bbox:

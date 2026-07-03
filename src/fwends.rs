@@ -55,8 +55,28 @@ const LINE_H: usize = 16;
 const MAX_INPUT_CHARS: usize = 96;
 const INPUT_MAX_LINES: usize = 5;
 const HISTORY_LIMIT: usize = 8;
-const SYSTEM_PROMPT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fwends_system_prompt.txt");
-const USER_NAME: &str = "Jodie";
+const SYSTEM_PROMPT_FILE: &str = "fwends_system_prompt.txt";
+
+/// Display name labelling the user's chat messages: `$COZYUI_USER_NAME`, else
+/// the login name with its first letter capitalized, else "Fwend".
+fn user_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        std::env::var("COZYUI_USER_NAME")
+            .or_else(|_| std::env::var("USER").map(capitalize_first))
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "Fwend".to_string())
+    })
+}
+
+fn capitalize_first(name: String) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => name,
+    }
+}
 const SMOL_ICON_SIZE: usize = 11;
 const SMOL_ICON_GAP: usize = 2;
 const SMOL_ICON_Y_OFFSET: usize = 3;
@@ -124,6 +144,12 @@ pub struct Fwends {
     // result is cached here and refreshed via messages_changed() instead of
     // recomputed on every scroll and frame.
     layouts: Vec<MessageLayout>,
+    // Per-message layout cache (paired with the `Message` that produced it),
+    // indexed the same as `messages`. Lets message_layouts() only recompute
+    // wrapping for messages that are new or have changed (e.g. a pending
+    // reply's text being filled in) instead of re-wrapping the whole history
+    // on every new message.
+    layout_cache: Vec<(Message, MessageLayout)>,
 }
 
 struct PendingReply {
@@ -172,10 +198,9 @@ impl Fwends {
             model_slot_w,
             model_slot_h,
             pending: None,
-            system_prompt: fs::read_to_string(SYSTEM_PROMPT_PATH).unwrap_or_else(|_| {
-                "You are a warm, concise chat companion. Answer directly and never reveal hidden reasoning.".to_string()
-            }),
+            system_prompt: load_system_prompt(),
             layouts: Vec::new(),
+            layout_cache: Vec::new(),
         };
         fwends.messages_changed();
         Ok(fwends)
@@ -402,14 +427,16 @@ impl Fwends {
         // Build the history before pushing the new message: both request
         // paths send the latest user message separately, so it must not also
         // appear at the end of the history.
-        let system_prompt = fwend_system_prompt(&self.system_prompt, model.name);
-        let history = request_history(&self.messages, model.name);
+        let system_prompt = fwend_system_prompt(&self.system_prompt, model.name, user_name());
+        let history = request_history(&self.messages, model.name, user_name());
 
         self.messages.push(Message::user(text.clone()));
         self.messages.push(Message::pending(model.name));
         self.messages_changed();
+        // Sending your own message always jumps to it.
+        self.scroll_to_bottom();
 
-        let text = format!("{USER_NAME}: {text}");
+        let text = format!("{}: {text}", user_name());
         let (tx, rx) = mpsc::channel();
         self.pending = Some(PendingReply {
             rx,
@@ -437,9 +464,17 @@ impl Fwends {
         self.messages_changed();
     }
 
+    /// Refresh the cached layouts. Follows new messages only when the view was
+    /// already at the bottom; a user reading scrollback keeps their place
+    /// (clamped to the new content height).
     fn messages_changed(&mut self) {
+        let was_at_bottom = self.scroll_y >= self.max_scroll();
         self.layouts = self.message_layouts();
-        self.scroll_to_bottom();
+        if was_at_bottom {
+            self.scroll_to_bottom();
+        } else {
+            self.scroll_y = self.scroll_y.min(self.max_scroll());
+        }
     }
 
     fn draw_messages(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -530,43 +565,72 @@ impl Fwends {
         }
     }
 
-    fn message_layouts(&self) -> Vec<MessageLayout> {
-        let mut layouts = Vec::new();
+    /// Wraps `message` through the font engine and lays it out at `y = 0`;
+    /// the caller fills in the real cumulative `y`.
+    fn compute_message_layout(&self, message: &Message) -> MessageLayout {
+        let style = message.style();
+        let max_text_w = BUBBLE_MAX_W - style.pad_left - style.pad_right;
+        let layout = TextLayout::new(
+            &self.font,
+            0,
+            0,
+            max_text_w,
+            LinePlacement::Uniform { line_h: LINE_H },
+        );
+        let lines = layout.wrap(&message.text);
+        let text_w = lines
+            .iter()
+            .map(|line| self.font.text_width(line))
+            .max()
+            .unwrap_or(0);
+        let w = (text_w + style.pad_left + style.pad_right).clamp(style.min_w, BUBBLE_MAX_W);
+        let h = (lines.len() * LINE_H + style.pad_top + style.pad_bottom)
+            .max(style.top_cap + style.bottom_cap + 1);
+        let x = if style.align_right {
+            CONTENT_W - PAD - w
+        } else {
+            self.assistant_bubble_x()
+        };
+        MessageLayout {
+            style,
+            lines,
+            author: message.author,
+            x,
+            y: 0,
+            w,
+            h,
+        }
+    }
+
+    /// Rebuilds `self.layout_cache` so it has one entry per message, reusing
+    /// cached wrapping for any message whose content hasn't changed since it
+    /// was last computed. Only new/changed messages pay the wrapping cost;
+    /// unchanged ones are just cloned out of the cache. Cumulative `y` is
+    /// always recomputed since earlier heights may have changed.
+    fn message_layouts(&mut self) -> Vec<MessageLayout> {
+        self.layout_cache.truncate(self.messages.len());
+        for (i, message) in self.messages.iter().enumerate() {
+            let stale = self
+                .layout_cache
+                .get(i)
+                .is_none_or(|(cached_message, _)| cached_message != message);
+            if stale {
+                let layout = self.compute_message_layout(message);
+                if i < self.layout_cache.len() {
+                    self.layout_cache[i] = (message.clone(), layout);
+                } else {
+                    self.layout_cache.push((message.clone(), layout));
+                }
+            }
+        }
+
+        let mut layouts = Vec::with_capacity(self.layout_cache.len());
         let mut y = 0;
-        for message in &self.messages {
-            let style = message.style();
-            let max_text_w = BUBBLE_MAX_W - style.pad_left - style.pad_right;
-            let layout = TextLayout::new(
-                &self.font,
-                0,
-                0,
-                max_text_w,
-                LinePlacement::Uniform { line_h: LINE_H },
-            );
-            let lines = layout.wrap(&message.text);
-            let text_w = lines
-                .iter()
-                .map(|line| self.font.text_width(line))
-                .max()
-                .unwrap_or(0);
-            let w = (text_w + style.pad_left + style.pad_right).clamp(style.min_w, BUBBLE_MAX_W);
-            let h = (lines.len() * LINE_H + style.pad_top + style.pad_bottom)
-                .max(style.top_cap + style.bottom_cap + 1);
-            let x = if style.align_right {
-                CONTENT_W - PAD - w
-            } else {
-                self.assistant_bubble_x()
-            };
-            layouts.push(MessageLayout {
-                style,
-                lines,
-                author: message.author,
-                x,
-                y,
-                w,
-                h,
-            });
-            y += h + BUBBLE_GAP;
+        for (_, cached) in &self.layout_cache {
+            let mut layout = cached.clone();
+            layout.y = y;
+            y += layout.h + BUBBLE_GAP;
+            layouts.push(layout);
         }
         layouts
     }
@@ -775,6 +839,78 @@ impl Fwends {
     }
 }
 
+impl crate::widget::Widget for Fwends {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn layout_height(&self) -> usize {
+        self.min_height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn click(
+        &mut self,
+        x: i16,
+        y: i16,
+        _state: u16,
+    ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
+        Self::click(self, x, y);
+        Ok(crate::widget::ClickOutcome {
+            text_drag: self.text_dragging(),
+            ..Default::default()
+        })
+    }
+
+    fn blur(&mut self) {
+        self.focused = false;
+        self.input.end_drag();
+    }
+
+    fn scroll(&mut self, x: i16, y: i16, direction: crate::widget::ScrollDirection) -> bool {
+        match direction {
+            crate::widget::ScrollDirection::Up => self.scroll_up(x, y),
+            crate::widget::ScrollDirection::Down => self.scroll_down(x, y),
+        }
+        true
+    }
+
+    fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+        self.cursor_at(x, y)
+    }
+
+    fn handle_key_press(
+        &mut self,
+        input: &KeyInput,
+        clipboard_text: Option<&str>,
+    ) -> Result<Option<String>, Box<dyn Error>> {
+        Ok(Self::handle_key_press(self, input, clipboard_text))
+    }
+
+    fn wants_clipboard(&self, input: &KeyInput) -> bool {
+        input.is_plain_paste_shortcut()
+    }
+
+    fn drag_text(&mut self, x: i16, y: i16) -> bool {
+        Self::drag_text(self, x, y)
+    }
+
+    fn end_text_drag(&mut self) {
+        Self::end_text_drag(self);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct FwendRect {
     x: usize,
@@ -892,7 +1028,7 @@ struct Model {
     icon_index: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Message {
     role: Role,
     text: String,
@@ -900,6 +1036,7 @@ struct Message {
     author: Option<&'static str>,
 }
 
+#[derive(Clone)]
 struct MessageLayout {
     style: MessageStyle,
     lines: Vec<String>,
@@ -966,7 +1103,7 @@ fn smol_icon_rect(name: &str) -> Option<Rect> {
     ))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Role {
     User,
     Assistant,
@@ -1028,7 +1165,16 @@ const USER_MESSAGE_STYLE: MessageStyle = MessageStyle {
     align_right: true,
 };
 
-fn request_history(messages: &[Message], current_name: &str) -> Vec<Message> {
+fn load_system_prompt() -> String {
+    let path = crate::paths::config_file(SYSTEM_PROMPT_FILE);
+    fs::read_to_string(&path).unwrap_or_else(|err| {
+        eprintln!("fwends: could not read system prompt at {path}, using default: {err}");
+        "You are a warm, concise chat companion. Answer directly and never reveal hidden reasoning."
+            .to_string()
+    })
+}
+
+fn request_history(messages: &[Message], current_name: &str, user_name: &str) -> Vec<Message> {
     let recent: Vec<&Message> = messages
         .iter()
         .filter(|message| message.kind == MessageKind::Normal)
@@ -1037,7 +1183,7 @@ fn request_history(messages: &[Message], current_name: &str) -> Vec<Message> {
     recent[start..]
         .iter()
         .map(|message| match (message.role, message.author) {
-            (Role::User, _) => Message::user(format!("{USER_NAME}: {}", message.text)),
+            (Role::User, _) => Message::user(format!("{user_name}: {}", message.text)),
             (Role::Assistant, Some(author)) if author != current_name => {
                 Message::user(format!("{author}: {}", message.text))
             }
@@ -1056,11 +1202,11 @@ fn strip_self_prefix(text: &str, name: &str) -> String {
     trimmed.to_string()
 }
 
-fn fwend_system_prompt(template: &str, name: &str) -> String {
+fn fwend_system_prompt(template: &str, name: &str, user_name: &str) -> String {
     let mut prompt = template.replace("[[FREND_NAME]]", name);
     let _ = write!(
         prompt,
-        "\n\nThis is a group chat: messages from {USER_NAME} and from other fwends arrive labeled like \"{USER_NAME}: ...\" or \"Qwen: ...\". Your own earlier replies are unlabeled. Never start your reply with \"{name}:\" — just speak."
+        "\n\nThis is a group chat: messages from {user_name} and from other fwends arrive labeled like \"{user_name}: ...\" or \"Qwen: ...\". Your own earlier replies are unlabeled. Never start your reply with \"{name}:\" — just speak."
     );
     prompt
 }
@@ -1254,7 +1400,7 @@ mod tests {
 
     #[test]
     fn fwend_system_prompt_replaces_name_placeholder() {
-        let prompt = fwend_system_prompt("you are [[FREND_NAME]]!", "Qwen");
+        let prompt = fwend_system_prompt("you are [[FREND_NAME]]!", "Qwen", "Jodie");
 
         assert!(prompt.starts_with("you are Qwen!"));
         assert!(prompt.contains("Never start your reply with \"Qwen:\""));
@@ -1273,7 +1419,7 @@ mod tests {
             qwen_reply,
         ];
 
-        let history = request_history(&messages, "Qwen");
+        let history = request_history(&messages, "Qwen", "Jodie");
 
         assert_eq!(history.len(), 3);
         assert!(matches!(history[0].role, Role::User));

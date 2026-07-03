@@ -14,7 +14,7 @@ use crate::palette_color;
 use crate::text::BitmapFont;
 use crate::{CursorKind, Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
-const STATIONS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/radio_stations.txt");
+const STATIONS_FILE: &str = "radio_stations.txt";
 
 const DISPLAY_X: usize = 6;
 const DISPLAY_Y: usize = 23;
@@ -95,8 +95,11 @@ pub struct Wavey {
     last_clock_text: String,
     last_clock_check: Instant,
     last_volume_check: Instant,
-    title_updates: mpsc::Receiver<String>,
+    title_updates: mpsc::Receiver<TitleUpdate>,
     current_title: String,
+    /// Stream URL matching `current_title`, cached by the poller thread so a
+    /// title click never does blocking mpv IPC on the UI thread.
+    current_url: Option<String>,
     marquee_offset: usize,
     last_marquee_step: Instant,
     playing: bool,
@@ -111,7 +114,7 @@ impl Wavey {
                 &pixel_fonts::POCO_SPEC,
                 &pixel_fonts::FUSION_PIXEL_8_SPEC,
             )?,
-            stations: load_stations(STATIONS_PATH),
+            stations: load_stations(&crate::paths::config_file(STATIONS_FILE)),
             station: 0,
             volume,
             clock_24h: false,
@@ -121,6 +124,7 @@ impl Wavey {
             last_volume_check: Instant::now(),
             title_updates: spawn_title_poller(),
             current_title: String::new(),
+            current_url: None,
             marquee_offset: 0,
             last_marquee_step: Instant::now(),
             playing: false,
@@ -192,8 +196,13 @@ impl Wavey {
             }
         }
 
-        if let Some(title) = self.title_updates.try_iter().last() {
-            let title = if self.playing { title } else { String::new() };
+        if let Some(update) = self.title_updates.try_iter().last() {
+            let (title, url) = if self.playing {
+                (update.title, update.url)
+            } else {
+                (String::new(), None)
+            };
+            self.current_url = url;
             if title != self.current_title {
                 self.current_title = title;
                 self.marquee_offset = 0;
@@ -283,7 +292,7 @@ impl Wavey {
     #[allow(clippy::unnecessary_wraps)]
     fn title_copy_text(&self) -> Option<String> {
         let title = self.current_title.clone();
-        match mpv_property("path").as_ref().and_then(json_string) {
+        match &self.current_url {
             Some(url) => Some(format!("{title}\n{url}")),
             None => Some(title),
         }
@@ -391,12 +400,26 @@ impl Wavey {
             return;
         }
 
-        let _ = fs::remove_file(mpv_ipc_path());
+        let ipc_path = mpv_ipc_path();
+        if let Err(err) = fs::remove_file(&ipc_path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("wavey: failed to remove mpv IPC socket {}: {err}", ipc_path.display());
+        }
         self.current_title.clear();
+        let script_opts = crate::util::shell_quote(&format!(
+            "cozyui-wavey-station={}",
+            self.station
+        ));
+        let quoted_args = station
+            .mpv_args
+            .split_whitespace()
+            .map(crate::util::shell_quote)
+            .collect::<Vec<_>>()
+            .join(" ");
         let command_line = format!(
             "mpv --input-terminal=no --input-ipc-server=\"$COZYUI_MPV_IPC\" \
-             --script-opts=cozyui-wavey-station={} {}",
-            self.station, station.mpv_args
+             --script-opts={script_opts} {quoted_args}"
         );
         ensure_player_session();
         queue_player_command(&command_line);
@@ -438,6 +461,7 @@ impl Wavey {
         let _ = fs::remove_file(mpv_ipc_path());
         self.playing = false;
         self.current_title.clear();
+        self.current_url = None;
     }
 
     fn draw_clock(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -527,6 +551,55 @@ impl Wavey {
             TITLE_X,
             TITLE_W,
         );
+    }
+}
+
+impl crate::widget::Widget for Wavey {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn update(&mut self) -> Result<bool, Box<dyn Error>> {
+        Ok(Self::update(self))
+    }
+
+    fn click(
+        &mut self,
+        x: i16,
+        y: i16,
+        _state: u16,
+    ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
+        Ok(crate::widget::ClickOutcome {
+            copy_text: Self::click(self, x, y),
+            ..Default::default()
+        })
+    }
+
+    fn motion(&mut self, x: i16, y: i16) -> bool {
+        Self::motion(self, x, y)
+    }
+
+    fn scroll(&mut self, x: i16, y: i16, direction: crate::widget::ScrollDirection) -> bool {
+        match direction {
+            crate::widget::ScrollDirection::Up => self.scroll_up(x, y),
+            crate::widget::ScrollDirection::Down => self.scroll_down(x, y),
+        }
+    }
+
+    fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+        self.cursor_at(x, y)
     }
 }
 
@@ -661,12 +734,14 @@ fn mpv_property(property: &str) -> Option<serde_json::Value> {
     stream.write_all(b"\n").ok()?;
 
     let mut reader = BufReader::new(stream);
-    for _ in 0..8 {
+    for _ in 0..64 {
         let mut line = String::new();
         if reader.read_line(&mut line).ok()? == 0 {
             return None;
         }
-        let response = serde_json::from_str::<serde_json::Value>(&line).ok()?;
+        let Ok(response) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
         if response
             .get("request_id")
             .and_then(serde_json::Value::as_i64)
@@ -683,14 +758,24 @@ fn mpv_property(property: &str) -> Option<serde_json::Value> {
     None
 }
 
-/// Poll mpv for the playing title off the UI thread; a wedged mpv then can't
-/// stall rendering. The thread exits once the receiver is dropped.
-fn spawn_title_poller() -> mpsc::Receiver<String> {
+/// One poller result: the display title and the stream URL it belongs to.
+struct TitleUpdate {
+    title: String,
+    url: Option<String>,
+}
+
+/// Poll mpv for the playing title (and its URL, for title-click copies) off
+/// the UI thread; a wedged mpv then can't stall rendering. The thread exits
+/// once the receiver is dropped.
+fn spawn_title_poller() -> mpsc::Receiver<TitleUpdate> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         loop {
             let title = current_mpv_title().unwrap_or_default();
-            if tx.send(title).is_err() {
+            let url = (!title.is_empty())
+                .then(|| mpv_property("path").as_ref().and_then(json_string))
+                .flatten();
+            if tx.send(TitleUpdate { title, url }).is_err() {
                 return;
             }
             thread::sleep(TITLE_REFRESH);
@@ -700,13 +785,17 @@ fn spawn_title_poller() -> mpsc::Receiver<String> {
 }
 
 fn mpv_ipc_path() -> PathBuf {
-    // Fixed path so a restarted cozyui can find the mpv left running in the
-    // "wavey" abduco session.
+    // Fixed (non-pid) path on purpose: a restarted cozyui reconnects to an
+    // mpv left running in the persistent player session. kill_player anchors
+    // its pkill pattern on this exact path, so it can only ever match the
+    // wavey mpv, not unrelated mpv processes.
     std::env::temp_dir().join("cozyui-mpv-wavey.sock")
 }
 
-/// SIGKILL the wavey mpv (matched by its unique IPC socket argument) so the
-/// session loop frees up immediately instead of waiting for a graceful quit.
+/// SIGKILL the wavey mpv (matched by its IPC socket argument)
+/// so the session loop frees up immediately instead of waiting for a
+/// graceful quit. The pattern anchors on the full socket path, so it can
+/// only match the wavey mpv, never an unrelated mpv.
 fn kill_player() {
     let pattern = format!("mpv .*{}", mpv_ipc_path().display());
     let _ = Command::new("pkill")

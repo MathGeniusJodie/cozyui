@@ -27,6 +27,7 @@ pub struct Fizzle {
     charge: u8,
     discharging: bool,
     last_check: Instant,
+    battery_read_failing: bool,
 }
 
 impl Fizzle {
@@ -57,6 +58,7 @@ impl Fizzle {
             charge,
             discharging,
             last_check: Instant::now(),
+            battery_read_failing: false,
         })
     }
 
@@ -81,8 +83,16 @@ impl Fizzle {
         self.last_check = now;
 
         let Some((charge, discharging)) = read_battery() else {
+            if !self.battery_read_failing {
+                eprintln!("fizzle: battery sysfs reads failing, keeping last known reading");
+                self.battery_read_failing = true;
+            }
             return false;
         };
+        if self.battery_read_failing {
+            eprintln!("fizzle: battery sysfs reads recovered");
+            self.battery_read_failing = false;
+        }
         if charge == self.charge && discharging == self.discharging {
             return false;
         }
@@ -154,4 +164,26 @@ fn battery_dir() -> Option<PathBuf> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .find(|path| path.join("capacity").exists())
+}
+
+impl crate::widget::Widget for Fizzle {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn update(&mut self) -> Result<bool, Box<dyn Error>> {
+        Ok(Self::update(self))
+    }
 }

@@ -10,5 +10,6 @@ toodle_done/*
 /perf.data
 /perf.data.old
 /budgit.csv
+/budgit.conf
 /toodle.conf
 /hunger.txt

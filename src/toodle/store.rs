@@ -20,7 +20,8 @@ pub(super) const MAX_PAGES_PER_SECTION: usize = 4;
 
 /// Config file naming the directory that holds every toodle markdown file. The
 /// first non-blank, non-comment line is the root path (`~` expands to `$HOME`).
-const TOODLE_CONF_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/toodle.conf");
+/// Looked up in `$XDG_CONFIG_HOME/cozyui/` first, then the source checkout.
+const TOODLE_CONF_FILE: &str = "toodle.conf";
 /// Root used when `toodle.conf` is missing or blank.
 const DEFAULT_TOODLE_ROOT: &str = "~/Desktop/RemoteVault/✅ Toodle/";
 const TODO_FILE_NAMES: [&str; SECTION_COUNT] = [
@@ -39,7 +40,7 @@ const ARCHIVE_TRANSACTION_NAME: &str = "toodle_archive_transaction.json";
 pub(super) fn toodle_root() -> &'static str {
     static ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
-        let configured = fs::read_to_string(TOODLE_CONF_PATH)
+        let configured = fs::read_to_string(crate::paths::config_file(TOODLE_CONF_FILE))
             .ok()
             .and_then(|text| {
                 text.lines()
@@ -462,7 +463,10 @@ impl DoneCounts {
             }
             let count = read_or_empty(&path)?
                 .lines()
-                .filter(|line| !line.trim().is_empty())
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    !trimmed.is_empty() && !trimmed.starts_with('#')
+                })
                 .count();
             changed |= count != state.count;
             *state = DoneFile {
@@ -486,7 +490,7 @@ pub(super) struct AtomicWrite {
 
 impl AtomicWrite {
     pub(super) fn stage(path: &str, contents: impl AsRef<[u8]>) -> Result<Self, Box<dyn Error>> {
-        let temp_path = format!("{path}.tmp.{}", std::process::id());
+        let temp_path = crate::util::unique_temp_path(path);
         {
             let mut file = OpenOptions::new()
                 .create(true)

@@ -14,7 +14,6 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const REQUEST_TIMEOUT_SECS: &str = "30";
@@ -91,7 +90,9 @@ struct CurlBodyFile {
 
 impl CurlBodyFile {
     fn new(contents: &[u8]) -> Result<Self, String> {
-        let path = unique_temp_path();
+        let mut base = env::temp_dir();
+        base.push(format!("cozyui-openrouter-{}.json", std::process::id()));
+        let path = PathBuf::from(crate::util::unique_temp_path(&base.to_string_lossy()));
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -114,19 +115,6 @@ impl Drop for CurlBodyFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
-}
-
-fn unique_temp_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let mut path = env::temp_dir();
-    path.push(format!(
-        "cozyui-openrouter-{}-{nanos}.json",
-        std::process::id()
-    ));
-    path
 }
 
 /// Message content as plain text: either a JSON string or, when server-side

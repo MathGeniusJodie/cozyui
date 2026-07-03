@@ -13,16 +13,10 @@ use std::path::{Path, PathBuf};
 
 use pixel_graphics::{Palette, Rgba, Sprite};
 
-const PALETTE_PNG: &str = "na16-1x.png";
+const PALETTE_PNG: &str = "assets/na16-1x.png";
 
-/// Sprites living outside `assets/`.
-const ROOT_SPRITES: &[&str] = &[
-    "desk.png",
-    "wavey.png",
-    "puter_g_lc.png",
-    "puter_o_lc.png",
-    "puter_hc.png",
-];
+/// PNGs in `assets/` that are not palette sprites and must not be baked.
+const NON_SPRITE_PNGS: &[&str] = &["na16-1x.png", "emoji_U+1F600.png"];
 
 const GLYPH_ATLAS_PNG: &str = "glyphs/0000-007F.png";
 // Must match GLYPH_W/GLYPH_H in src/puter.rs.
@@ -31,14 +25,11 @@ const GLYPH_H: usize = 12;
 
 fn main() {
     println!("cargo::rerun-if-changed=assets");
-    println!("cargo::rerun-if-changed={PALETTE_PNG}");
     println!("cargo::rerun-if-changed={GLYPH_ATLAS_PNG}");
-    for path in ROOT_SPRITES {
-        println!("cargo::rerun-if-changed={path}");
-    }
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let palette = Palette::load(PALETTE_PNG).unwrap();
+    let palette = Palette::load(PALETTE_PNG)
+        .unwrap_or_else(|e| panic!("failed to load palette {PALETTE_PNG}: {e}"));
     let mut out = String::new();
 
     let palette_bytes: Vec<u8> = (0..palette.len())
@@ -53,10 +44,14 @@ fn main() {
          include_bytes!(concat!(env!(\"OUT_DIR\"), \"/palette.bin\"));\n",
     );
 
-    let mut sprite_paths: Vec<PathBuf> = ROOT_SPRITES.iter().map(PathBuf::from).collect();
-    for entry in std::fs::read_dir("assets").unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "png") {
+    let mut sprite_paths: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir("assets").expect("failed to read assets/") {
+        let path = entry.expect("failed to read assets/ entry").path();
+        let skip = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| NON_SPRITE_PNGS.contains(&n));
+        if !skip && path.extension().is_some_and(|e| e == "png") {
             sprite_paths.push(path);
         }
     }
@@ -70,13 +65,18 @@ fn main() {
 }
 
 fn bake_sprite(path: &Path, palette: &Palette, out_dir: &Path, out: &mut String) {
-    let sprite = Sprite::load_native(path.to_str().unwrap(), palette).unwrap();
-    let name = path
-        .file_stem()
-        .unwrap()
+    let path_str = path
         .to_str()
-        .unwrap()
-        .replace('-', "_");
+        .unwrap_or_else(|| panic!("non-UTF-8 sprite path {}", path.display()));
+    let sprite = Sprite::load_native(path_str, palette)
+        .unwrap_or_else(|e| panic!("failed to bake sprite {path_str}: {e}"));
+    let name: String = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_else(|| panic!("bad sprite file name {path_str}"))
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
 
     let sprite = &sprite;
     let pixels: Vec<u8> = (0..sprite.height)

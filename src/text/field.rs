@@ -47,11 +47,13 @@ impl TextField {
         self.text = text.to_string();
         let cursor = self.edit.cursor().min(char_len(&self.text));
         self.edit.set_cursor(cursor, &self.text);
+        self.edit.clear_undo();
     }
 
     pub(crate) fn clear(&mut self) {
         self.text.clear();
         self.edit.set_cursor(0, &self.text);
+        self.edit.clear_undo();
     }
 
     pub(crate) fn set_cursor(&mut self, cursor: usize) {

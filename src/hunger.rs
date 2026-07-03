@@ -5,7 +5,7 @@
 
 use std::error::Error;
 use std::fs;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::localtime;
 use crate::palette_color;
@@ -78,7 +78,7 @@ impl Hunger {
         let width = APPLES * apple_100.width + (APPLES - 1) * APPLE_GAP;
         let height = apple_100.height + BAR_TEXT_GAP + font.cell_h();
 
-        let now = now_secs();
+        let now = crate::util::now_secs();
         // Default: assume every past meal has already been eaten, so the bar
         // simply counts down to the next upcoming meal.
         let eaten_through = load_state().unwrap_or_else(|| prev_meal(now));
@@ -119,7 +119,7 @@ impl Hunger {
             return false;
         }
         self.last_check = now;
-        let view = render_view(self.target, self.span, now_secs());
+        let view = render_view(self.target, self.span, crate::util::now_secs());
         if view == self.view {
             return false;
         }
@@ -134,10 +134,11 @@ impl Hunger {
         if !self.view.is_empty() {
             return false;
         }
-        let now = now_secs();
+        let now = crate::util::now_secs();
         let eaten_through = prev_meal(now);
         if let Err(err) = save_state(eaten_through) {
             eprintln!("hunger save failed: {err}");
+            return false;
         }
         (self.target, self.span) = meal_window(eaten_through);
         self.view = render_view(self.target, self.span, now);
@@ -176,18 +177,21 @@ impl Hunger {
     }
 }
 
-fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
-}
-
 fn load_state() -> Option<f64> {
-    fs::read_to_string(STATE_PATH).ok()?.trim().parse().ok()
+    match fs::read_to_string(STATE_PATH) {
+        Ok(text) => match text.trim().parse().ok() {
+            Some(value) => Some(value),
+            None => {
+                eprintln!("hunger: state file exists but failed to parse; treating as first run");
+                None
+            }
+        },
+        Err(_) => None,
+    }
 }
 
 fn save_state(eaten_through: f64) -> Result<(), Box<dyn Error>> {
-    fs::write(STATE_PATH, format!("{eaten_through}\n"))?;
+    crate::util::atomic_write(STATE_PATH, format!("{eaten_through}\n"))?;
     Ok(())
 }
 
@@ -196,7 +200,7 @@ fn save_state(eaten_through: f64) -> Result<(), Box<dyn Error>> {
 /// sense for the current instant, so callers scan a range of days around it
 /// rather than asking for the midnight of some other timestamp.
 fn today_midnight() -> f64 {
-    let now = now_secs();
+    let now = crate::util::now_secs();
     localtime::local_time().map_or_else(
         || (now as i64 / 86400 * 86400) as f64,
         |tm| {
@@ -273,6 +277,43 @@ fn fmt_countdown(secs: f64) -> String {
     }
 }
 
+impl crate::widget::Widget for Hunger {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn update(&mut self) -> Result<bool, Box<dyn Error>> {
+        Ok(Self::update(self))
+    }
+
+    fn click(
+        &mut self,
+        _x: i16,
+        _y: i16,
+        _state: u16,
+    ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
+        Self::click(self);
+        Ok(crate::widget::ClickOutcome::default())
+    }
+
+    // Clicking anywhere logs a meal.
+    fn cursor_at(&self, _x: i16, _y: i16) -> crate::CursorKind {
+        crate::CursorKind::Hand
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,7 +355,7 @@ mod tests {
 
     #[test]
     fn next_and_prev_meal_bracket_now() {
-        let now = now_secs();
+        let now = crate::util::now_secs();
         assert!(prev_meal(now) <= now);
         assert!(next_meal(now) > now);
         assert!(next_meal(now) - prev_meal(now) <= DAY);
@@ -338,3 +379,4 @@ mod tests {
         assert_eq!(after - meal, 3.25 * 3600.0);
     }
 }
+

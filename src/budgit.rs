@@ -18,11 +18,12 @@ const WIDTH: usize = 210;
 const MONTH_SECS: f64 = (365.25 / 12.0) * 24.0 * 3600.0;
 const DAYS_PER_MONTH: f64 = 365.25 / 12.0;
 
-/// Path to the editable budget config (see `budgit.conf`).
-const CONFIG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/budgit.conf");
+/// Editable budget config (see `budgit.conf`), looked up in
+/// `$XDG_CONFIG_HOME/cozyui/` first, then the source checkout.
+const CONFIG_FILE: &str = "budgit.conf";
 
-/// Path to the ledger CSV whose entries sum to the starting balance.
-const LEDGER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/budgit.csv");
+/// Ledger CSV whose entries sum to the starting balance; same lookup.
+const LEDGER_FILE: &str = "budgit.csv";
 
 const REFRESH: Duration = Duration::from_secs(1);
 
@@ -30,12 +31,14 @@ const REFRESH: Duration = Duration::from_secs(1);
 /// end of the previous scan, so a slow scan never overlaps the next).
 const SVG_REFRESH: Duration = Duration::from_secs(1);
 
-/// Folder of finished templates; its SVGs set the "paths per finished SVG"
-/// baseline used to estimate how many in-progress SVGs are complete.
-const DONE_DIR: &str = "~/Desktop/allfiles/templates/done/";
+/// Default folder of finished templates; its SVGs set the "paths per finished
+/// SVG" baseline used to estimate how many in-progress SVGs are complete.
+/// Overridable in `budgit.conf` with `svg done dir = <path>`.
+const DEFAULT_DONE_DIR: &str = "~/Desktop/allfiles/templates/done/";
 
-/// Folder of in-progress templates (the `done/` subfolder is excluded).
-const TEMPLATES_DIR: &str = "~/Desktop/allfiles/templates/";
+/// Default folder of in-progress templates (the `done/` subfolder is
+/// excluded). Overridable in `budgit.conf` with `svg templates dir = <path>`.
+const DEFAULT_TEMPLATES_DIR: &str = "~/Desktop/allfiles/templates/";
 
 const TOP_GAP: usize = 12;
 const LABEL_GAP: usize = 4;
@@ -58,6 +61,10 @@ struct Period {
 struct Config {
     periods: Vec<Period>,
     dollars_per_svg: f64,
+    /// Folder whose finished SVGs set the paths-per-SVG baseline.
+    done_dir: String,
+    /// Folder of in-progress SVG templates.
+    templates_dir: String,
 }
 
 impl Config {
@@ -69,6 +76,8 @@ impl Config {
     fn parse(text: &str) -> Result<Self, Box<dyn Error>> {
         let mut periods: Vec<Period> = Vec::new();
         let mut dollars_per_svg = 0.0;
+        let mut done_dir = DEFAULT_DONE_DIR.to_string();
+        let mut templates_dir = DEFAULT_TEMPLATES_DIR.to_string();
 
         for raw in text.lines() {
             let line = raw.split('#').next().unwrap_or("").trim();
@@ -89,7 +98,15 @@ impl Config {
                 .ok_or_else(|| format!("budgit.conf: missing '=' in line: {raw}"))?;
             let label = label.trim();
             let value = value.trim();
-            // Global setting (not tied to any expense period).
+            // Global settings (not tied to any expense period).
+            if label.eq_ignore_ascii_case("svg done dir") {
+                done_dir = value.to_string();
+                continue;
+            }
+            if label.eq_ignore_ascii_case("svg templates dir") {
+                templates_dir = value.to_string();
+                continue;
+            }
             if label.eq_ignore_ascii_case("dollars per svg") {
                 let value = value.trim_matches('$').trim();
                 dollars_per_svg = value
@@ -114,6 +131,8 @@ impl Config {
         Ok(Self {
             periods,
             dollars_per_svg,
+            done_dir,
+            templates_dir,
         })
     }
 }
@@ -123,7 +142,7 @@ impl Config {
 /// row, blank lines, and `#` comments are skipped, and the date is optional
 /// (only the amount is used). A missing file means a zero balance.
 fn load_ledger_balance() -> Result<f64, Box<dyn Error>> {
-    match fs::read_to_string(LEDGER_PATH) {
+    match fs::read_to_string(crate::paths::config_file(LEDGER_FILE)) {
         Ok(text) => sum_ledger(&text),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0.0),
         Err(err) => Err(err.into()),
@@ -131,9 +150,11 @@ fn load_ledger_balance() -> Result<f64, Box<dyn Error>> {
 }
 
 /// Sums the amount column of ledger CSV text. See [`load_ledger_balance`].
+/// A malformed line is skipped (with a warning naming the line number) rather
+/// than aborting the whole widget.
 fn sum_ledger(text: &str) -> Result<f64, Box<dyn Error>> {
     let mut balance = 0.0;
-    for raw in text.lines() {
+    for (i, raw) in text.lines().enumerate() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
@@ -145,9 +166,15 @@ fn sum_ledger(text: &str) -> Result<f64, Box<dyn Error>> {
         if amount.eq_ignore_ascii_case("amount") {
             continue;
         }
-        balance += amount
-            .parse::<f64>()
-            .map_err(|_| format!("budgit.csv: bad amount for {title:?}: {amount}"))?;
+        match amount.parse::<f64>() {
+            Ok(value) => balance += value,
+            Err(_) => {
+                eprintln!(
+                    "budgit.csv: skipping malformed line {}: bad amount for {title:?}: {amount}",
+                    i + 1
+                );
+            }
+        }
     }
     Ok(balance)
 }
@@ -207,16 +234,16 @@ impl Budgit {
             &pixel_fonts::FUSION_PIXEL_8_SPEC,
         )?;
 
-        let config = Config::parse(&fs::read_to_string(CONFIG_PATH)?)?;
+        let config = Config::parse(&fs::read_to_string(crate::paths::config_file(CONFIG_FILE))?)?;
         let start_balance = load_ledger_balance()?;
         // The estimate starts at zero and is filled in by the background
         // counter once its first off-thread scan completes.
         let svgs_completed = 0.0;
-        let svg_rx = spawn_svg_counter();
+        let svg_rx = spawn_svg_counter(config.done_dir.clone(), config.templates_dir.clone());
         let view = compute_view(
             start_balance,
             &config.periods,
-            now_secs(),
+            crate::util::now_secs(),
             svgs_completed,
             config.dollars_per_svg,
         );
@@ -281,7 +308,7 @@ impl Budgit {
         let view = compute_view(
             self.start_balance,
             &self.periods,
-            now_secs(),
+            crate::util::now_secs(),
             self.svgs_completed,
             self.dollars_per_svg,
         );
@@ -380,12 +407,6 @@ impl Budgit {
     }
 }
 
-fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
-}
-
 fn compute_view(
     start_balance: f64,
     periods: &[Period],
@@ -451,17 +472,17 @@ fn compute_view(
 /// folder's stamp changes; unchanged ticks resend the cached estimate, which
 /// also keeps the receiver-dropped exit path exercised. The thread exits when
 /// the receiver is dropped.
-fn spawn_svg_counter() -> Receiver<f64> {
+fn spawn_svg_counter(done_dir: String, templates_dir: String) -> Receiver<f64> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let avg = avg_paths_per_svg(DONE_DIR);
+        let avg = avg_paths_per_svg(&done_dir);
         let mut stamp = None;
         let mut completed = 0.0;
         loop {
-            let current = svg_dir_stamp(TEMPLATES_DIR);
+            let current = svg_dir_stamp(&templates_dir);
             if stamp != Some(current) {
                 stamp = Some(current);
-                completed = compute_svgs_completed(TEMPLATES_DIR, avg);
+                completed = compute_svgs_completed(&templates_dir, avg);
             }
             if tx.send(completed).is_err() {
                 break;
@@ -547,30 +568,30 @@ fn compute_svgs_completed(templates_dir: &str, avg_paths_per_svg: f64) -> f64 {
 /// Splits a money value into a big "-$1,234" dollar string and a ".5678"
 /// fractional tail for the smaller line.
 fn split_money(value: f64) -> (String, String) {
-    let neg = value < 0.0;
-    let abs = value.abs();
-    let dollars = abs.trunc() as i64;
-    let frac = ((abs.fract()) * 10000.0).round() as i64;
-    let sign = if neg { "-" } else { "" };
+    // Round once at display precision, then split: rounding the fraction on
+    // its own could carry it to a whole unit ($123.99995 -> "$123.10000").
+    let scaled = (value * 10000.0).round() as i64;
+    let sign = if scaled < 0 { "-" } else { "" };
+    let scaled = scaled.abs();
     (
-        format!("{sign}${}", group_digits(dollars)),
-        format!(".{frac:04}"),
+        format!("{sign}${}", group_digits(scaled / 10000)),
+        format!(".{:04}", scaled % 10000),
     )
 }
 
 fn fmt_money(value: f64, decimals: usize) -> String {
-    let neg = value < 0.0;
-    let abs = value.abs();
-    let whole = abs.trunc() as i64;
-    let sign = if neg { "-" } else { "" };
+    let scale = 10f64.powi(decimals as i32) as i64;
+    let scaled = (value * scale as f64).round() as i64;
+    let sign = if scaled < 0 { "-" } else { "" };
+    let scaled = scaled.abs();
+    let whole = scaled / scale;
     if decimals == 0 {
         return format!("{sign}${}", group_digits(whole));
     }
-    let scale = 10f64.powi(decimals as i32);
-    let cents = (abs.fract() * scale).round() as i64;
     format!(
-        "{sign}${}.{cents:0width$}",
+        "{sign}${}.{:0width$}",
         group_digits(whole),
+        scaled % scale,
         width = decimals
     )
 }
@@ -597,6 +618,28 @@ const fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
     let doy = (153 * mp + 2) / 5 + (d as i64) - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+impl crate::widget::Widget for Budgit {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn update(&mut self) -> Result<bool, Box<dyn Error>> {
+        Ok(Self::update(self))
+    }
 }
 
 #[cfg(test)]
@@ -661,9 +704,9 @@ mod tests {
     }
 
     #[test]
-    fn ledger_empty_is_zero_and_bad_amount_errors() {
+    fn ledger_empty_is_zero_and_bad_amount_is_skipped() {
         assert_eq!(sum_ledger("title,amount,date\n").unwrap(), 0.0);
-        assert!(sum_ledger("Rent,oops\n").is_err());
+        assert_eq!(sum_ledger("Rent,oops\n").unwrap(), 0.0);
     }
 
     #[test]
@@ -709,3 +752,4 @@ mod tests {
         assert_eq!(view.days_left, "0d");
     }
 }
+

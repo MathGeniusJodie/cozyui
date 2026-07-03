@@ -55,6 +55,18 @@ impl KeyInput {
     pub(crate) fn is_letter(&self, lower: u32, upper: u32, letter: &str) -> bool {
         self.sym_raw() == lower || self.sym_raw() == upper || self.text.eq_ignore_ascii_case(letter)
     }
+
+    /// Ctrl+Shift+V (terminal-style paste).
+    pub(crate) fn is_paste_shortcut(&self) -> bool {
+        self.ctrl()
+            && self.shift()
+            && self.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
+    }
+
+    /// Ctrl+V (plain paste).
+    pub(crate) fn is_plain_paste_shortcut(&self) -> bool {
+        self.ctrl() && self.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
+    }
 }
 
 pub struct Keyboard {

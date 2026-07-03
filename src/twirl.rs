@@ -2,7 +2,7 @@ use std::error::Error;
 use std::f32::consts::TAU;
 use std::fs;
 use std::process::Command;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use crate::app_color;
 use crate::palette_color;
@@ -163,8 +163,11 @@ impl Twirl {
 
         if self.speed < STOP_SPEED {
             self.speed = 0.0;
-            self.add_landed_value()?;
-            play_jingle();
+            if let Err(err) = self.add_landed_value() {
+                eprintln!("twirl save failed: {err}");
+            } else {
+                play_jingle();
+            }
         }
 
         Ok(true)
@@ -214,10 +217,12 @@ impl Twirl {
         // Spinning while already spinning shouldn't discard the in-progress
         // spin, but awarding the current pointer segment would let players time
         // their re-spin to pick a result. Award a random segment instead.
-        if self.speed > 0.0 {
-            let _ = self.add_random_value();
+        if self.speed > 0.0
+            && let Err(err) = self.add_random_value()
+        {
+            eprintln!("twirl save failed: {err}");
         }
-        self.speed = random_unit().mul_add(START_SPEED_RANGE, START_SPEED_MIN);
+        self.speed = crate::util::random_unit().mul_add(START_SPEED_RANGE, START_SPEED_MIN);
         self.last_update = Instant::now();
         self.last_click_segment = self.pointer_segment();
         play_click();
@@ -259,7 +264,8 @@ impl Twirl {
     }
 
     fn add_random_value(&mut self) -> Result<(), Box<dyn Error>> {
-        let segment = (random_unit() * SEGMENT_COUNT as f32) as usize % SEGMENT_COUNT;
+        let segment =
+            (crate::util::random_unit() * SEGMENT_COUNT as f32) as usize % SEGMENT_COUNT;
         self.add_segment_value(segment)
     }
 
@@ -291,14 +297,6 @@ fn normalize_angle(angle: f32) -> f32 {
     angle.rem_euclid(TAU)
 }
 
-fn random_unit() -> f32 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .subsec_nanos();
-    (nanos % 10_000) as f32 / 10_000.0
-}
-
 fn segment_value(segment: usize) -> Result<u64, Box<dyn Error>> {
     Ok(SEGMENT_NUMBERS[segment].parse()?)
 }
@@ -313,7 +311,7 @@ fn load_total(path: &str) -> Result<u64, Box<dyn Error>> {
 }
 
 fn save_total(path: &str, total: u64) -> Result<(), Box<dyn Error>> {
-    fs::write(path, format!("{total}\n"))?;
+    crate::util::atomic_write(path, format!("{total}\n"))?;
     Ok(())
 }
 
@@ -421,6 +419,42 @@ fn wav_bytes(samples: &[i16]) -> Vec<u8> {
     bytes
 }
 
+impl crate::widget::Widget for Twirl {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn update(&mut self) -> Result<bool, Box<dyn Error>> {
+        Self::update(self)
+    }
+
+    fn click(
+        &mut self,
+        x: i16,
+        y: i16,
+        _state: u16,
+    ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
+        Self::click(self, x, y);
+        Ok(crate::widget::ClickOutcome::default())
+    }
+
+    fn cursor_at(&self, x: i16, y: i16) -> crate::CursorKind {
+        self.cursor_at(x, y)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,3 +482,4 @@ mod tests {
         assert_eq!(segment_value(SEGMENT_COUNT - 1).unwrap(), 100);
     }
 }
+

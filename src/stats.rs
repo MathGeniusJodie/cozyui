@@ -53,6 +53,7 @@ pub struct Stats {
     font: BitmapFont,
     week: WeekCounts,
     last_check: Instant,
+    logged_error: bool,
 }
 
 impl Stats {
@@ -65,6 +66,7 @@ impl Stats {
             font,
             week: read_week_counts()?,
             last_check: Instant::now(),
+            logged_error: false,
         })
     }
 
@@ -90,8 +92,18 @@ impl Stats {
             return false;
         }
         self.last_check = now;
-        let Ok(week) = read_week_counts() else {
-            return false;
+        let week = match read_week_counts() {
+            Ok(week) => {
+                self.logged_error = false;
+                week
+            }
+            Err(err) => {
+                if !self.logged_error {
+                    eprintln!("stats: failed to read week counts: {err}");
+                    self.logged_error = true;
+                }
+                return false;
+            }
         };
         if week == self.week {
             return false;
@@ -226,6 +238,28 @@ const fn civil_from_days(z: i64) -> (i32, i32, i32) {
     ((y + if m <= 2 { 1 } else { 0 }) as i32, m as i32, d as i32)
 }
 
+impl crate::widget::Widget for Stats {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn update(&mut self) -> Result<bool, Box<dyn Error>> {
+        Ok(Self::update(self))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,3 +283,4 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 }
+

@@ -830,7 +830,7 @@ impl Toodle {
             .take(section)
             .map(|store| store.list().page_count())
             .sum::<usize>()
-            + section_page.min(self.list(section).page_count() - 1)
+            + section_page.min(self.list(section).page_count().saturating_sub(1))
     }
 
     fn keep_section_page_visible(&mut self, page: PageRef) {
@@ -981,7 +981,7 @@ impl Toodle {
             })
             .collect();
         self.highlighted = candidates
-            .get(random_index(candidates.len()))
+            .get(crate::util::random_index(candidates.len()))
             .map(|&line| (section, page, line));
     }
 
@@ -994,6 +994,67 @@ impl Toodle {
             self.eraser.width,
             self.eraser.height,
         )
+    }
+}
+
+impl crate::widget::Widget for Toodle {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn click(
+        &mut self,
+        x: i16,
+        y: i16,
+        _state: u16,
+    ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
+        let spin_twirl = Self::click(self, x, y)?;
+        Ok(crate::widget::ClickOutcome {
+            spin_twirl,
+            text_drag: self.text_dragging(),
+            copy_text: None,
+        })
+    }
+
+    fn blur(&mut self) {
+        self.focused_line = None;
+        self.field.end_drag();
+    }
+
+    fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+        self.cursor_at(x, y)
+    }
+
+    fn handle_key_press(
+        &mut self,
+        input: &KeyInput,
+        clipboard_text: Option<&str>,
+    ) -> Result<Option<String>, Box<dyn Error>> {
+        Self::handle_key_press(self, input, clipboard_text)
+    }
+
+    fn wants_clipboard(&self, input: &KeyInput) -> bool {
+        input.is_plain_paste_shortcut()
+    }
+
+    fn drag_text(&mut self, x: i16, y: i16) -> bool {
+        Self::drag_text(self, x, y)
+    }
+
+    fn end_text_drag(&mut self) {
+        Self::end_text_drag(self);
     }
 }
 
@@ -1124,15 +1185,6 @@ const BLUE_PAGE_REMAP: [Index; 16] = {
     remap
 };
 
-/// A pseudo-random index in `0..len` (returns 0 when `len` is 0).
-fn random_index(len: usize) -> usize {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .subsec_nanos() as usize;
-    nanos % len.max(1)
-}
-
 /// Whether `(x, y)` (negative values clamped to 0) falls inside the rectangle at
 /// `(left, top)` of the given size.
 fn point_in_rect(x: i16, y: i16, left: usize, top: usize, width: usize, height: usize) -> bool {
@@ -1149,7 +1201,8 @@ fn checkbox_at(x: usize, y: usize) -> Option<usize> {
 
 fn line_at(y: usize) -> Option<usize> {
     LINE_Y.iter().position(|&line_y| {
-        y >= line_y - 17 + LINE_CLICK_OFFSET_Y && y < line_y + 4 + LINE_CLICK_OFFSET_Y
+        let low = (line_y as isize - 17 + LINE_CLICK_OFFSET_Y as isize).max(0) as usize;
+        y >= low && y < line_y + 4 + LINE_CLICK_OFFSET_Y
     })
 }
 

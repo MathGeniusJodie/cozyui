@@ -2,11 +2,14 @@ use xkbcommon::xkb::keysyms;
 
 use super::input::{EditKey, KeyInput, edit_key};
 
+/// Oldest undo states are dropped past this depth.
+const UNDO_LIMIT: usize = 100;
+
 #[derive(Clone, Default)]
 pub struct TextEdit {
     cursor: usize,
     anchor: Option<usize>,
-    undo: Option<String>,
+    undo: Vec<String>,
     drag_anchor: Option<usize>,
 }
 
@@ -127,7 +130,7 @@ impl TextEdit {
                     };
                 }
                 keysyms::KEY_z | keysyms::KEY_Z => {
-                    let Some(previous) = self.undo.take() else {
+                    let Some(previous) = self.undo.pop() else {
                         return TextEditOutcome::Handled {
                             changed: false,
                             copy: None,
@@ -203,7 +206,17 @@ impl TextEdit {
     }
 
     fn save_undo(&mut self, text: &str) {
-        self.undo = Some(text.to_string());
+        if self.undo.len() == UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.undo.push(text.to_string());
+    }
+
+    /// Forget the undo history; called when the buffer is swapped out from
+    /// under the editor (focus moved to a different field/line), so undo can
+    /// never resurrect another field's text.
+    pub(crate) fn clear_undo(&mut self) {
+        self.undo.clear();
     }
 
     fn move_cursor(&mut self, text: &str, delta: isize, selecting: bool) {
@@ -249,45 +262,68 @@ impl TextEdit {
     where
         F: FnMut(&str) -> bool,
     {
-        let filtered = insert
+        let filtered_chars = insert
             .chars()
             .filter(|ch| *ch != '\n' && *ch != '\r' && !ch.is_control())
-            .collect::<String>();
-        if filtered.is_empty() {
+            .collect::<Vec<char>>();
+        if filtered_chars.is_empty() {
             return false;
         }
 
-        let mut changed = false;
-        for ch in filtered.chars() {
-            let candidate = self.candidate_with_insert(text, ch);
-            if !can_replace(&candidate) {
-                continue;
-            }
-            if !changed {
-                self.save_undo(text);
-                if self.selection_range().is_some() {
-                    self.delete_selection(text);
+        // Text with the current selection (if any) already removed; every
+        // candidate below is built from this once, instead of re-cloning the
+        // whole buffer per inserted character.
+        let (base, insert_at) = if let Some((start, end)) = self.selection_range() {
+            let mut base = text.clone();
+            base.replace_range(char_to_byte(text, start)..char_to_byte(text, end), "");
+            (base, start)
+        } else {
+            (text.clone(), self.cursor)
+        };
+
+        // `can_replace` (char/line limits) only gets harder to satisfy as more
+        // text is inserted, so the longest accepted prefix can be found with a
+        // binary search over prefix length instead of a linear scan that
+        // clones the buffer once per character.
+        let build = |count: usize| -> String {
+            let mut candidate = base.clone();
+            let prefix: String = filtered_chars[..count].iter().collect();
+            let byte = char_to_byte(&base, insert_at);
+            candidate.insert_str(byte, &prefix);
+            candidate
+        };
+
+        let total = filtered_chars.len();
+        let accepted = if can_replace(&build(total)) {
+            total
+        } else {
+            let mut low = 0usize;
+            let mut high = total;
+            while low < high {
+                let mid = low + (high - low).div_ceil(2);
+                if can_replace(&build(mid)) {
+                    low = mid;
+                } else {
+                    high = mid - 1;
                 }
             }
-            let byte = char_to_byte(text, self.cursor);
-            text.insert(byte, ch);
-            self.cursor += 1;
-            self.anchor = None;
-            changed = true;
-        }
-        changed
-    }
+            low
+        };
 
-    fn candidate_with_insert(&self, text: &str, ch: char) -> String {
-        let mut candidate = text.to_string();
-        if let Some((start, end)) = self.selection_range() {
-            candidate.replace_range(char_to_byte(text, start)..char_to_byte(text, end), "");
-            let byte = char_to_byte(&candidate, start);
-            candidate.insert(byte, ch);
-        } else {
-            candidate.insert(char_to_byte(text, self.cursor), ch);
+        if accepted == 0 {
+            return false;
         }
-        candidate
+
+        self.save_undo(text);
+        if self.selection_range().is_some() {
+            self.delete_selection(text);
+        }
+        let prefix: String = filtered_chars[..accepted].iter().collect();
+        let byte = char_to_byte(text, self.cursor);
+        text.insert_str(byte, &prefix);
+        self.cursor += accepted;
+        self.anchor = None;
+        true
     }
 
     fn backspace(&mut self, text: &mut String) -> bool {

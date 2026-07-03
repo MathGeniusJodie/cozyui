@@ -209,7 +209,7 @@ impl Puter {
             return;
         }
 
-        self.selection_point = self.terminal().mouse_press(x, y, state);
+        self.selection_point = self.terminal().and_then(|term| term.mouse_press(x, y, state));
         self.selecting_terminal = self.selection_point.is_some();
     }
 
@@ -223,16 +223,20 @@ impl Puter {
             match BUTTON_TARGETS[pressed].action {
                 ButtonAction::Power => quit = true,
                 ButtonAction::Lock => {
-                    let _ = std::process::Command::new("xflock4").spawn();
+                    if let Err(err) = std::process::Command::new("xflock4").spawn() {
+                        eprintln!("puter: failed to spawn xflock4: {err}");
+                    }
                 }
                 action => self.settings.toggle(action),
             }
         }
         self.active_button = None;
-        if self.selecting_terminal {
-            self.terminal().selection_to_clipboard();
-        } else {
-            self.terminal().mouse_release(x, y);
+        if let Some(term) = self.terminal() {
+            if self.selecting_terminal {
+                term.selection_to_clipboard();
+            } else {
+                term.mouse_release(x, y);
+            }
         }
         self.selecting_terminal = false;
         self.selection_point = None;
@@ -265,7 +269,7 @@ impl Puter {
             return false;
         }
 
-        let Some(point) = self.terminal().screen_point(x, y) else {
+        let Some(point) = self.terminal().and_then(|term| term.screen_point(x, y)) else {
             return false;
         };
         if self.selection_point == Some(point) {
@@ -273,7 +277,7 @@ impl Puter {
         }
 
         self.selection_point = Some(point);
-        self.terminal().mouse_motion(point)
+        self.terminal().is_some_and(|term| term.mouse_motion(point))
     }
 
     pub(crate) fn start_terminal(&mut self, window_id: u64) -> Result<(), Box<dyn Error>> {
@@ -283,7 +287,13 @@ impl Puter {
     }
 
     pub(crate) fn drain_terminal_events(&self) -> TerminalEvents {
-        self.terminal().drain_events()
+        self.terminal().map_or(
+            TerminalEvents {
+                running: true,
+                dirty: false,
+            },
+            Terminal::drain_events,
+        )
     }
 
     pub(crate) fn handle_key_press(
@@ -291,15 +301,19 @@ impl Puter {
         input: &KeyInput,
         clipboard_text: Option<&str>,
     ) -> Option<String> {
-        self.terminal().handle_key_press(input, clipboard_text)
+        self.terminal()?.handle_key_press(input, clipboard_text)
     }
 
     pub(crate) fn scroll_up(&self) {
-        self.terminal().scroll(Scroll::Delta(SCROLL_LINES));
+        if let Some(term) = self.terminal() {
+            term.scroll(Scroll::Delta(SCROLL_LINES));
+        }
     }
 
     pub(crate) fn scroll_down(&self) {
-        self.terminal().scroll(Scroll::Delta(-SCROLL_LINES));
+        if let Some(term) = self.terminal() {
+            term.scroll(Scroll::Delta(-SCROLL_LINES));
+        }
     }
 
     pub(crate) fn shutdown_terminal(&mut self) {
@@ -310,9 +324,12 @@ impl Puter {
 
     #[allow(clippy::significant_drop_tightening)]
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let term = self.terminal().term();
-
         self.render_chrome(fb, palette);
+
+        let Some(term) = self.terminal() else {
+            return;
+        };
+        let term = term.term();
 
         let cell_w = GLYPH_W;
         let cell_h = GLYPH_H;
@@ -469,10 +486,13 @@ impl Puter {
         }
     }
 
-    const fn terminal(&self) -> &Terminal {
-        self.terminal
-            .as_ref()
-            .expect("puter terminal must be started before use")
+    /// The active terminal, or `None` (with a diagnostic) if it hasn't been
+    /// started yet. Call sites should degrade gracefully rather than panic.
+    fn terminal(&self) -> Option<&Terminal> {
+        if self.terminal.is_none() {
+            eprintln!("puter: terminal not started; ignoring request");
+        }
+        self.terminal.as_ref()
     }
 
     fn terminal_color(&self, color: Color, palette: &Palette) -> Index {
@@ -549,6 +569,62 @@ impl Puter {
     #[allow(clippy::unused_self)]
     const fn background_terminal_bg_color(&self, _palette: &Palette) -> Index {
         palette_color::BLACK
+    }
+}
+
+impl crate::widget::Widget for Puter {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn click(
+        &mut self,
+        x: i16,
+        y: i16,
+        state: u16,
+    ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
+        self.press_button(x, y, state);
+        Ok(crate::widget::ClickOutcome::default())
+    }
+
+    fn motion(&mut self, x: i16, y: i16) -> bool {
+        Self::motion(self, x, y)
+    }
+
+    fn scroll(&mut self, _x: i16, _y: i16, direction: crate::widget::ScrollDirection) -> bool {
+        match direction {
+            crate::widget::ScrollDirection::Up => self.scroll_up(),
+            crate::widget::ScrollDirection::Down => self.scroll_down(),
+        }
+        true
+    }
+
+    fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+        self.cursor_at(x, y)
+    }
+
+    fn handle_key_press(
+        &mut self,
+        input: &KeyInput,
+        clipboard_text: Option<&str>,
+    ) -> Result<Option<String>, Box<dyn Error>> {
+        Ok(Self::handle_key_press(self, input, clipboard_text))
+    }
+
+    fn wants_clipboard(&self, input: &KeyInput) -> bool {
+        input.is_paste_shortcut()
     }
 }
 
@@ -636,12 +712,17 @@ struct Terminal {
     window_size: WindowSize,
     event_thread: Option<TerminalThread>,
     clipboard: FairMutex<String>,
+    /// Set after the first failed pty write so we only diagnose it once.
+    pty_send_failed: std::cell::Cell<bool>,
 }
 
 impl Terminal {
     fn open(window_id: u64) -> Result<Self, Box<dyn Error>> {
+        // One column is kept clear at the screen's right edge so bold/glow
+        // overdraw (glyphs redrawn at x+1) stays inside the CRT screen art.
+        const COLUMN_MARGIN: usize = 1;
         let size = TermSize {
-            columns: SCREEN_W / GLYPH_W - 1,
+            columns: SCREEN_W / GLYPH_W - COLUMN_MARGIN,
             lines: SCREEN_H / GLYPH_H,
         };
         let window_size = WindowSize {
@@ -676,6 +757,7 @@ impl Terminal {
         Ok(Self {
             rx,
             tx,
+            pty_send_failed: std::cell::Cell::new(false),
             term,
             window_size,
             event_thread,
@@ -687,6 +769,13 @@ impl Terminal {
         &self.term
     }
 
+    /// Send a message to the pty event loop, diagnosing (once) if it fails.
+    fn send_pty(&self, msg: Msg) {
+        if self.tx.send(msg).is_err() && !self.pty_send_failed.replace(true) {
+            eprintln!("puter: failed to write to pty (further failures will be suppressed)");
+        }
+    }
+
     fn drain_events(&self) -> TerminalEvents {
         let mut running = true;
         let mut dirty = false;
@@ -695,11 +784,11 @@ impl Terminal {
             match event {
                 Event::Exit | Event::ChildExit(_) => running = false,
                 Event::PtyWrite(text) => {
-                    let _ = self.tx.send(Msg::Input(Cow::Owned(text.into_bytes())));
+                    self.send_pty(Msg::Input(Cow::Owned(text.into_bytes())));
                 }
                 Event::TextAreaSizeRequest(formatter) => {
                     let text = formatter(self.window_size);
-                    let _ = self.tx.send(Msg::Input(Cow::Owned(text.into_bytes())));
+                    self.send_pty(Msg::Input(Cow::Owned(text.into_bytes())));
                 }
                 _ => {}
             }
@@ -713,18 +802,16 @@ impl Terminal {
             None
         } else if is_copy_shortcut(input) {
             self.selection_to_clipboard()
-        } else if is_paste_shortcut(input) {
+        } else if input.is_paste_shortcut() {
             let fallback = self.clipboard.lock();
             let text =
                 clipboard_text.or_else(|| (!fallback.is_empty()).then_some(fallback.as_str()))?;
             self.scroll(Scroll::Bottom);
-            let _ = self
-                .tx
-                .send(Msg::Input(Cow::Owned(text.as_bytes().to_vec())));
+            self.send_pty(Msg::Input(Cow::Owned(text.as_bytes().to_vec())));
             None
         } else if let Some(bytes) = key_bytes(input) {
             self.scroll(Scroll::Bottom);
-            let _ = self.tx.send(Msg::Input(Cow::Owned(bytes.into_bytes())));
+            self.send_pty(Msg::Input(Cow::Owned(bytes.into_bytes())));
             None
         } else {
             None
@@ -778,7 +865,7 @@ impl Terminal {
             point.line.0 + 1,
             suffix
         );
-        let _ = self.tx.send(Msg::Input(Cow::Owned(text.into_bytes())));
+        self.send_pty(Msg::Input(Cow::Owned(text.into_bytes())));
     }
 
     fn copy_selection(&self) -> Option<String> {
@@ -800,7 +887,7 @@ impl Terminal {
     }
 
     fn shutdown(mut self) {
-        let _ = self.tx.send(Msg::Shutdown);
+        self.send_pty(Msg::Shutdown);
         if let Some(event_thread) = self.event_thread.take() {
             let _ = event_thread.join();
         }
@@ -1280,17 +1367,15 @@ fn screen_point(x: i16, y: i16, size: &WindowSize) -> Option<Point> {
         return None;
     }
 
-    let column = ((x - screen_x) / size.cell_width as usize).min(size.num_cols as usize - 1);
-    let line = ((y - screen_y) / size.cell_height as usize).min(size.num_lines as usize - 1);
+    let column =
+        ((x - screen_x) / size.cell_width as usize).min((size.num_cols as usize).saturating_sub(1));
+    let line =
+        ((y - screen_y) / size.cell_height as usize).min((size.num_lines as usize).saturating_sub(1));
     Some(Point::new(Line(line as i32), Column(column)))
 }
 
 fn is_copy_shortcut(input: &KeyInput) -> bool {
     input.ctrl() && input.shift() && input.is_letter(keysyms::KEY_c, keysyms::KEY_C, "c")
-}
-
-fn is_paste_shortcut(input: &KeyInput) -> bool {
-    input.ctrl() && input.shift() && input.is_letter(keysyms::KEY_v, keysyms::KEY_V, "v")
 }
 
 fn key_bytes(input: &KeyInput) -> Option<String> {

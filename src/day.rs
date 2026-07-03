@@ -325,3 +325,40 @@ const fn short_month_name(month_index: usize) -> &'static str {
         _ => "JAN",
     }
 }
+
+impl crate::widget::Widget for Day {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn update(&mut self) -> Result<bool, Box<dyn Error>> {
+        Ok(Self::update(self))
+    }
+
+    fn click(
+        &mut self,
+        _x: i16,
+        _y: i16,
+        _state: u16,
+    ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
+        self.toggle_mode();
+        Ok(crate::widget::ClickOutcome::default())
+    }
+
+    // Clicking anywhere toggles the mode.
+    fn cursor_at(&self, _x: i16, _y: i16) -> crate::CursorKind {
+        crate::CursorKind::Hand
+    }
+}

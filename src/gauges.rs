@@ -47,6 +47,8 @@ pub struct Gauges {
     cpu_prev: (u64, u64),
     view: GaugeView,
     last_check: Instant,
+    cpu_read_failing: bool,
+    mem_read_failing: bool,
 }
 
 impl Gauges {
@@ -64,6 +66,8 @@ impl Gauges {
             cpu_prev,
             view: GaugeView { cpu: 0, mem, swap },
             last_check: Instant::now(),
+            cpu_read_failing: false,
+            mem_read_failing: false,
         })
     }
 
@@ -91,13 +95,40 @@ impl Gauges {
 
         let cpu = match read_cpu_times() {
             Some(sample) => {
+                if self.cpu_read_failing {
+                    eprintln!("gauges: /proc/stat reads recovered");
+                    self.cpu_read_failing = false;
+                }
                 let pct = cpu_percent(self.cpu_prev, sample).unwrap_or(self.view.cpu);
                 self.cpu_prev = sample;
                 pct
             }
-            None => self.view.cpu,
+            None => {
+                if !self.cpu_read_failing {
+                    eprintln!("gauges: /proc/stat reads failing, keeping last known CPU reading");
+                    self.cpu_read_failing = true;
+                }
+                self.view.cpu
+            }
         };
-        let (mem, swap) = read_mem_percents().unwrap_or((self.view.mem, self.view.swap));
+        let (mem, swap) = match read_mem_percents() {
+            Some(pair) => {
+                if self.mem_read_failing {
+                    eprintln!("gauges: /proc/meminfo reads recovered");
+                    self.mem_read_failing = false;
+                }
+                pair
+            }
+            None => {
+                if !self.mem_read_failing {
+                    eprintln!(
+                        "gauges: /proc/meminfo reads failing, keeping last known mem/swap reading"
+                    );
+                    self.mem_read_failing = true;
+                }
+                (self.view.mem, self.view.swap)
+            }
+        };
 
         let view = GaugeView { cpu, mem, swap };
         if view == self.view {
@@ -243,6 +274,28 @@ fn meminfo_kb(text: &str, key: &str) -> Option<u64> {
         .ok()
 }
 
+impl crate::widget::Widget for Gauges {
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
+
+    fn fill_color(&self, palette: &Palette) -> Index {
+        self.fill_color(palette)
+    }
+
+    fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
+        Self::render(self, fb, palette);
+    }
+
+    fn update(&mut self) -> Result<bool, Box<dyn Error>> {
+        Ok(Self::update(self))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,3 +331,4 @@ mod tests {
         assert_eq!(cpu_percent((2000, 1700), (1000, 850)), None);
     }
 }
+

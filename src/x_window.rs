@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fs::File;
 #[cfg(unix)]
@@ -14,8 +15,8 @@ use x11rb::protocol::xproto::ConnectionExt as XprotoConnectionExt;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, BackingStore, ChangeWindowAttributesAux, ClipOrdering, ConfigureWindowAux,
     CreateGCAux, CreateWindowAux, Cursor, EventMask, Gcontext, Gravity, ImageFormat, ImageOrder,
-    PropMode, Rectangle, SELECTION_NOTIFY_EVENT, SelectionClearEvent, SelectionNotifyEvent,
-    SelectionRequestEvent, Time, Window, WindowClass,
+    PropMode, Property, Rectangle, SELECTION_NOTIFY_EVENT, SelectionClearEvent,
+    SelectionNotifyEvent, SelectionRequestEvent, Timestamp, Window, WindowClass,
 };
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
@@ -31,7 +32,11 @@ pub struct XWindow {
     depth: u8,
     pub(crate) keyboard: text_input::Keyboard,
     upload_buffer: Vec<u8>,
-    shm_image: Option<ShmImage>,
+    /// Two SHM segments used alternately: while the server is still reading
+    /// one (busy until its completion event arrives), the next frame is
+    /// written into the other, so presenting normally never blocks on a
+    /// round trip.
+    shm_images: Vec<ShmImage>,
     clipboard_atoms: ClipboardAtoms,
     clipboard_text: Option<String>,
     /// Index -> BGRA table applied when presenting; refreshed via `set_palette`.
@@ -41,16 +46,31 @@ pub struct XWindow {
     shaped: bool,
     /// Last bounding-shape rectangles sent, to skip redundant updates.
     shape_rects: Option<Vec<Rectangle>>,
+    /// Per-row opaque runs backing `shape_rects`, so partial redraws only
+    /// rescan the dirty rows instead of the whole framebuffer.
+    shape_rows: Vec<Vec<(usize, usize)>>,
     /// ARGB cursors baked from the `cursor_*` sprites, indexed by
     /// `CursorKind as usize`. `None` when the server lacks RENDER cursors.
     cursors: Option<[Cursor; CURSOR_KIND_COUNT]>,
     /// Last cursor set on the window, to skip redundant updates.
     current_cursor: Option<CursorKind>,
+    /// Events pulled off the connection while blocked waiting for a selection
+    /// reply (paste); replayed to the main loop by `poll_event` so no input or
+    /// exposure is ever dropped.
+    pending_events: VecDeque<XEvent>,
+    /// Timestamp of the most recent input event, used where ICCCM forbids
+    /// `CurrentTime` (selection ownership and conversion requests).
+    last_event_time: Timestamp,
+    /// When we took ownership of the clipboard (the TARGETS `TIMESTAMP` answer).
+    selection_time: Timestamp,
 }
 
 struct ShmImage {
     seg: Seg,
     mmap: MmapMut,
+    /// A `shm_put_image` from this segment is still in flight; cleared by its
+    /// completion event (or a full sync).
+    busy: bool,
 }
 
 struct ClipboardAtoms {
@@ -65,6 +85,7 @@ struct ClipboardAtoms {
     text_plain_utf8: Atom,
     compound_text: Atom,
     cozy_clipboard: Atom,
+    incr: Atom,
 }
 
 impl XWindow {
@@ -89,7 +110,9 @@ impl XWindow {
             | EventMask::BUTTON_PRESS
             | EventMask::BUTTON_RELEASE
             | EventMask::POINTER_MOTION
-            | EventMask::STRUCTURE_NOTIFY;
+            | EventMask::STRUCTURE_NOTIFY
+            // For the PropertyNotify chunks of INCR clipboard transfers.
+            | EventMask::PROPERTY_CHANGE;
 
         conn.create_window(
             0,
@@ -127,7 +150,7 @@ impl XWindow {
         conn.flush()?;
         let keyboard = text_input::Keyboard::new(&conn)?;
         let clipboard_atoms = ClipboardAtoms::load(&conn)?;
-        let shm_image = Self::open_shm_image(&conn, width, height).ok();
+        let shm_images = Self::open_shm_images_logged(&conn, width, height);
 
         Ok(Self {
             conn,
@@ -136,15 +159,59 @@ impl XWindow {
             depth,
             keyboard,
             upload_buffer: Vec::new(),
-            shm_image,
+            shm_images,
             clipboard_atoms,
             clipboard_text: None,
             lut: Box::new([[0, 0, 0, 0xFF]; 256]),
             shaped,
             shape_rects: None,
+            shape_rows: Vec::new(),
             cursors: None,
             current_cursor: None,
+            pending_events: VecDeque::new(),
+            last_event_time: x11rb::CURRENT_TIME,
+            selection_time: x11rb::CURRENT_TIME,
         })
+    }
+
+    /// The main loop's event source: replays events buffered during a
+    /// clipboard wait before polling the connection, and records input
+    /// timestamps for ICCCM-correct selection requests.
+    pub(crate) fn poll_event(&mut self) -> Result<Option<XEvent>, Box<dyn Error>> {
+        loop {
+            let event = match self.pending_events.pop_front() {
+                Some(event) => Some(event),
+                None => self.conn.poll_for_event()?,
+            };
+            // SHM completions are internal bookkeeping, not app events.
+            if let Some(XEvent::ShmCompletion(completion)) = &event {
+                let seg = completion.shmseg;
+                self.shm_completed(seg);
+                continue;
+            }
+            if let Some(event) = &event {
+                self.note_event_time(event);
+            }
+            return Ok(event);
+        }
+    }
+
+    /// The server finished reading `seg`; its segment can be reused.
+    fn shm_completed(&mut self, seg: Seg) {
+        for image in &mut self.shm_images {
+            if image.seg == seg {
+                image.busy = false;
+            }
+        }
+    }
+
+    fn note_event_time(&mut self, event: &XEvent) {
+        match event {
+            XEvent::KeyPress(e) | XEvent::KeyRelease(e) => self.last_event_time = e.time,
+            XEvent::ButtonPress(e) | XEvent::ButtonRelease(e) => self.last_event_time = e.time,
+            XEvent::MotionNotify(e) => self.last_event_time = e.time,
+            _ => {}
+        }
     }
 
     /// Refresh the index->BGRA present table from the active palette.
@@ -301,12 +368,43 @@ impl XWindow {
         }
 
         let seg = conn.generate_id()?;
-        let size = (width * height * Framebuffer::BYTES_PER_PIXEL) as u32;
-        let reply = conn.shm_create_segment(seg, size, false)?.reply()?;
+        let size = width * height * Framebuffer::BYTES_PER_PIXEL;
+        let reply = conn.shm_create_segment(seg, size as u32, false)?.reply()?;
         let fd: OwnedFd = reply.shm_fd;
         let file = File::from(fd);
         let mmap = unsafe { MmapMut::map_mut(&file)? };
-        Ok(ShmImage { seg, mmap })
+        if mmap.len() < size {
+            let _ = conn.shm_detach(seg);
+            return Err(format!(
+                "SHM segment is {} bytes, expected at least {size}",
+                mmap.len()
+            )
+            .into());
+        }
+        Ok(ShmImage {
+            seg,
+            mmap,
+            busy: false,
+        })
+    }
+
+    /// Open the two alternating SHM segments, degrading to an empty list (the
+    /// slow `put_image` path) with a diagnostic instead of failing.
+    fn open_shm_images_logged(conn: &XCBConnection, width: usize, height: usize) -> Vec<ShmImage> {
+        let mut images = Vec::new();
+        for _ in 0..2 {
+            match Self::open_shm_image(conn, width, height) {
+                Ok(image) => images.push(image),
+                Err(err) => {
+                    eprintln!("MIT-SHM unavailable, falling back to put_image: {err}");
+                    for image in &images {
+                        let _ = conn.shm_detach(image.seg);
+                    }
+                    return Vec::new();
+                }
+            }
+        }
+        images
     }
 
     #[cfg(not(unix))]
@@ -319,12 +417,37 @@ impl XWindow {
     }
 
     /// Sync the window's bounding shape to the framebuffer's `TRANSPARENT`
-    /// pixels, if shaping is enabled and the mask actually changed.
-    fn update_shape(&mut self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
+    /// pixels, if shaping is enabled and the mask actually changed. Only the
+    /// rows in `y0..y1` are rescanned; the rest come from the per-row cache.
+    fn update_shape_rows(
+        &mut self,
+        fb: &Framebuffer,
+        y0: usize,
+        y1: usize,
+    ) -> Result<(), Box<dyn Error>> {
         if !self.shaped {
             return Ok(());
         }
-        let rects = opaque_rects(fb);
+        let full = self.shape_rows.len() != fb.height;
+        let (y0, y1) = if full {
+            self.shape_rows = vec![Vec::new(); fb.height];
+            (0, fb.height)
+        } else {
+            (y0.min(fb.height), y1.min(fb.height))
+        };
+        let mut changed = full;
+        for y in y0..y1 {
+            let runs = row_runs(fb.row(y));
+            if runs != self.shape_rows[y] {
+                self.shape_rows[y] = runs;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+
+        let rects = rects_from_rows(&self.shape_rows);
         if self
             .shape_rects
             .as_ref()
@@ -345,57 +468,46 @@ impl XWindow {
         Ok(())
     }
 
-    /// Round-trip to the server after a `shm_put_image`. The put executes
-    /// asynchronously and reads the segment when the server gets to it, so
-    /// without this barrier the next draw could overwrite the segment first
-    /// and the server would blit mis-strided garbage.
-    fn sync_shm(&self) -> Result<(), Box<dyn Error>> {
+    /// Full barrier: round-trip to the server, after which every outstanding
+    /// `shm_put_image` has been executed and all segments are reusable. Only
+    /// the fallback when both segments are still busy (their completion
+    /// events not yet drained).
+    fn sync_shm(&mut self) -> Result<(), Box<dyn Error>> {
         self.conn.get_input_focus()?.reply()?;
+        for image in &mut self.shm_images {
+            image.busy = false;
+        }
         Ok(())
     }
 
-    pub(crate) fn draw(&mut self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
-        self.update_shape(fb)?;
-        let frame_len = fb.width * fb.height * Framebuffer::BYTES_PER_PIXEL;
-        if let Some(shm_image) = &mut self.shm_image {
-            fb.present_into(&mut shm_image.mmap[..frame_len], &self.lut);
-            self.conn.shm_put_image(
-                self.window,
-                self.gc,
-                fb.width as u16,
-                fb.height as u16,
-                0,
-                0,
-                fb.width as u16,
-                fb.height as u16,
-                0,
-                0,
-                self.depth,
-                u8::from(ImageFormat::Z_PIXMAP),
-                false,
-                shm_image.seg,
-                0,
-            )?;
-            self.sync_shm()?;
-            return Ok(());
+    /// A segment index that is free to write into. Drains any pending
+    /// completion events first (buffering unrelated events); if both segments
+    /// are somehow still in flight, falls back to a full sync.
+    fn free_shm_index(&mut self) -> Result<Option<usize>, Box<dyn Error>> {
+        if self.shm_images.is_empty() {
+            return Ok(None);
         }
+        if !self.shm_images.iter().any(|image| image.busy) {
+            return Ok(Some(0));
+        }
+        while let Some(event) = self.conn.poll_for_event()? {
+            if let XEvent::ShmCompletion(completion) = &event {
+                let seg = completion.shmseg;
+                self.shm_completed(seg);
+            } else {
+                self.pending_events.push_back(event);
+            }
+        }
+        if let Some(index) = self.shm_images.iter().position(|image| !image.busy) {
+            return Ok(Some(index));
+        }
+        self.sync_shm()?;
+        Ok(Some(0))
+    }
 
-        self.upload_buffer.resize(frame_len, 0);
-        fb.present_into(&mut self.upload_buffer, &self.lut);
-        self.conn.put_image(
-            ImageFormat::Z_PIXMAP,
-            self.window,
-            self.gc,
-            fb.width as u16,
-            fb.height as u16,
-            0,
-            0,
-            0,
-            self.depth,
-            &self.upload_buffer,
-        )?;
-        self.conn.flush()?;
-        Ok(())
+    pub(crate) fn draw(&mut self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
+        self.update_shape_rows(fb, 0, fb.height)?;
+        self.blit_rect(fb, Rect::new(0, 0, fb.width, fb.height))
     }
 
     pub(crate) fn resize(&mut self, width: usize, height: usize) -> Result<(), Box<dyn Error>> {
@@ -416,22 +528,39 @@ impl XWindow {
         width: usize,
         height: usize,
     ) -> Result<(), Box<dyn Error>> {
-        if let Some(shm_image) = self.shm_image.take() {
+        // Make sure no put is still reading the old segments before detaching.
+        if self.shm_images.iter().any(|image| image.busy) {
+            self.sync_shm()?;
+        }
+        for shm_image in self.shm_images.drain(..) {
             self.conn.shm_detach(shm_image.seg)?;
         }
-        self.shm_image = Self::open_shm_image(&self.conn, width, height).ok();
+        self.shm_images = Self::open_shm_images_logged(&self.conn, width, height);
         self.conn.flush()?;
         Ok(())
     }
 
     pub(crate) fn draw_rect(&mut self, fb: &Framebuffer, rect: Rect) -> Result<(), Box<dyn Error>> {
+        // Widget rects can momentarily disagree with the framebuffer size
+        // (mid-relayout); a clipped partial repaint beats an out-of-bounds
+        // panic in present_rect_into.
+        let Some(rect) = clip_to_fb(rect, fb) else {
+            return Ok(());
+        };
         if rect.x == 0 && rect.y == 0 && rect.w == fb.width && rect.h == fb.height {
             return self.draw(fb);
         }
-        self.update_shape(fb)?;
+        self.update_shape_rows(fb, rect.y, rect.y.saturating_add(rect.h))?;
+        self.blit_rect(fb, rect)
+    }
 
+    /// Present `rect` of the framebuffer to the window, via SHM when
+    /// available, else a `put_image` upload. Callers must pass a rect that
+    /// lies within `fb`; `draw_rect` clips before getting here.
+    fn blit_rect(&mut self, fb: &Framebuffer, rect: Rect) -> Result<(), Box<dyn Error>> {
         let byte_len = rect.w * rect.h * Framebuffer::BYTES_PER_PIXEL;
-        if let Some(shm_image) = &mut self.shm_image {
+        if let Some(index) = self.free_shm_index()? {
+            let shm_image = &mut self.shm_images[index];
             fb.present_rect_into(rect, &mut shm_image.mmap[..byte_len], &self.lut);
             self.conn.shm_put_image(
                 self.window,
@@ -446,11 +575,14 @@ impl XWindow {
                 rect.y as i16,
                 self.depth,
                 u8::from(ImageFormat::Z_PIXMAP),
-                false,
+                // Ask for a completion event: the segment stays busy until the
+                // server has read it, instead of stalling here on a sync.
+                true,
                 shm_image.seg,
                 0,
             )?;
-            self.sync_shm()?;
+            shm_image.busy = true;
+            self.conn.flush()?;
             return Ok(());
         }
 
@@ -474,10 +606,12 @@ impl XWindow {
 
     pub(crate) fn set_clipboard_text(&mut self, text: String) -> Result<(), Box<dyn Error>> {
         self.clipboard_text = Some(text);
+        // ICCCM: ownership must be claimed with the timestamp of the event
+        // that triggered the copy, never CurrentTime.
         self.conn.set_selection_owner(
             self.window,
             self.clipboard_atoms.clipboard,
-            Time::CURRENT_TIME,
+            self.last_event_time,
         )?;
         self.conn.flush()?;
         let owner = self
@@ -489,6 +623,7 @@ impl XWindow {
             self.clipboard_text = None;
             return Err("failed to take ownership of the X clipboard".into());
         }
+        self.selection_time = self.last_event_time;
         Ok(())
     }
 
@@ -508,27 +643,32 @@ impl XWindow {
             self.clipboard_atoms.clipboard,
             self.clipboard_atoms.utf8_string,
             self.clipboard_atoms.cozy_clipboard,
-            Time::CURRENT_TIME,
+            self.last_event_time,
         )?;
         self.conn.flush()?;
 
-        let timeout = Instant::now() + Duration::from_millis(500);
-        while Instant::now() < timeout {
-            if let Some(event) = self.conn.poll_for_event()? {
+        // Wait for the owner's SelectionNotify by sleeping on the X socket
+        // (no busy-wait); 500ms bounds the stall when the owner is dead.
+        // Unrelated events arriving meanwhile are buffered for `poll_event`,
+        // not dropped.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            while let Some(event) = self.conn.poll_for_event()? {
                 match event {
                     XEvent::SelectionNotify(event) => {
                         return self.read_selection_notify(event);
                     }
                     XEvent::SelectionRequest(event) => self.handle_selection_request(event)?,
                     XEvent::SelectionClear(event) => self.handle_selection_clear(event),
-                    _ => {}
+                    other => self.pending_events.push_back(other),
                 }
-            } else {
-                std::thread::sleep(Duration::from_millis(5));
             }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                eprintln!("clipboard paste timed out waiting for the selection owner");
+                return Ok(None);
+            };
+            self.wait_for_event(remaining)?;
         }
-
-        Ok(None)
     }
 
     #[allow(clippy::needless_pass_by_ref_mut)]
@@ -572,7 +712,7 @@ impl XWindow {
     }
 
     fn read_selection_notify(
-        &self,
+        &mut self,
         event: SelectionNotifyEvent,
     ) -> Result<Option<String>, Box<dyn Error>> {
         if event.property == u32::from(AtomEnum::NONE) {
@@ -590,10 +730,57 @@ impl XWindow {
                 u32::MAX / 4,
             )?
             .reply()?;
+        if reply.type_ == self.clipboard_atoms.incr {
+            // Deleting the INCR property above told the owner to start
+            // sending; the chunks arrive as PropertyNotify events.
+            return self.read_incr_chunks(event.property);
+        }
         let Some(bytes) = reply.value8() else {
             return Ok(None);
         };
         Ok(String::from_utf8(bytes.collect()).ok())
+    }
+
+    /// Receive a large selection via the INCR protocol: each NewValue
+    /// PropertyNotify carries one chunk (read-and-delete to request the next),
+    /// and a zero-length chunk ends the transfer.
+    fn read_incr_chunks(&mut self, property: Atom) -> Result<Option<String>, Box<dyn Error>> {
+        self.conn.flush()?;
+        let mut data = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            while let Some(event) = self.conn.poll_for_event()? {
+                match event {
+                    XEvent::PropertyNotify(event)
+                        if event.window == self.window
+                            && event.atom == property
+                            && event.state == Property::NEW_VALUE =>
+                    {
+                        let reply = self
+                            .conn
+                            .get_property(true, self.window, property, AtomEnum::ANY, 0, u32::MAX / 4)?
+                            .reply()?;
+                        self.conn.flush()?;
+                        let Some(bytes) = reply.value8() else {
+                            return Ok(None);
+                        };
+                        let before = data.len();
+                        data.extend(bytes);
+                        if data.len() == before {
+                            return Ok(String::from_utf8(data).ok());
+                        }
+                    }
+                    XEvent::SelectionRequest(event) => self.handle_selection_request(event)?,
+                    XEvent::SelectionClear(event) => self.handle_selection_clear(event),
+                    other => self.pending_events.push_back(other),
+                }
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                eprintln!("clipboard paste timed out mid-INCR transfer");
+                return Ok(None);
+            };
+            self.wait_for_event(remaining)?;
+        }
     }
 
     fn supported_text_target(&self, target: Atom) -> bool {
@@ -647,7 +834,7 @@ impl XWindow {
                 requestor,
                 property,
                 AtomEnum::INTEGER,
-                &[0],
+                &[self.selection_time],
             )?;
             return Ok(true);
         }
@@ -738,10 +925,10 @@ impl XWindow {
 
 impl Drop for XWindow {
     fn drop(&mut self) {
-        if let Some(shm_image) = &self.shm_image {
+        for shm_image in &self.shm_images {
             let _ = self.conn.shm_detach(shm_image.seg);
-            let _ = self.conn.flush();
         }
+        let _ = self.conn.flush();
     }
 }
 
@@ -759,6 +946,7 @@ impl ClipboardAtoms {
             text_plain_utf8: intern_atom(conn, b"text/plain;charset=utf-8")?,
             compound_text: intern_atom(conn, b"COMPOUND_TEXT")?,
             cozy_clipboard: intern_atom(conn, b"COZYUI_CLIPBOARD")?,
+            incr: intern_atom(conn, b"INCR")?,
         })
     }
 }
@@ -767,20 +955,17 @@ fn intern_atom(conn: &XCBConnection, name: &[u8]) -> Result<Atom, Box<dyn Error>
     Ok(conn.intern_atom(false, name)?.reply()?.atom)
 }
 
-/// Cover every non-`TRANSPARENT` pixel with rectangles: horizontal runs per
-/// row, with identical consecutive rows merged into taller bands.
-fn opaque_rects(fb: &Framebuffer) -> Vec<Rectangle> {
+/// Cover every non-`TRANSPARENT` pixel with rectangles from the cached
+/// per-row runs, with identical consecutive rows merged into taller bands.
+fn rects_from_rows(rows: &[Vec<(usize, usize)>]) -> Vec<Rectangle> {
+    let empty: Vec<(usize, usize)> = Vec::new();
     let mut rects = Vec::new();
-    let mut band_runs: Vec<(usize, usize)> = Vec::new();
+    let mut band_runs = &empty;
     let mut band_start = 0;
-    for y in 0..=fb.height {
-        let runs = if y < fb.height {
-            row_runs(fb.row(y))
-        } else {
-            Vec::new()
-        };
+    for y in 0..=rows.len() {
+        let runs = rows.get(y).unwrap_or(&empty);
         if runs != band_runs {
-            for &(x, w) in &band_runs {
+            for &(x, w) in band_runs {
                 rects.push(Rectangle {
                     x: x as i16,
                     y: band_start as i16,
@@ -829,4 +1014,17 @@ fn selection_property(event: SelectionRequestEvent) -> Atom {
     } else {
         event.property
     }
+}
+
+/// Intersect `rect` with the framebuffer bounds; `None` if nothing remains.
+fn clip_to_fb(rect: Rect, fb: &Framebuffer) -> Option<Rect> {
+    if rect.x >= fb.width || rect.y >= fb.height {
+        return None;
+    }
+    let w = rect.w.min(fb.width - rect.x);
+    let h = rect.h.min(fb.height - rect.y);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some(Rect::new(rect.x, rect.y, w, h))
 }
