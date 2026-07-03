@@ -358,7 +358,10 @@ impl Puter {
                 continue;
             };
             let cell = indexed.cell;
-            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::HIDDEN) {
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::HIDDEN)
+            {
                 continue;
             }
             let x = art_x(SCREEN_SOURCE_X) + point.column.0 * cell_w;

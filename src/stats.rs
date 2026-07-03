@@ -277,9 +277,7 @@ fn file_id(path: &str) -> Option<FileId> {
         Err(err) if err.kind() == ErrorKind::NotFound => None,
         Err(err) => {
             if !METADATA_READ_FAILING.swap(true, Ordering::Relaxed) {
-                eprintln!(
-                    "stats: failed to read metadata for {path}: {err} (suppressing repeats)"
-                );
+                eprintln!("stats: failed to read metadata for {path}: {err} (suppressing repeats)");
             }
             None
         }

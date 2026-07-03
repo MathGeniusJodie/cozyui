@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use crate::localtime::local_time;
 use crate::palette_color;
 use crate::text::BitmapFont;
+use crate::util::runtime_dir;
 use crate::{CursorKind, Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
 const STATIONS_FILE: &str = "radio_stations.txt";
@@ -444,14 +445,19 @@ impl Wavey {
             return;
         }
 
-        let Ok(mut stream) = UnixStream::connect(mpv_ipc_path()) else {
-            return;
+        let mut stream = match UnixStream::connect(mpv_ipc_path()) {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("wavey: mpv IPC connect failed: {err}");
+                return;
+            }
         };
         let _ = stream.set_read_timeout(Some(TITLE_READ_TIMEOUT));
         let _ = stream.set_write_timeout(Some(TITLE_READ_TIMEOUT));
-        let message = serde_json::json!({ "command": command }).to_string();
-        if stream.write_all(message.as_bytes()).is_ok() {
-            let _ = stream.write_all(b"\n");
+        let mut message = serde_json::json!({ "command": command }).to_string();
+        message.push('\n');
+        if let Err(err) = stream.write_all(message.as_bytes()) {
+            eprintln!("wavey: mpv IPC write failed: {err}");
         }
     }
 
@@ -818,17 +824,6 @@ fn spawn_resume_probe() -> mpsc::Receiver<Option<usize>> {
     rx
 }
 
-/// Directory for the mpv socket/FIFO: `$XDG_RUNTIME_DIR` when set (per-user,
-/// mode 0700) so the fixed file names below can't be squatted by another user
-/// in the shared, world-writable `temp_dir()`; falls back to `temp_dir()` when
-/// the runtime dir isn't available (e.g. no session manager).
-fn runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-}
-
 fn mpv_ipc_path() -> PathBuf {
     // Fixed (non-pid) name on purpose: a restarted cozyui reconnects to an
     // mpv left running in the persistent player session. kill_player anchors
@@ -848,25 +843,24 @@ fn mpv_ipc_path() -> PathBuf {
 /// more work (see `start_player`) should use `kill_player_blocking` instead,
 /// from a thread that isn't the UI thread.
 fn kill_player() {
-    let pattern = format!("mpv .*{}", mpv_ipc_path().display());
-    let _ = crate::util::spawn_and_reap(
-        Command::new("pkill")
-            .args(["-9", "-f", &pattern])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null()),
-    );
+    let _ = crate::util::spawn_and_reap(&mut kill_player_command());
 }
 
 /// Same as `kill_player`, but waits for `pkill` to finish before returning.
 /// Only call this off the UI thread: `start_player` uses it to guarantee the
 /// old mpv is gone before the new one is queued onto the same socket path.
 fn kill_player_blocking() {
+    let _ = kill_player_command().status();
+}
+
+fn kill_player_command() -> Command {
     let pattern = format!("mpv .*{}", mpv_ipc_path().display());
-    let _ = Command::new("pkill")
+    let mut command = Command::new("pkill");
+    command
         .args(["-9", "-f", &pattern])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::null());
+    command
 }
 
 fn station_from_script_opts(opts: &serde_json::Value) -> Option<usize> {

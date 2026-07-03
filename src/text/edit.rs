@@ -292,6 +292,13 @@ impl TextEdit {
                     high = mid - 1;
                 }
             }
+            // A monotone predicate rejects every prefix longer than the
+            // accepted one; a passing next-longer prefix means the predicate
+            // is non-monotone and the search result is meaningless.
+            debug_assert!(
+                low >= total || !can_replace(&build(low + 1)),
+                "can_replace must be monotone in prefix length"
+            );
             low
         };
 

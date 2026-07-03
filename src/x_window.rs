@@ -70,6 +70,11 @@ pub struct XWindow {
     selection_time: Timestamp,
 }
 
+/// Cap on total paste size (both the single-property and INCR paths) so a
+/// misbehaving (or malicious) selection owner can't force an unbounded
+/// allocation or starve the INCR deadline check.
+const MAX_PASTE_BYTES: usize = 16 * 1024 * 1024;
+
 struct ShmImage {
     seg: Seg,
     mmap: MmapMut,
@@ -88,7 +93,6 @@ struct ClipboardAtoms {
     text: Atom,
     text_plain: Atom,
     text_plain_utf8: Atom,
-    compound_text: Atom,
     cozy_clipboard: Atom,
     incr: Atom,
 }
@@ -532,7 +536,11 @@ impl XWindow {
             return Ok(Some(index));
         }
         self.sync_shm()?;
-        Ok(Some(0))
+        // The barrier consumed every completion, so a segment must be free
+        // now. Re-check instead of assuming: if the ordering guarantee this
+        // relies on ever breaks, skip the frame rather than put_image into a
+        // segment the server may still be reading.
+        Ok(self.shm_images.iter().position(|image| !image.busy))
     }
 
     pub(crate) fn draw(&mut self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
@@ -774,13 +782,20 @@ impl XWindow {
                 event.property,
                 AtomEnum::ANY,
                 0,
-                u32::MAX / 4,
+                // Same cap as the INCR path, in 32-bit units: without it a
+                // hostile selection owner could force an arbitrarily large
+                // allocation through a single non-INCR property.
+                (MAX_PASTE_BYTES / 4) as u32,
             )?
             .reply()?;
         if reply.type_ == self.clipboard_atoms.incr {
             // Deleting the INCR property above told the owner to start
             // sending; the chunks arrive as PropertyNotify events.
             return self.read_incr_chunks(event.property);
+        }
+        if reply.bytes_after > 0 {
+            eprintln!("clipboard paste exceeded {MAX_PASTE_BYTES} bytes, ignoring");
+            return Ok(None);
         }
         let Some(bytes) = reply.value8() else {
             return Ok(None);
@@ -792,10 +807,6 @@ impl XWindow {
     /// PropertyNotify carries one chunk (read-and-delete to request the next),
     /// and a zero-length chunk ends the transfer.
     fn read_incr_chunks(&mut self, property: Atom) -> Result<Option<String>, Box<dyn Error>> {
-        // Cap total transfer size so a misbehaving (or malicious) selection
-        // owner streaming chunks continuously can't grow `data` unbounded or
-        // starve the deadline check below (which only runs between drains).
-        const MAX_PASTE_BYTES: usize = 16 * 1024 * 1024;
         self.conn.flush()?;
         let mut data = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -854,11 +865,13 @@ impl XWindow {
             || target == self.clipboard_atoms.text
             || target == self.clipboard_atoms.text_plain
             || target == self.clipboard_atoms.text_plain_utf8
-            || target == self.clipboard_atoms.compound_text
             || target == u32::from(AtomEnum::STRING)
     }
 
-    fn supported_targets(&self) -> [Atom; 10] {
+    // COMPOUND_TEXT is deliberately not offered: it's an ISO-2022 encoding,
+    // and serving UTF-8 bytes under that label renders as mojibake in
+    // ICCCM-strict clients. Modern requestors negotiate UTF8_STRING instead.
+    fn supported_targets(&self) -> [Atom; 9] {
         [
             self.clipboard_atoms.targets,
             self.clipboard_atoms.multiple,
@@ -868,7 +881,6 @@ impl XWindow {
             self.clipboard_atoms.text_plain_utf8,
             self.clipboard_atoms.text_plain,
             self.clipboard_atoms.text,
-            self.clipboard_atoms.compound_text,
             AtomEnum::STRING.into(),
         ]
     }
@@ -1010,7 +1022,6 @@ impl ClipboardAtoms {
             text: intern_atom(conn, b"TEXT")?,
             text_plain: intern_atom(conn, b"text/plain")?,
             text_plain_utf8: intern_atom(conn, b"text/plain;charset=utf-8")?,
-            compound_text: intern_atom(conn, b"COMPOUND_TEXT")?,
             cozy_clipboard: intern_atom(conn, b"COZYUI_CLIPBOARD")?,
             incr: intern_atom(conn, b"INCR")?,
         })

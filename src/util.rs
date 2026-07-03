@@ -5,6 +5,18 @@ use std::io::{self, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Directory for per-user runtime files (sockets, request bodies):
+/// `$XDG_RUNTIME_DIR` when set (per-user, mode 0700) so files there can't be
+/// observed or squatted by another user in the shared, world-writable
+/// `temp_dir()`; falls back to `temp_dir()` when the runtime dir isn't
+/// available (e.g. no session manager).
+pub(crate) fn runtime_dir() -> std::path::PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 /// Seconds since the Unix epoch (0.0 if the clock is before the epoch).
 pub(crate) fn now_secs() -> f64 {
     SystemTime::now()

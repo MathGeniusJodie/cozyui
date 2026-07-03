@@ -343,8 +343,7 @@ const fn days_in_month(year: i32, month_index: usize) -> i32 {
         0 | 2 | 4 | 6 | 7 | 9 | 11 => 31,
         3 | 5 | 8 | 10 => 30,
         1 if is_leap_year(year) => 29,
-        #[allow(clippy::match_same_arms)]
-        _ => 31,
+        _ => 28,
     }
 }
 
@@ -405,5 +404,21 @@ impl crate::widget::Widget for Day {
     // Clicking anywhere toggles the mode.
     fn cursor_at(&self, _x: i16, _y: i16) -> crate::CursorKind {
         crate::CursorKind::Hand
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::days_in_month;
+
+    #[test]
+    fn february_has_28_days_in_non_leap_years() {
+        assert_eq!(days_in_month(2026, 1), 28);
+        assert_eq!(days_in_month(2024, 1), 29); // leap
+        assert_eq!(days_in_month(2100, 1), 28); // century non-leap
+        assert_eq!(days_in_month(2000, 1), 29); // 400-year leap
+        assert_eq!(days_in_month(2026, 0), 31); // january
+        assert_eq!(days_in_month(2026, 3), 30); // april
+        assert_eq!(days_in_month(2026, 11), 31); // december
     }
 }

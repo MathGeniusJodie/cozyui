@@ -77,9 +77,14 @@ pub(crate) fn done_file_path(year: i32, month: i32, day: i32, tag: &str) -> Stri
 /// Path of the done-todo file for `section` today, named by date and priority.
 pub(super) fn daily_done_path(section: usize) -> String {
     let tm = crate::localtime::local_time().unwrap_or_else(|| {
-        // Should never happen; if it does, the misfiled date is at least loud.
+        // Should never happen; if it does, the misfiled date is at least
+        // loud. tm_mday: 1 because Tm::default()'s day-of-month is 0, which
+        // would embed the invalid date 1900-01-00 in the filename.
         eprintln!("toodle: local_time failed; filing done todos under 1900-01-01");
-        Default::default()
+        crate::localtime::Tm {
+            tm_mday: 1,
+            ..Default::default()
+        }
     });
     done_file_path(
         tm.tm_year + 1900,

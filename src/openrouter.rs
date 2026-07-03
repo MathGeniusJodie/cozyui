@@ -5,7 +5,6 @@
 // processes via the process list).
 //
 // Self-contained on purpose (std + serde_json only).
-#![allow(dead_code)]
 
 use serde_json::{Value, json};
 use std::env;
@@ -33,14 +32,11 @@ pub const FALLBACK_MODEL: &str = "@preset/free";
 /// (missing key, curl spawn/exec error, non-zero exit) surface as `Err`; a
 /// successful call whose body isn't valid JSON is wrapped in an error-shaped
 /// `Value` so the usual `["error"]["message"]` extraction still works.
-pub fn post(body: &Value) -> Result<Value, String> {
-    post_cancelable(body, None)
-}
-
-/// Same as [`post`], but if `pid_slot` is given, the spawned curl child's pid
-/// is recorded there for the duration of the request so a caller on another
-/// thread can cancel it early (e.g. `libc::kill(pid, libc::SIGTERM)`) instead
-/// of waiting out `REQUEST_TIMEOUT_SECS`.
+///
+/// If `pid_slot` is given, the spawned curl child's pid is recorded there for
+/// the duration of the request so a caller on another thread can cancel it
+/// early (e.g. `libc::kill(pid, libc::SIGTERM)`) instead of waiting out
+/// `REQUEST_TIMEOUT_SECS`.
 pub fn post_cancelable(body: &Value, pid_slot: Option<&PidSlot>) -> Result<Value, String> {
     let raw = post_raw(body.to_string().as_bytes(), pid_slot)?;
     Ok(serde_json::from_slice(&raw).unwrap_or_else(
@@ -139,7 +135,10 @@ struct CurlBodyFile {
 
 impl CurlBodyFile {
     fn new(contents: &[u8]) -> Result<Self, String> {
-        let mut base = env::temp_dir();
+        // Runtime dir (not the world-readable temp_dir) because the body
+        // holds chat content; create_new + 0600 below already prevent
+        // tampering, this just keeps the contents out of shared /tmp.
+        let mut base = crate::util::runtime_dir();
         base.push(format!("cozyui-openrouter-{}.json", std::process::id()));
         let path = PathBuf::from(crate::util::unique_temp_path(&base.to_string_lossy()));
         let mut file = OpenOptions::new()
