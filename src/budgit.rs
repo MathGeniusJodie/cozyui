@@ -8,15 +8,16 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::localtime::days_from_civil;
 use crate::palette_color;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette};
 
 const WIDTH: usize = 210;
 
-/// Seconds in an average month (365.25 / 12 days).
-const MONTH_SECS: f64 = (365.25 / 12.0) * 24.0 * 3600.0;
 const DAYS_PER_MONTH: f64 = 365.25 / 12.0;
+/// Seconds in an average month (365.25 / 12 days).
+const MONTH_SECS: f64 = DAYS_PER_MONTH * 24.0 * 3600.0;
 
 /// Editable budget config (see `budgit.conf`), looked up in
 /// `$XDG_CONFIG_HOME/cozyui/` first, then the source checkout.
@@ -75,6 +76,7 @@ impl Config {
     /// `#` starts a comment and blank lines are ignored.
     fn parse(text: &str) -> Result<Self, Box<dyn Error>> {
         let mut periods: Vec<Period> = Vec::new();
+        let mut skip_period = false;
         let mut dollars_per_svg = 0.0;
         let mut done_dir = DEFAULT_DONE_DIR.to_string();
         let mut templates_dir = DEFAULT_TEMPLATES_DIR.to_string();
@@ -85,12 +87,24 @@ impl Config {
                 continue;
             }
             if let Some(date) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-                let (y, m, d) = parse_date(date.trim())?;
-                periods.push(Period {
-                    start_secs: (days_from_civil(y, m, d) * 86400) as f64,
-                    burn: 0.0,
-                    expenses: Vec::new(),
-                });
+                // A bad date skips the whole period (header and its expenses)
+                // rather than aborting the widget, so a typo in one section
+                // can't take down the app or misattribute its expenses to the
+                // previous period.
+                match parse_date(date.trim()) {
+                    Ok((y, m, d)) => {
+                        skip_period = false;
+                        periods.push(Period {
+                            start_secs: (days_from_civil(y, m, d) * 86400) as f64,
+                            burn: 0.0,
+                            expenses: Vec::new(),
+                        });
+                    }
+                    Err(err) => {
+                        eprintln!("budgit.conf: skipping [{}] section: {err}", date.trim());
+                        skip_period = true;
+                    }
+                }
                 continue;
             }
             let (label, value) = line
@@ -114,9 +128,16 @@ impl Config {
                     .map_err(|_| format!("budgit.conf: bad amount for {label}: {value}"))?;
                 continue;
             }
-            let amount: f64 = value
-                .parse()
-                .map_err(|_| format!("budgit.conf: bad amount for {label}: {value}"))?;
+            let amount: f64 = match value.parse() {
+                Ok(amount) => amount,
+                Err(_) => {
+                    eprintln!("budgit.conf: skipping bad amount for {label}: {value}");
+                    continue;
+                }
+            };
+            if skip_period {
+                continue;
+            }
             let period = periods
                 .last_mut()
                 .ok_or("budgit.conf: expense before any [date] section")?;
@@ -159,9 +180,21 @@ fn sum_ledger(text: &str) -> Result<f64, Box<dyn Error>> {
         if line.is_empty() {
             continue;
         }
-        let mut fields = line.split(',');
-        let title = fields.next().unwrap_or("").trim();
-        let amount = fields.next().unwrap_or("").trim();
+        // Parse from the right: if a date column is present, the last field
+        // is the date and the second-to-last is the amount; otherwise (no
+        // date) the last field is the amount. Everything before that is the
+        // title, which may itself contain commas.
+        let mut fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 2 {
+            eprintln!("budgit.csv: skipping malformed line {}: too few columns", i + 1);
+            continue;
+        }
+        if fields.len() >= 3 {
+            fields.pop(); // date (unused)
+        }
+        let amount = fields.pop().unwrap_or("").trim();
+        let title = fields.join(",");
+        let title = title.trim();
         // Skip the header row.
         if amount.eq_ignore_ascii_case("amount") {
             continue;
@@ -188,7 +221,11 @@ fn parse_date(value: &str) -> Result<(i32, i32, i32), Box<dyn Error>> {
             .and_then(|p| p.trim().parse().ok())
             .ok_or_else(|| format!("budgit.conf: bad date: {value}").into())
     };
-    Ok((next()?, next()?, next()?))
+    let (y, m, d) = (next()?, next()?, next()?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return Err(format!("budgit.conf: bad date: {value}").into());
+    }
+    Ok((y, m, d))
 }
 
 #[derive(Clone, PartialEq)]
@@ -609,17 +646,6 @@ fn group_digits(value: i64) -> String {
     out
 }
 
-/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
-const fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = (if y >= 0 { y } else { y - 399 }) as i64 / 400;
-    let yoe = (y as i64) - era * 400;
-    let mp = (if m > 2 { m - 3 } else { m + 9 }) as i64;
-    let doy = (153 * mp + 2) / 5 + (d as i64) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
 impl crate::widget::Widget for Budgit {
     fn width(&self) -> usize {
         self.width()
@@ -688,7 +714,10 @@ mod tests {
     #[test]
     fn parse_rejects_empty_and_bad_amount() {
         assert!(Config::parse("# nothing here\n").is_err());
-        assert!(Config::parse("[2026-01-01]\nRent = lots\n").is_err());
+        // A bad amount is skipped (with a warning) rather than aborting the
+        // whole config, mirroring the bad-date handling for [date] sections.
+        let config = Config::parse("[2026-01-01]\nRent = lots\n").unwrap();
+        assert!(config.periods[0].expenses.is_empty());
         assert!(Config::parse("[2026-01-01]\nRent\n").is_err());
     }
 

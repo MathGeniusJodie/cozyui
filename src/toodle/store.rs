@@ -84,14 +84,14 @@ pub(super) fn daily_done_path(section: usize) -> String {
     )
 }
 
+/// Priorities in stacking order (bottom of the bar first), matching toodle's
+/// section order: urgent, frog, normal, snail. Shared with `stats.rs`, which
+/// renders these as a stacked bar graph.
+pub(crate) const PRIORITY_TAGS: [&str; SECTION_COUNT] = ["urgent", "frog", "normal", "snail"];
+
 /// Priority tag used in daily done filenames (`YYYY-MM-DD_<tag>.md`).
 pub(super) const fn section_tag(section: usize) -> &'static str {
-    match section % SECTION_COUNT {
-        0 => "urgent",
-        1 => "frog",
-        2 => "normal",
-        _ => "snail",
-    }
+    PRIORITY_TAGS[section % SECTION_COUNT]
 }
 
 /// Identity of one on-disk file version. The inode is included so an atomic

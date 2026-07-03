@@ -125,13 +125,15 @@ enum WidgetId {
     Gauges,
 }
 
-const WIDGET_COUNT: usize = 11;
+const WIDGET_COUNT: usize = WidgetId::ALL.len();
 
 impl WidgetId {
     const fn index(self) -> usize {
         self as usize
     }
 
+    /// Paint order: later entries render on top. Hit-testing (`widget_at`)
+    /// walks this reversed, so there is exactly one z-order to maintain.
     const ALL: [Self; 11] = [
         Self::Wavey,
         Self::Puter,
@@ -146,26 +148,8 @@ impl WidgetId {
         Self::Gauges,
     ];
 
-    const VISIBLE_WITH_FWENDS: [Self; 11] = Self::ALL;
-    const VISIBLE_WITHOUT_FWENDS: [Self; 10] = [
-        Self::Wavey,
-        Self::Puter,
-        Self::Toodle,
-        Self::Twirl,
-        Self::Fizzle,
-        Self::Day,
-        Self::Budgit,
-        Self::Stats,
-        Self::Hunger,
-        Self::Gauges,
-    ];
-
-    const fn visible() -> &'static [Self] {
-        if SHOW_FWENDS {
-            &Self::VISIBLE_WITH_FWENDS
-        } else {
-            &Self::VISIBLE_WITHOUT_FWENDS
-        }
+    fn visible() -> impl Iterator<Item = Self> {
+        Self::ALL.into_iter().filter(|widget| widget.is_visible())
     }
 
     fn is_visible(self) -> bool {
@@ -186,10 +170,12 @@ struct App {
     /// Widget that just lost focus and needs one repaint to drop its
     /// focus-only visuals (text cursor, selection highlight).
     blurred: Option<WidgetId>,
-    /// Floor imposed by the actual X window height (set from ConfigureNotify
-    /// when the WM/user makes the window taller than the content needs), so
-    /// the bottom-anchored widgets stay pinned to the real bottom edge
-    /// instead of leaving a gap below them.
+    /// Floor imposed by the actual X window size (set from ConfigureNotify
+    /// when the WM/user makes the window larger than the content needs), so
+    /// the bottom-anchored widgets stay pinned to the real bottom edge and
+    /// the backing buffer covers the real width instead of leaving
+    /// undrawn strips.
+    min_width: usize,
     min_height: usize,
 }
 
@@ -288,6 +274,7 @@ impl App {
             quit_requested: false,
             text_drag: None,
             blurred: None,
+            min_width: 0,
             min_height: 0,
         };
         app.sync_dynamic_layout(palette);
@@ -296,11 +283,11 @@ impl App {
 
     fn width(&self) -> usize {
         let mut width = self.desk.width;
-        for widget in WidgetId::visible().iter().copied() {
+        for widget in WidgetId::visible() {
             let rect = self.rect_for(widget);
             width = width.max(rect.x.saturating_add(rect.w));
         }
-        width
+        width.max(self.min_width)
     }
 
     fn height(&self) -> usize {
@@ -318,13 +305,15 @@ impl App {
         heights
     }
 
-    /// Records the actual X window height (from a ConfigureNotify) so the
-    /// bottom-anchored layout can grow to fill it. Returns whether the floor
-    /// changed and a relayout is needed.
-    fn set_min_height(&mut self, height: usize) -> bool {
-        if self.min_height == height {
+    /// Records the actual X window size (from a ConfigureNotify) so the
+    /// bottom-anchored layout can grow to fill it and the backing buffer
+    /// matches the real geometry. Returns whether the floor changed and a
+    /// relayout is needed.
+    fn set_min_size(&mut self, width: usize, height: usize) -> bool {
+        if self.min_width == width && self.min_height == height {
             return false;
         }
+        self.min_width = width;
         self.min_height = height;
         true
     }
@@ -349,7 +338,7 @@ impl App {
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
         self.render_background(fb, palette);
-        for widget in WidgetId::visible().iter().copied() {
+        for widget in WidgetId::visible() {
             self.render_widget(fb, palette, widget);
         }
     }
@@ -384,7 +373,7 @@ impl App {
 
     fn render_rect(&mut self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
         self.render_background_rect(fb, palette, rect);
-        for widget in WidgetId::visible().iter().copied() {
+        for widget in WidgetId::visible() {
             if rects_intersect(self.rect_for(widget), rect) {
                 self.render_widget(fb, palette, widget);
             }
@@ -574,24 +563,14 @@ impl App {
         self.widgets.get(widget).cursor_at(x, y)
     }
 
-    /// The topmost visible widget under `(x, y)`, front to back.
+    /// The topmost visible widget under `(x, y)`: paint order reversed, so
+    /// hit-testing always agrees with what is drawn on top.
     fn widget_at(&self, x: i16, y: i16) -> Option<(WidgetId, i16, i16)> {
-        [
-            WidgetId::Wavey,
-            WidgetId::Fizzle,
-            WidgetId::Day,
-            WidgetId::Twirl,
-            WidgetId::Fwends,
-            WidgetId::Toodle,
-            WidgetId::Hunger,
-            WidgetId::Puter,
-            WidgetId::Budgit,
-            WidgetId::Stats,
-            WidgetId::Gauges,
-        ]
-        .into_iter()
-        .filter(|widget| widget.is_visible())
-        .find_map(|widget| {
+        WidgetId::ALL
+            .into_iter()
+            .rev()
+            .filter(|widget| widget.is_visible())
+            .find_map(|widget| {
             let rect = self.rect_for(widget);
             rect.contains(x, y).then(|| {
                 let (x, y) = rect.local(x, y);
@@ -932,7 +911,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 XEvent::SelectionRequest(event) => xwin.handle_selection_request(event)?,
                 XEvent::SelectionClear(event) => xwin.handle_selection_clear(event),
                 XEvent::ConfigureNotify(event) => {
-                    if app.set_min_height(event.height as usize) {
+                    if app.set_min_size(event.width as usize, event.height as usize) {
                         app.sync_dynamic_layout(&palette);
                         fb = Framebuffer::new(app.width(), app.height(), app.fill_color(&palette));
                         xwin.resize_backing(fb.width, fb.height)?;
@@ -957,11 +936,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
-        // After drawing, come back almost immediately in case more work is
-        // queued (animations, terminal bursts). Otherwise sleep on the X
-        // socket: input wakes us instantly, and 250ms bounds the latency of
-        // the non-X sources checked above (channels and widget timers).
-        xwin.wait_for_event(Duration::from_millis(if drew_frame { 1 } else { 250 }))?;
+        // After drawing, come back at ~60fps for whatever is still animating
+        // (spinning wheel, terminal bursts) instead of spinning the loop as
+        // fast as it can go. Otherwise sleep on the X socket: input wakes us
+        // instantly, and 250ms bounds the latency of the non-X sources
+        // checked above (channels and widget timers).
+        xwin.wait_for_event(Duration::from_millis(if drew_frame { 16 } else { 250 }))?;
     }
 
     app.shutdown();

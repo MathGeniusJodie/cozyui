@@ -118,7 +118,7 @@ const MODELS: [Model; 4] = [
 ];
 
 pub struct Fwends {
-    avatars: [Sprite; 4],
+    avatars: [Sprite; MODELS.len()],
     bubble: Sprite,
     user_sticky: Sprite,
     input_sticky: Sprite,
@@ -159,12 +159,7 @@ struct PendingReply {
 
 impl Fwends {
     pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
-        let avatars = [
-            (MODELS[0].avatar)(),
-            (MODELS[1].avatar)(),
-            (MODELS[2].avatar)(),
-            (MODELS[3].avatar)(),
-        ];
+        let avatars = MODELS.map(|model| (model.avatar)());
         let model_slot_w = avatars.iter().map(|avatar| avatar.width).max().unwrap_or(1);
         let model_slot_h = avatars
             .iter()
@@ -536,28 +531,35 @@ impl Fwends {
             MessageSkin::Sticky => &self.user_sticky,
         };
 
-        for dy in 0..h {
-            let py = y + dy as isize;
-            if py < clip_top as isize || py >= clip_bottom as isize {
-                continue;
-            }
-            for dx in 0..w {
-                let px = x + dx;
-                let sx = pixel_graphics::stretch_source_coord(
+        let source_x: Vec<usize> = (0..w)
+            .map(|dx| {
+                pixel_graphics::stretch_source_coord(
                     dx,
                     w,
                     image.width,
                     style.left_cap,
                     style.right_cap,
-                );
-                let sy = pixel_graphics::stretch_source_coord(
-                    dy,
-                    h,
-                    image.height,
-                    style.top_cap,
-                    style.bottom_cap,
-                );
-                let Some(color) = palette.resolve_index(image.at(sx, sy), px, py as usize) else {
+                )
+            })
+            .collect();
+
+        for dy in 0..h {
+            let py = y + dy as isize;
+            if py < clip_top as isize || py >= clip_bottom as isize {
+                continue;
+            }
+            let sy = pixel_graphics::stretch_source_coord(
+                dy,
+                h,
+                image.height,
+                style.top_cap,
+                style.bottom_cap,
+            );
+            for dx in 0..w {
+                let px = x + dx;
+                let Some(color) =
+                    palette.resolve_index(image.at(source_x[dx], sy), px, py as usize)
+                else {
                     continue;
                 };
                 fb.set_pixel(px, py as usize, color);

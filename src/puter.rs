@@ -167,8 +167,17 @@ pub struct Puter {
     terminal: Option<Terminal>,
     settings: DisplaySettings,
     active_button: Option<usize>,
-    selecting_terminal: bool,
+    /// Set true only when a mouse-down was actually forwarded to the pty
+    /// terminal (via `term.mouse_press`'s SGR-mouse-mode branch), so
+    /// `release_button` knows whether it owes the terminal a matching
+    /// mouse-up escape.
+    mouse_down_forwarded: bool,
     selection_point: Option<Point>,
+    /// `render_chrome`'s output, cached because it's static apart from the
+    /// `DisplaySettings` it was last drawn with. Rebuilt (via interior
+    /// mutability, since `render` only takes `&self`) whenever `settings`
+    /// changes; blitted as-is otherwise.
+    chrome_cache: std::cell::RefCell<Option<(DisplaySettings, Framebuffer)>>,
 }
 
 impl Puter {
@@ -183,8 +192,9 @@ impl Puter {
             terminal: None,
             settings: DisplaySettings::new(),
             active_button: None,
-            selecting_terminal: false,
+            mouse_down_forwarded: false,
             selection_point: None,
+            chrome_cache: std::cell::RefCell::new(None),
         })
     }
 
@@ -203,14 +213,17 @@ impl Puter {
 
     pub(crate) fn press_button(&mut self, x: i16, y: i16, state: u16) {
         self.active_button = button_at(x, y);
-        self.selecting_terminal = false;
         self.selection_point = None;
+        self.mouse_down_forwarded = false;
         if self.active_button.is_some() {
             return;
         }
 
-        self.selection_point = self.terminal().and_then(|term| term.mouse_press(x, y, state));
-        self.selecting_terminal = self.selection_point.is_some();
+        let (selection_point, forwarded) = self
+            .terminal()
+            .map_or((None, false), |term| term.mouse_press(x, y, state));
+        self.selection_point = selection_point;
+        self.mouse_down_forwarded = forwarded;
     }
 
     /// Returns true when the power button was clicked and the app should quit.
@@ -234,13 +247,16 @@ impl Puter {
         }
         self.active_button = None;
         if let Some(term) = self.terminal() {
-            if self.selecting_terminal {
+            if self.selection_point.is_some() {
                 term.selection_to_clipboard();
-            } else {
+            } else if self.mouse_down_forwarded {
+                // Only balance the pty's mouse-down with a mouse-up if we
+                // actually forwarded a mouse-down in the first place (e.g.
+                // not when the press landed on a chrome button).
                 term.mouse_release(x, y);
             }
         }
-        self.selecting_terminal = false;
+        self.mouse_down_forwarded = false;
         self.selection_point = None;
         quit
     }
@@ -267,7 +283,7 @@ impl Puter {
     }
 
     pub(crate) fn motion(&mut self, x: i16, y: i16) -> bool {
-        if !self.selecting_terminal {
+        if self.selection_point.is_none() {
             return false;
         }
 
@@ -326,7 +342,7 @@ impl Puter {
 
     #[allow(clippy::significant_drop_tightening)]
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
-        self.render_chrome(fb, palette);
+        self.blit_chrome(fb, palette);
 
         let Some(term) = self.terminal() else {
             return;
@@ -385,6 +401,27 @@ impl Puter {
         }
     }
 
+    /// Blit the cached chrome (rebuilding it first if `self.settings` has
+    /// changed since it was last built) onto `fb`. `render_chrome` reads
+    /// only `self.settings`, so that's the only thing that can invalidate
+    /// the cache; everything else it draws (case art, control strip, mode
+    /// buttons, lights, power/lock icons) is fully determined by it.
+    fn blit_chrome(&self, fb: &mut Framebuffer, palette: &Palette) {
+        let stale = self
+            .chrome_cache
+            .borrow()
+            .as_ref()
+            .is_none_or(|(cached_settings, _)| *cached_settings != self.settings);
+        if stale {
+            let mut chrome_fb = Framebuffer::new(fb.width, fb.height, TRANSPARENT);
+            self.render_chrome(&mut chrome_fb, palette);
+            *self.chrome_cache.borrow_mut() = Some((self.settings, chrome_fb));
+        }
+        let cache = self.chrome_cache.borrow();
+        let (_, chrome_fb) = cache.as_ref().expect("just populated above if it was stale");
+        fb.blit_from(chrome_fb, 0, 0);
+    }
+
     /// The static dressing around the screen: case art, control strip, mode
     /// buttons, lights, and the power/lock buttons.
     fn render_chrome(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -436,7 +473,7 @@ impl Puter {
                 cell.bg
             };
             fg_color = inverse_fg;
-            fg = bg.unwrap_or_else(|| self.background_terminal_text_color(palette));
+            fg = bg.unwrap_or_else(|| self.background_terminal_bg_color(palette));
             glow = Some(self.terminal_glow_color(fg_color, palette));
             bg = Some(inverse_bg);
         }
@@ -822,20 +859,25 @@ impl Terminal {
         }
     }
 
+    /// Returns the selection anchor point (if a text selection was started)
+    /// and whether a mouse-down escape was forwarded to the pty. The two are
+    /// mutually exclusive: a forwarded mouse-down never starts a selection.
     #[allow(clippy::significant_drop_tightening)]
-    fn mouse_press(&self, x: i16, y: i16, state: u16) -> Option<Point> {
-        let point = screen_point(x, y, &self.window_size)?;
+    fn mouse_press(&self, x: i16, y: i16, state: u16) -> (Option<Point>, bool) {
+        let Some(point) = screen_point(x, y, &self.window_size) else {
+            return (None, false);
+        };
 
         let mouse_mode = self.term.lock().mode().intersects(TermMode::MOUSE_MODE);
         if mouse_mode && state & SHIFT_MASK == 0 {
             self.send_mouse(point, 0, true);
-            return None;
+            return (None, true);
         }
 
         self.scroll(Scroll::Bottom);
         let mut term = self.term.lock();
         term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
-        Some(point)
+        (Some(point), false)
     }
 
     fn mouse_motion(&self, point: Point) -> bool {
@@ -943,13 +985,13 @@ enum ButtonAction {
     Lock,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TextMode {
     Green,
     Orange,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct DisplaySettings {
     high_brightness: bool,
     text_mode: TextMode,
@@ -1102,25 +1144,16 @@ fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState, _palette: &
     fill_source_rect(fb, light.x + 1, light.y + 2, LIGHT_W - 2, LIGHT_H - 3, core);
 }
 
-#[allow(clippy::match_same_arms)]
+/// `NamedColor`'s first 16 discriminants (Black..=BrightWhite) line up
+/// exactly with `ANSI_16_TO_NA16` / `ANSI_16_GLOW_TO_NA16`'s element order,
+/// so the 0..=15 arms below reuse those arrays instead of hand-matching.
 const fn named_terminal_palette_index(color: NamedColor) -> Index {
     match color {
-        NamedColor::Black => TERM_COLOR_BLACK,
-        NamedColor::Red => TERM_COLOR_RED,
-        NamedColor::Green => TERM_COLOR_GREEN,
-        NamedColor::Yellow => TERM_COLOR_YELLOW,
-        NamedColor::Blue => TERM_COLOR_BLUE,
-        NamedColor::Magenta => TERM_COLOR_MAGENTA,
-        NamedColor::Cyan => TERM_COLOR_CYAN,
-        NamedColor::White => TERM_COLOR_WHITE,
-        NamedColor::BrightBlack => TERM_COLOR_BRIGHT_BLACK,
-        NamedColor::BrightRed => TERM_COLOR_BRIGHT_RED,
-        NamedColor::BrightGreen => TERM_COLOR_BRIGHT_GREEN,
-        NamedColor::BrightYellow => TERM_COLOR_BRIGHT_YELLOW,
-        NamedColor::BrightBlue => TERM_COLOR_BRIGHT_BLUE,
-        NamedColor::BrightMagenta => TERM_COLOR_BRIGHT_MAGENTA,
-        NamedColor::BrightCyan => TERM_COLOR_BRIGHT_CYAN,
-        NamedColor::BrightWhite => TERM_COLOR_BRIGHT_WHITE,
+        NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::DimForeground => {
+            TERM_COLOR_WHITE
+        }
+        NamedColor::Background => TERM_COLOR_BLACK,
+        NamedColor::Cursor => COLOR_CURSOR,
         NamedColor::DimBlack => TERM_COLOR_DIM_BLACK,
         NamedColor::DimRed => TERM_COLOR_DIM_RED,
         NamedColor::DimGreen => TERM_COLOR_DIM_GREEN,
@@ -1129,38 +1162,26 @@ const fn named_terminal_palette_index(color: NamedColor) -> Index {
         NamedColor::DimMagenta => TERM_COLOR_DIM_MAGENTA,
         NamedColor::DimCyan => TERM_COLOR_DIM_CYAN,
         NamedColor::DimWhite => TERM_COLOR_DIM_WHITE,
-        NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::DimForeground => {
-            TERM_COLOR_WHITE
-        }
-        NamedColor::Background => TERM_COLOR_BLACK,
-        NamedColor::Cursor => COLOR_CURSOR,
+        named => ANSI_16_TO_NA16[named as usize],
     }
 }
 
-#[allow(clippy::match_same_arms)]
 const fn named_terminal_glow_palette_index(color: NamedColor) -> Index {
     match color {
-        NamedColor::Black | NamedColor::BrightBlack | NamedColor::DimBlack => TERM_COLOR_DIM_BLACK,
-        #[allow(clippy::match_same_arms)]
-        NamedColor::Red | NamedColor::BrightRed | NamedColor::DimRed => TERM_COLOR_DIM_RED,
-        #[allow(clippy::match_same_arms)]
-        NamedColor::Green | NamedColor::BrightGreen | NamedColor::DimGreen => TERM_COLOR_DIM_GREEN,
-        #[allow(clippy::match_same_arms)]
-        NamedColor::Yellow | NamedColor::BrightYellow | NamedColor::DimYellow => {
-            TERM_COLOR_DIM_YELLOW
-        }
-        #[allow(clippy::match_same_arms)]
-        NamedColor::Blue | NamedColor::BrightBlue | NamedColor::DimBlue => TERM_COLOR_DIM_BLUE,
-        NamedColor::Magenta | NamedColor::BrightMagenta | NamedColor::DimMagenta => {
-            TERM_COLOR_DIM_MAGENTA
-        }
-        NamedColor::Cyan | NamedColor::BrightCyan | NamedColor::DimCyan => TERM_COLOR_DIM_CYAN,
-        NamedColor::White | NamedColor::BrightWhite | NamedColor::DimWhite => TERM_COLOR_DIM_WHITE,
         NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::DimForeground => {
             TERM_COLOR_DIM_WHITE
         }
         NamedColor::Background => TERM_COLOR_DIM_BLACK,
         NamedColor::Cursor => COLOR_CURSOR,
+        NamedColor::DimBlack => TERM_COLOR_DIM_BLACK,
+        NamedColor::DimRed => TERM_COLOR_DIM_RED,
+        NamedColor::DimGreen => TERM_COLOR_DIM_GREEN,
+        NamedColor::DimYellow => TERM_COLOR_DIM_YELLOW,
+        NamedColor::DimBlue => TERM_COLOR_DIM_BLUE,
+        NamedColor::DimMagenta => TERM_COLOR_DIM_MAGENTA,
+        NamedColor::DimCyan => TERM_COLOR_DIM_CYAN,
+        NamedColor::DimWhite => TERM_COLOR_DIM_WHITE,
+        named => ANSI_16_GLOW_TO_NA16[named as usize],
     }
 }
 
@@ -1420,7 +1441,18 @@ fn control_byte(input: &KeyInput) -> Option<u8> {
     if (keysyms::KEY_A..=keysyms::KEY_Z).contains(&raw) {
         return Some((raw - keysyms::KEY_A + 1) as u8);
     }
-    None
+    // '[', '\', ']', '^', '_' sit at ASCII values whose low 5 bits are
+    // already the C0 control byte they map to (e.g. '[' is 0x5B, and
+    // 0x5B & 0x1F == 0x1B == Esc).
+    match raw {
+        keysyms::KEY_bracketleft
+        | keysyms::KEY_backslash
+        | keysyms::KEY_bracketright
+        | keysyms::KEY_asciicircum
+        | keysyms::KEY_underscore => Some((raw as u8) & 0x1F),
+        keysyms::KEY_space => Some(0x00),
+        _ => None,
+    }
 }
 
 const fn key_scroll(input: &KeyInput) -> Option<Scroll> {

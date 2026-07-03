@@ -62,6 +62,7 @@ impl TextEdit {
     pub(crate) fn select_all(&mut self, text: &str) {
         self.anchor = Some(0);
         self.cursor = char_len(text);
+        self.drag_anchor = None;
     }
 
     pub(crate) fn selection_range(&self) -> Option<(usize, usize)> {
@@ -142,6 +143,7 @@ impl TextEdit {
                     *text = previous;
                     self.cursor = cursor.min(char_len(text));
                     self.anchor = None;
+                    self.drag_anchor = None;
                     return TextEditOutcome::Handled {
                         changed: true,
                         copy: None,
@@ -239,6 +241,7 @@ impl TextEdit {
         } else if let Some((start, end)) = self.selection_range() {
             self.cursor = if cursor < self.cursor { start } else { end };
             self.anchor = None;
+            self.drag_anchor = None;
             return;
         } else {
             self.anchor = None;
@@ -354,6 +357,7 @@ impl TextEdit {
         text.replace_range(char_to_byte(text, start)..char_to_byte(text, end), "");
         self.cursor = start;
         self.anchor = None;
+        self.drag_anchor = None;
     }
 }
 

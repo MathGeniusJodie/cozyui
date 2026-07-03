@@ -172,13 +172,30 @@ fn read_battery_at(dir: &std::path::Path) -> Option<(u8, bool)> {
     Some((charge, discharging))
 }
 
-/// First `/sys/class/power_supply` entry that reports a charge capacity.
+/// The `/sys/class/power_supply` entry for the system battery. Entries whose
+/// `type` is exactly "Battery" and whose name starts with "BAT" are preferred
+/// (this excludes wireless mouse/keyboard batteries, which report a capacity
+/// but a different `type`); if none match, fall back to the first entry that
+/// reports a charge capacity at all, so odd systems still work.
 fn battery_dir() -> Option<PathBuf> {
     let entries = fs::read_dir("/sys/class/power_supply").ok()?;
-    entries
+    let paths: Vec<PathBuf> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.join("capacity").exists())
+        .filter(|path| path.join("capacity").exists())
+        .collect();
+
+    paths
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("BAT"))
+                && fs::read_to_string(path.join("type"))
+                    .is_ok_and(|contents| contents.trim() == "Battery")
+        })
+        .or_else(|| paths.first())
+        .cloned()
 }
 
 impl crate::widget::Widget for Fizzle {

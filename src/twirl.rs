@@ -306,8 +306,25 @@ fn load_total(path: &str) -> Result<u64, Box<dyn Error>> {
         return Ok(0);
     }
 
-    let text = fs::read_to_string(path)?;
-    Ok(text.trim().parse()?)
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("twirl: failed to read {path}: {err}");
+            return Ok(0);
+        }
+    };
+    match text.trim().parse() {
+        Ok(total) => Ok(total),
+        Err(err) => {
+            eprintln!("twirl: failed to parse {path}: {err}");
+            let bad_path = format!("{path}.bad");
+            match std::fs::rename(path, &bad_path) {
+                Ok(()) => eprintln!("twirl: renamed corrupt {path} to {bad_path}"),
+                Err(err) => eprintln!("twirl: failed to rename corrupt {path} to {bad_path}: {err}"),
+            }
+            Ok(0)
+        }
+    }
 }
 
 fn save_total(path: &str, total: u64) -> Result<(), Box<dyn Error>> {

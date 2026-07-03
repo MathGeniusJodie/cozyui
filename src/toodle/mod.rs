@@ -12,7 +12,7 @@ use crate::{CursorKind, Framebuffer, Index, Paint, Palette, Rect, Sprite, Swap, 
 
 mod store;
 
-pub(crate) use store::done_file_path;
+pub(crate) use store::{PRIORITY_TAGS, done_file_path};
 use store::{
     AtomicWrite, DoneCounts, LINE_COUNT, SECTION_COUNT, SectionStore, TodoList,
     archive_transaction_path, daily_done_path, done_dir, recover_archive_transaction, todo_file,
@@ -46,7 +46,16 @@ const LINE_Y: [usize; LINE_COUNT] = [73, 95, 117, 139, 161, 183];
 const TEXT_X: usize = 31;
 const TEXT_Y_OFFSET: usize = 2;
 const CHECK_X: usize = 10;
-const CHECK_Y: [usize; LINE_COUNT] = [71, 93, 115, 137, 159, 181];
+/// Always `LINE_Y[i] - 2`; derived so the two arrays can't drift apart.
+const CHECK_Y: [usize; LINE_COUNT] = {
+    let mut check_y = [0usize; LINE_COUNT];
+    let mut i = 0;
+    while i < LINE_COUNT {
+        check_y[i] = LINE_Y[i] - 2;
+        i += 1;
+    }
+    check_y
+};
 /// Half-height of the horizontal band used to isolate one line's checkbox box
 /// when blitting it from the combined checkboxes sprite. Half the line pitch so
 /// adjacent boxes fall outside the band.
@@ -112,9 +121,9 @@ pub struct Toodle {
     // The static page-stack art (shadows + page images + checkboxes) is the
     // expensive part to draw and only changes when the stack geometry does.
     // We cache it and blit it each frame, painting the live front-page text and
-    // cursor on top. `page_art_key` is the geometry signature it was built for.
-    page_art: Option<Framebuffer>,
-    page_art_key: Option<PageArtKey>,
+    // cursor on top. The paired `PageArtKey` is the geometry signature it was
+    // built for.
+    page_art: Option<(Framebuffer, PageArtKey)>,
 }
 
 /// Everything the cached page art depends on: which page is on top and how many
@@ -168,7 +177,6 @@ impl Toodle {
             last_edit: Instant::now(),
             last_poll: Instant::now(),
             page_art: None,
-            page_art_key: None,
         })
     }
 
@@ -204,22 +212,20 @@ impl Toodle {
     pub(crate) fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
         let (w, h) = (self.width(), self.height());
         let key = self.page_art_key();
-        let stale = self.page_art_key != Some(key)
-            || self
-                .page_art
-                .as_ref()
-                .is_none_or(|art| art.width != w || art.height != h);
+        let stale = self
+            .page_art
+            .as_ref()
+            .is_none_or(|(art, art_key)| *art_key != key || art.width != w || art.height != h);
         if stale {
             let mut art = match self.page_art.take() {
-                Some(art) if art.width == w && art.height == h => art,
+                Some((art, _)) if art.width == w && art.height == h => art,
                 _ => Framebuffer::new(w, h, self.fill_color(palette)),
             };
             self.build_page_art(&mut art, palette);
-            self.page_art = Some(art);
-            self.page_art_key = Some(key);
+            self.page_art = Some((art, key));
         }
 
-        if let Some(art) = &self.page_art {
+        if let Some((art, _)) = &self.page_art {
             fb.blit_from(art, 0, 0);
         }
         self.draw_front_overlay(fb, palette);
@@ -650,10 +656,20 @@ impl Toodle {
                 // spot is as good as another, so stay put.
                 None
             } else {
+                let old_index = current_page.page * LINE_COUNT
+                    + self.focused_line.unwrap_or(0);
                 self.list(current_page.section)
                     .items
                     .iter()
-                    .position(|item| item.text == text)
+                    .enumerate()
+                    .filter(|(_, item)| item.text == text)
+                    .map(|(index, _)| index)
+                    // Several todos can share text; follow whichever match sits
+                    // closest to where focus used to be, preferring the earlier
+                    // one on a tie, rather than always snapping to the first.
+                    .min_by_key(|&index| {
+                        (index as isize - old_index as isize).abs() as usize
+                    })
             };
             if let Some(index) = index {
                 // Follow the focused todo to wherever it landed.
@@ -714,10 +730,15 @@ impl Toodle {
             }
         }
 
-        let mut done_writes = Vec::new();
+        // Stage every write up front (per section: an optional done-file write
+        // and an optional section-file write) without committing anything yet,
+        // so the transaction marker below can describe the whole operation
+        // before any rename happens.
         if archived.iter().any(|section| !section.is_empty()) {
             fs::create_dir_all(done_dir())?;
         }
+        let mut staged: [(Option<AtomicWrite>, Option<(String, AtomicWrite)>); SECTION_COUNT] =
+            std::array::from_fn(|_| (None, None));
         for (section, archived_section) in archived.iter().enumerate() {
             if archived_section.is_empty() {
                 continue;
@@ -737,29 +758,50 @@ impl Toodle {
                 done_text.push_str(todo);
                 done_text.push('\n');
             }
-            done_writes.push(AtomicWrite::stage(&done_path, done_text.into_bytes())?);
+            staged[section].0 = Some(AtomicWrite::stage(&done_path, done_text.into_bytes())?);
         }
-        let mut section_writes = Vec::new();
         for (section, changed) in changed_sections.into_iter().enumerate() {
             if changed {
                 let text = staged_lists[section].serialized_text();
                 let write = AtomicWrite::stage(&todo_file(section), text.as_bytes())?;
-                section_writes.push((section, text, write));
+                staged[section].1 = Some((text, write));
             }
         }
 
+        // The marker covers every staged write across all sections, since
+        // recovery only ever finishes renames whose temp file still exists
+        // (see `recover_archive_transaction`): once a section's writes are
+        // committed, their temp files are gone and recovery silently skips
+        // them, so writing the marker once up front and only removing it
+        // after the whole loop below finishes is still correct even though
+        // the loop commits (and adopts) one section at a time.
         let marker_path = archive_transaction_path();
-        let marker_writes: Vec<&AtomicWrite> = done_writes
+        let marker_writes: Vec<&AtomicWrite> = staged
             .iter()
-            .chain(section_writes.iter().map(|(_, _, write)| write))
+            .flat_map(|(done_write, section_write)| {
+                done_write
+                    .iter()
+                    .chain(section_write.iter().map(|(_, write)| write))
+            })
             .collect();
         write_archive_transaction_marker(&marker_path, &marker_writes)?;
-        for staged_write in done_writes {
-            staged_write.commit()?;
-        }
-        for (section, text, staged_write) in section_writes {
-            let written = staged_write.commit()?;
-            self.sections[section].adopt(staged_lists[section].clone(), text, written);
+
+        // Commit and adopt one section at a time: the done write, then the
+        // section write, then folding the in-memory list into place. If a
+        // later section's commit fails, every earlier section is already
+        // fully committed *and* adopted, so nothing is left half-applied
+        // except (at most) the section that was in flight when the error
+        // hit, and the marker above lets a subsequent restart finish that
+        // section's rename if it had made it to disk.
+        for section in 0..SECTION_COUNT {
+            let (done_write, section_write) = &mut staged[section];
+            if let Some(write) = done_write.take() {
+                write.commit()?;
+            }
+            if let Some((text, write)) = section_write.take() {
+                let written = write.commit()?;
+                self.sections[section].adopt(staged_lists[section].clone(), text, written);
+            }
         }
         fs::remove_file(&marker_path)?;
 

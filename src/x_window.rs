@@ -469,13 +469,20 @@ impl XWindow {
     }
 
     /// Full barrier: round-trip to the server, after which every outstanding
-    /// `shm_put_image` has been executed and all segments are reusable. Only
-    /// the fallback when both segments are still busy (their completion
-    /// events not yet drained).
+    /// `shm_put_image` has been executed and its completion event is queued.
+    /// Draining the queue (rather than force-clearing `busy`) consumes those
+    /// completions now; a blind clear would leave them behind to wrongly
+    /// free a segment re-used by a later put while the server still reads
+    /// it. Only the fallback when both segments are still busy.
     fn sync_shm(&mut self) -> Result<(), Box<dyn Error>> {
         self.conn.get_input_focus()?.reply()?;
-        for image in &mut self.shm_images {
-            image.busy = false;
+        while let Some(event) = self.conn.poll_for_event()? {
+            if let XEvent::ShmCompletion(completion) = &event {
+                let seg = completion.shmseg;
+                self.shm_completed(seg);
+            } else {
+                self.pending_events.push_back(event);
+            }
         }
         Ok(())
     }
@@ -620,8 +627,11 @@ impl XWindow {
             .reply()?
             .owner;
         if owner != self.window {
+            // Losing the ownership race (e.g. to a clipboard manager) only
+            // means this one copy didn't stick; it must not abort the app.
             self.clipboard_text = None;
-            return Err("failed to take ownership of the X clipboard".into());
+            eprintln!("clipboard copy failed: another client owns the selection");
+            return Ok(());
         }
         self.selection_time = self.last_event_time;
         Ok(())

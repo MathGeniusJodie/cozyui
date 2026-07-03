@@ -392,13 +392,15 @@ impl Wavey {
     }
 
     fn play_station(&mut self) {
-        self.stop_player();
         let Some(station) = self.stations.get(self.station) else {
             return;
         };
         if station.mpv_args.trim().is_empty() {
+            eprintln!("wavey: selected station has no mpv_args, leaving playback untouched");
             return;
         }
+        let mpv_args = station.mpv_args.clone();
+        self.stop_player();
 
         let ipc_path = mpv_ipc_path();
         if let Err(err) = fs::remove_file(&ipc_path)
@@ -411,8 +413,7 @@ impl Wavey {
             "cozyui-wavey-station={}",
             self.station
         ));
-        let quoted_args = station
-            .mpv_args
+        let quoted_args = mpv_args
             .split_whitespace()
             .map(crate::util::shell_quote)
             .collect::<Vec<_>>()
@@ -855,21 +856,17 @@ fn ensure_player_session() {
 /// the previous mpv has exited), so the write happens in a throwaway child
 /// that gets reaped off the UI thread.
 fn queue_player_command(command: &str) {
-    let spawned = Command::new("sh")
-        .args([
-            "-c",
-            r#"printf '%s\n' "$COZYUI_MPV_CMD" > "$COZYUI_MPV_FIFO""#,
-        ])
-        .env("COZYUI_MPV_CMD", command)
-        .env("COZYUI_MPV_FIFO", player_fifo_path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    if let Ok(mut child) = spawned {
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-    }
+    let _ = crate::util::spawn_and_reap(
+        Command::new("sh")
+            .args([
+                "-c",
+                r#"printf '%s\n' "$COZYUI_MPV_CMD" > "$COZYUI_MPV_FIFO""#,
+            ])
+            .env("COZYUI_MPV_CMD", command)
+            .env("COZYUI_MPV_FIFO", player_fifo_path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
 }
 
 fn volume_angle(volume: u8) -> f32 {

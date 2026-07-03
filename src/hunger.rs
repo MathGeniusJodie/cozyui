@@ -199,44 +199,81 @@ fn save_state(eaten_through: f64) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Unix seconds of local midnight today, derived from the current wall clock.
-/// This is always anchored on the real "now": the time-of-day fields only make
-/// sense for the current instant, so callers scan a range of days around it
-/// rather than asking for the midnight of some other timestamp.
+/// Unix seconds of local midnight today, resolved via `mktime` so the
+/// boundary lands on true local civil midnight even on a day DST starts or
+/// ends, rather than drifting by the DST offset delta like naive epoch
+/// arithmetic would. Falls back to a UTC day-aligned instant if local time
+/// is unavailable. Only used by tests below; production code goes through
+/// [`civil_day_midnight`] and [`meals_for_day`] directly.
+#[cfg(test)]
 fn today_midnight() -> f64 {
     let now = crate::util::now_secs();
-    localtime::local_time().map_or_else(
-        || (now as i64 / 86400 * 86400) as f64,
-        |tm| {
-            let since_midnight =
-                i64::from(tm.tm_hour) * 3600 + i64::from(tm.tm_min) * 60 + i64::from(tm.tm_sec);
-            (now as i64 - since_midnight) as f64
-        },
+    civil_day_midnight(0).unwrap_or_else(|| (now as i64 / 86400 * 86400) as f64)
+}
+
+/// Local midnight `day_offset` days from today. Built by taking today's
+/// civil date (year/month/day) from [`localtime::local_time`] and shifting
+/// `tm_mday` by `day_offset` directly, then resolving to epoch seconds via
+/// [`localtime::epoch_for_civil`] (`mktime` normalizes an out-of-range
+/// `mday`, e.g. day 32, by rolling into the next month, so this is safe).
+/// This anchors day boundaries to true local civil time instead of adding
+/// `day_offset * 86400` seconds, which drifts across a DST transition.
+/// `None` if local time is unavailable.
+#[cfg(test)]
+fn civil_day_midnight(day_offset: i64) -> Option<f64> {
+    let tm = localtime::local_time()?;
+    localtime::epoch_for_civil(
+        tm.tm_year + 1900,
+        tm.tm_mon,
+        tm.tm_mday + day_offset as i32,
+        0,
+        0,
+        0,
     )
+    .map(|epoch| epoch as f64)
 }
 
 /// All meal times (Unix seconds) for the day `day_offset` days from today.
-fn meals_for_day(midnight: f64, day_offset: i64) -> impl Iterator<Item = f64> {
-    let day = midnight + (day_offset * 86400) as f64;
+/// Each meal's wall-clock minutes resolve through `mktime`, so 7:00 means
+/// 7:00 on the local clock even on the day a DST transition inserts or
+/// removes an hour before the window opens (adding fixed seconds to
+/// midnight would shift every meal by the DST delta on that day).
+fn meals_for_day(day_offset: i64) -> impl Iterator<Item = f64> {
+    let tm = localtime::local_time();
     let step = (WINDOW_END_MIN - WINDOW_START_MIN) / (MEALS_PER_DAY - 1);
-    (0..MEALS_PER_DAY).map(move |i| day + ((WINDOW_START_MIN + i * step) * 60) as f64)
+    (0..MEALS_PER_DAY).map(move |i| {
+        let minutes = WINDOW_START_MIN + i * step;
+        tm.as_ref()
+            .and_then(|tm| {
+                localtime::epoch_for_civil(
+                    tm.tm_year + 1900,
+                    tm.tm_mon,
+                    tm.tm_mday + day_offset as i32,
+                    (minutes / 60) as i32,
+                    (minutes % 60) as i32,
+                    0,
+                )
+            })
+            .map_or_else(
+                || {
+                    let day = crate::util::now_secs() as i64 / 86400 * 86400 + day_offset * 86400;
+                    (day + minutes * 60) as f64
+                },
+                |epoch| epoch as f64,
+            )
+    })
 }
 
 /// The earliest meal time strictly after `t`.
 fn next_meal(t: f64) -> f64 {
-    let midnight = today_midnight();
-    (-2..=2)
-        .flat_map(|d| meals_for_day(midnight, d))
-        .find(|&m| m > t)
-        .unwrap_or(t)
+    (-2..=2).flat_map(meals_for_day).find(|&m| m > t).unwrap_or(t)
 }
 
 /// The latest meal time at or before `t`. Meal times are generated in
 /// ascending order, so the last one passing the filter is the latest.
 fn prev_meal(t: f64) -> f64 {
-    let midnight = today_midnight();
     (-2..=2)
-        .flat_map(|d| meals_for_day(midnight, d))
+        .flat_map(meals_for_day)
         .filter(|&m| m <= t)
         .last()
         .unwrap_or(t)
@@ -324,18 +361,18 @@ mod tests {
 
     const DAY: f64 = 86400.0;
 
-    /// Build a fixed Unix-day midnight (UTC) for deterministic meal math by
-    /// going through the same path the widget uses.
-    fn meals(midnight: f64) -> Vec<f64> {
-        meals_for_day(midnight, 0).collect()
+    /// Today's meal times, going through the same path the widget uses.
+    fn meals() -> Vec<f64> {
+        meals_for_day(0).collect()
     }
 
     #[test]
     fn five_meals_span_the_window() {
-        let m = meals(0.0);
+        let midnight = today_midnight();
+        let m = meals();
         assert_eq!(m.len(), 5);
-        assert_eq!(m[0], (7 * 3600) as f64); // 7:00
-        assert_eq!(m[4], (20 * 3600) as f64); // 20:00
+        assert_eq!(m[0], midnight + (7 * 3600) as f64); // 7:00
+        assert_eq!(m[4], midnight + (20 * 3600) as f64); // 20:00
         // Evenly spaced 3h15m apart.
         assert_eq!(m[1] - m[0], 3.25 * 3600.0);
     }
@@ -343,8 +380,7 @@ mod tests {
     #[test]
     fn full_just_after_a_meal_empty_at_the_next() {
         // 1s after the first meal: bar is essentially full.
-        let midnight = today_midnight();
-        let first = meals_for_day(midnight, 0).next().unwrap();
+        let first = meals_for_day(0).next().unwrap();
         let (target, span) = meal_window(first);
         let view = render_view(target, span, first + 1.0);
         assert!(!view.is_empty());
@@ -376,8 +412,7 @@ mod tests {
         // Regression: next_meal/prev_meal must work when called with a meal
         // timestamp rather than the current instant. The two meals either side
         // of a meal time should be a clean window apart, not garbage.
-        let midnight = today_midnight();
-        let meal = meals_for_day(midnight, 0).nth(1).unwrap(); // 10:15 today
+        let meal = meals_for_day(0).nth(1).unwrap(); // 10:15 today
         assert_eq!(prev_meal(meal), meal);
         let after = next_meal(meal);
         assert_eq!(after - meal, 3.25 * 3600.0);
