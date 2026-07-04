@@ -90,3 +90,51 @@ pub(crate) const fn civil_from_days(z: i64) -> (i32, i32, i32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     ((y + if m <= 2 { 1 } else { 0 }) as i32, m as i32, d as i32)
 }
+
+/// ISO-8601 week number (1..=53) for the week containing `epoch_day` (days
+/// since 1970-01-01, as returned by `days_from_civil`). ISO weeks run
+/// Monday-Sunday and belong to whichever year contains their Thursday, so
+/// late December can land in week 1 of the next year and early January can
+/// land in week 52/53 of the previous year; anchoring on the Thursday of the
+/// week (rather than `epoch_day` itself) handles both cases uniformly.
+pub(crate) fn iso_week_number(epoch_day: i64) -> i32 {
+    // 1970-01-01 (epoch_day 0) was a Thursday (ISO weekday 4).
+    let iso_weekday = (epoch_day.rem_euclid(7) + 3) % 7 + 1;
+    let thursday_epoch_day = epoch_day + (4 - iso_weekday);
+    let (thursday_year, _, _) = civil_from_days(thursday_epoch_day);
+    let jan1_epoch_day = days_from_civil(thursday_year, 1, 1);
+    ((thursday_epoch_day - jan1_epoch_day) / 7 + 1) as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{days_from_civil, iso_week_number};
+
+    #[test]
+    fn iso_week_number_matches_known_dates() {
+        let cases = [
+            ((2026, 1, 1), 1),
+            ((2026, 1, 4), 1),
+            ((2026, 7, 4), 27),
+            ((2020, 12, 31), 53),
+            ((2021, 1, 1), 53),
+            ((1977, 1, 1), 53),
+            ((1976, 12, 31), 53),
+            ((1978, 1, 1), 52),
+            ((1979, 12, 31), 1),
+            ((1980, 1, 1), 1),
+            ((2016, 1, 4), 1),
+            ((2000, 1, 1), 52),
+            ((2024, 12, 31), 1),
+            ((2025, 1, 1), 1),
+        ];
+        for ((y, m, d), expected) in cases {
+            let epoch_day = days_from_civil(y, m, d);
+            assert_eq!(
+                iso_week_number(epoch_day),
+                expected,
+                "{y}-{m:02}-{d:02}"
+            );
+        }
+    }
+}

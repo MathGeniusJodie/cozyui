@@ -619,7 +619,10 @@ const fn widget_xy(widget: WidgetId) -> (usize, isize) {
         WidgetId::Twirl => (587, 321),
         WidgetId::Wavey => (113, 31),
         WidgetId::Fizzle => (393, 31),
-        WidgetId::Day => (330, 197),
+        // 330 was Day's plain-view x before it grew a week-number column;
+        // shifting left by that column's width keeps the plain view's card
+        // pinned to the same on-screen position (see `day::PLAIN_CARD_X`).
+        WidgetId::Day => (330 - day::WEEK_COL_W, 197),
         WidgetId::Budgit => (322, 752),
         WidgetId::Stats => (322, 604),
         WidgetId::Hunger => (463, 3),

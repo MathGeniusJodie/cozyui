@@ -7,10 +7,34 @@ use crate::palette_color;
 use crate::text::BitmapFont;
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT, draw_filled_circle};
 
-const WIDTH: usize = 116;
+// The background art (`assets/days.png`) is natively `BASE_WIDTH` wide; the
+// calendar view needs one extra column to the left of the day grid for week
+// numbers, so the card is drawn wider than the art via 9-slice stretching
+// (see `BG_*_CAP` below) rather than shipping a second, wider PNG.
+const BASE_WIDTH: usize = 116;
+// One grid-column's worth of width for the week-number digits (reuses
+// `CALENDAR_COL_W`, the same width the day grid's own columns use), plus the
+// calendar font's "w" glyph (6px, measured via `BitmapFont::text_width`) for
+// the "w" prefix (e.g. "w27"), plus 4px more of breathing room.
+pub(crate) const WEEK_COL_W: usize = CALENDAR_COL_W + 6 + 4;
+const WIDTH: usize = BASE_WIDTH + WEEK_COL_W;
 const HEIGHT: usize = 116;
-const SHADOW_X_OFFSET: isize = 1;
-const SHADOW_Y_OFFSET: isize = 4;
+// 9-slice caps for `background`: kept clear of the header's two rivets
+// (native x 15-22 and 90-97) and the right-edge stacked-page ridge (native x
+// 105-115), so stretching the card only widens the flat middle, not those
+// details. Top/bottom caps are unused in practice since the card never grows
+// taller, but must stay within the art's height.
+const BG_LEFT_CAP: usize = 24;
+const BG_RIGHT_CAP: usize = 26;
+const BG_TOP_CAP: usize = 25;
+const BG_BOTTOM_CAP: usize = 20;
+// Where the plain (non-calendar) card's left edge sits within the widget's
+// frame: inset by the week-number column's width so its right edge lines up
+// with the calendar view's (which spans the full, wider `WIDTH`) without the
+// widget's footprint needing to change size when `calendar_mode` toggles.
+const PLAIN_CARD_X: usize = WEEK_COL_W;
+const SHADOW_X_OFFSET: usize = 1;
+const SHADOW_Y_OFFSET: usize = 4;
 const DATE_REFRESH: Duration = Duration::from_secs(60);
 const TOP_GAP: usize = 10;
 const LABEL_GAP: usize = 26;
@@ -21,7 +45,13 @@ const CALENDAR_WEEKDAY_Y: usize = 34;
 const CALENDAR_GRID_Y: usize = 47;
 const CALENDAR_COL_W: usize = 13;
 const CALENDAR_ROW_H: usize = 12;
-const CALENDAR_LEFT: usize = 12;
+const WEEK_NUM_LEFT: usize = 12;
+const CALENDAR_LEFT: usize = WEEK_NUM_LEFT + WEEK_COL_W;
+// A month can span at most 6 grid rows (e.g. a 31-day month starting on
+// Saturday). `calendar_row_week` bounds-checks each row against the month's
+// actual length, so iterating this fixed upper bound can't over- or
+// under-run the grid.
+const MAX_CALENDAR_ROWS: usize = 6;
 const TODAY_CIRCLE_X_OFFSET: isize = -1;
 const TODAY_CIRCLE_Y_OFFSET: isize = 0;
 const TODAY_CIRCLE_RADIUS: isize = 6;
@@ -96,12 +126,12 @@ impl Day {
 
     #[allow(clippy::unused_self)]
     pub(crate) const fn width(&self) -> usize {
-        WIDTH + SHADOW_X_OFFSET as usize
+        WIDTH + SHADOW_X_OFFSET
     }
 
     #[allow(clippy::unused_self)]
     pub(crate) const fn height(&self) -> usize {
-        HEIGHT + SHADOW_Y_OFFSET as usize
+        HEIGHT + SHADOW_Y_OFFSET
     }
 
     #[allow(clippy::unused_self)]
@@ -109,15 +139,49 @@ impl Day {
         TRANSPARENT
     }
 
+    /// Left edge and width of whichever card is actually on screen: the
+    /// full, 9-sliced `WIDTH` in calendar mode (the week-number column only
+    /// exists there), or the plain, unstretched `BASE_WIDTH` card (inset by
+    /// `PLAIN_CARD_X`) in single-date mode, so both modes' cards share the
+    /// same right edge and the widget's on-screen footprint never has to
+    /// change size when `calendar_mode` toggles. `render` and `centered_x`
+    /// both key off this single source of truth so they can't drift apart
+    /// on which card is drawn where.
+    const fn card_geometry(&self) -> (usize, usize) {
+        if self.calendar_mode {
+            (0, WIDTH)
+        } else {
+            (PLAIN_CARD_X, BASE_WIDTH)
+        }
+    }
+
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.draw_sprite_silhouette(
+        let (card_x, card_w) = self.card_geometry();
+        fb.draw_resized_silhouette(
             &self.background,
-            SHADOW_X_OFFSET,
-            SHADOW_Y_OFFSET,
             palette,
+            card_x + SHADOW_X_OFFSET,
+            SHADOW_Y_OFFSET,
+            card_w,
+            HEIGHT,
+            BG_LEFT_CAP,
+            BG_RIGHT_CAP,
+            BG_TOP_CAP,
+            BG_BOTTOM_CAP,
             app_color::BACKGROUND_SHADOW_PAINT,
         );
-        fb.draw_sprite(&self.background, 0, 0, palette);
+        fb.draw_resized(
+            &self.background,
+            palette,
+            card_x,
+            0,
+            card_w,
+            HEIGHT,
+            BG_LEFT_CAP,
+            BG_RIGHT_CAP,
+            BG_TOP_CAP,
+            BG_BOTTOM_CAP,
+        );
 
         if self.calendar_mode {
             self.render_calendar(fb, palette);
@@ -168,7 +232,9 @@ impl Day {
             self.draw_calendar_cell(fb, label, weekday, CALENDAR_WEEKDAY_Y, black);
         }
 
-        let first_weekday = first_weekday_of_month(&self.date);
+        let first_day_epoch =
+            localtime::days_from_civil(self.date.year_num, self.date.month_index as i32 + 1, 1);
+        let first_weekday = weekday_of(first_day_epoch);
         let days = days_in_month(self.date.year_num, self.date.month_index);
         for day in 1..=days {
             let index = first_weekday + day as usize - 1;
@@ -185,6 +251,23 @@ impl Day {
                 draw_filled_circle(fb, center_x, center_y, TODAY_CIRCLE_RADIUS, crimson);
             }
             self.draw_calendar_cell(fb, &day.to_string(), col, y, color);
+        }
+
+        // One ISO week number per grid row, to the left of the week it
+        // labels. Grid rows run Sunday-Saturday but ISO weeks run
+        // Monday-Sunday, so each row's number is taken from its Monday
+        // (column 1) rather than its Sunday, which actually belongs to the
+        // previous row's ISO week. A row whose Monday falls past the end of
+        // the month (a trailing lone Sunday, when the month's last day is
+        // itself a Sunday) has no week of its own to show: its one visible
+        // day already belongs to the week shown on the row above, so
+        // `calendar_row_week` returns `None` and it's skipped rather than
+        // mislabeled with the following month's week.
+        for row in 0..MAX_CALENDAR_ROWS {
+            if let Some(week) = calendar_row_week(first_day_epoch, days, row) {
+                let y = CALENDAR_GRID_Y + row * CALENDAR_ROW_H;
+                self.draw_week_number(fb, week, y, crimson);
+            }
         }
     }
 
@@ -214,11 +297,17 @@ impl Day {
             .map_or_else(|| font.cell_h(), |bounds| bounds.height())
     }
 
+    /// Horizontal centering position for `text_width`-wide text within
+    /// whichever card `card_geometry` says is actually on screen.
+    const fn centered_x(&self, text_width: usize) -> usize {
+        let (card_x, card_w) = self.card_geometry();
+        card_x + card_w.saturating_sub(text_width) / 2
+    }
+
     /// Shared implementation for `draw_centered_tight`/`draw_centered`: center
     /// `text` horizontally and draw it at `y`. When `tight` is set, both axes
     /// are centered on the glyphs' actual ink bounds rather than the font's
     /// nominal advance/cell metrics (skips drawing if `text` has no ink).
-    #[allow(clippy::unused_self)]
     fn draw_centered_impl(
         &self,
         fb: &mut Framebuffer,
@@ -232,11 +321,13 @@ impl Day {
             let Some(bounds) = font.text_ink_bounds(text) else {
                 return;
             };
-            let x = centered_x(bounds.width()).saturating_add_signed(-bounds.min_x);
+            let x = self
+                .centered_x(bounds.width())
+                .saturating_add_signed(-bounds.min_x);
             let draw_y = y.saturating_sub(bounds.min_y);
             font.draw_text(fb, text, x, draw_y, color);
         } else {
-            let x = centered_x(font.text_width(text));
+            let x = self.centered_x(font.text_width(text));
             font.draw_text(fb, text, x, y, color);
         }
     }
@@ -272,8 +363,23 @@ impl Day {
         color: Index,
     ) {
         let cell_x = CALENDAR_LEFT + col * CALENDAR_COL_W;
-        let text_x =
-            cell_x + CALENDAR_COL_W.saturating_sub(self.calendar_font.text_width(text)) / 2;
+        self.draw_cell_text(fb, text, cell_x, CALENDAR_COL_W, y, color);
+    }
+
+    fn draw_week_number(&self, fb: &mut Framebuffer, week: i32, y: usize, color: Index) {
+        self.draw_cell_text(fb, &format!("w{week}"), WEEK_NUM_LEFT, WEEK_COL_W, y, color);
+    }
+
+    fn draw_cell_text(
+        &self,
+        fb: &mut Framebuffer,
+        text: &str,
+        cell_x: usize,
+        col_w: usize,
+        y: usize,
+        color: Index,
+    ) {
+        let text_x = cell_x + col_w.saturating_sub(self.calendar_font.text_width(text)) / 2;
         self.calendar_font.draw_text(fb, text, text_x, y, color);
     }
 
@@ -284,10 +390,6 @@ impl Day {
             (y + self.calendar_font.cell_h() / 2) as isize + TODAY_CIRCLE_Y_OFFSET,
         )
     }
-}
-
-const fn centered_x(text_width: usize) -> usize {
-    WIDTH.saturating_sub(text_width) / 2
 }
 
 /// Builds today's date parts from the system clock, or `None` if the
@@ -332,13 +434,27 @@ fn placeholder_date_parts() -> DateParts {
     }
 }
 
-/// Weekday index (0 = Sunday) of the 1st of the month, derived from the
-/// shared civil-date math in [`crate::localtime`] rather than a separate
-/// calendar implementation. `days_from_civil` counts from 1970-01-01, a
-/// Thursday (index 4), so weekday = (days_from_civil + 4) mod 7.
-fn first_weekday_of_month(date: &DateParts) -> usize {
-    let days = localtime::days_from_civil(date.year_num, date.month_index as i32 + 1, 1);
-    (days + 4).rem_euclid(7) as usize
+/// Weekday index (0 = Sunday) of the given epoch day (days since
+/// 1970-01-01, as returned by `days_from_civil`), derived from the shared
+/// civil-date math in [`crate::localtime`] rather than a separate calendar
+/// implementation. `days_from_civil` counts from 1970-01-01, a Thursday
+/// (index 4), so weekday = (epoch_day + 4) mod 7.
+const fn weekday_of(epoch_day: i64) -> usize {
+    (epoch_day + 4).rem_euclid(7) as usize
+}
+
+/// The ISO week number to show for calendar grid row `row` (0-based, per
+/// `render_calendar`'s Sun-Sat layout), or `None` if that row is a trailing
+/// lone Sunday whose week was already labeled on the row above (its own
+/// Monday-Saturday span falls past the end of the month, i.e. belongs to a
+/// week that has no other day displayed anywhere in this month's grid).
+fn calendar_row_week(first_day_epoch: i64, days: i32, row: usize) -> Option<i32> {
+    let first_weekday = weekday_of(first_day_epoch);
+    let monday_day = row as i64 * 7 + 2 - first_weekday as i64;
+    if monday_day > i64::from(days) {
+        return None;
+    }
+    Some(localtime::iso_week_number(first_day_epoch + monday_day - 1))
 }
 
 /// Number of days in `month_index`'s month (0-based), via the day count
@@ -411,7 +527,8 @@ impl crate::widget::Widget for Day {
 
 #[cfg(test)]
 mod tests {
-    use super::days_in_month;
+    use super::{calendar_row_week, days_in_month};
+    use crate::localtime;
 
     #[test]
     fn february_has_28_days_in_non_leap_years() {
@@ -422,5 +539,18 @@ mod tests {
         assert_eq!(days_in_month(2026, 0), 31); // january
         assert_eq!(days_in_month(2026, 3), 30); // april
         assert_eq!(days_in_month(2026, 11), 31); // december
+    }
+
+    #[test]
+    fn trailing_lone_sunday_row_has_no_week_label() {
+        // May 2026 has 31 days and starts on a Friday (first_weekday = 5),
+        // so the grid's last row (row 5) holds only day 31 -- a Sunday --
+        // with no Monday-Saturday days of its own in this month. That
+        // Sunday's real ISO week (22) is already shown on the row above for
+        // days 25-30; row 5 must not relabel it with the following month's
+        // week (23).
+        let first_day_epoch = localtime::days_from_civil(2026, 5, 1);
+        assert_eq!(calendar_row_week(first_day_epoch, 31, 4), Some(22));
+        assert_eq!(calendar_row_week(first_day_epoch, 31, 5), None);
     }
 }
