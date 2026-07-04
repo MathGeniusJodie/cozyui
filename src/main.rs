@@ -830,14 +830,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Toodle housekeeping: debounced saves hit disk shortly after typing
         // pauses, and external edits to the todo files are folded in. The
         // latter can change the page-stack size, so it may need a relayout.
-        if app.widgets.toodle.maintain()? {
-            if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
-                app.render(&mut fb, &palette);
-                xwin.draw(&fb)?;
-            } else {
-                app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Toodle)?;
+        match app.widgets.toodle.maintain() {
+            Ok(true) => {
+                if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
+                    app.render(&mut fb, &palette);
+                    xwin.draw(&fb)?;
+                } else {
+                    app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Toodle)?;
+                }
+                drew_frame = true;
             }
-            drew_frame = true;
+            Ok(false) => {}
+            Err(err) => {
+                eprintln!("toodle maintain failed: {err}");
+            }
         }
 
         let mut pending_motion_widget = None;

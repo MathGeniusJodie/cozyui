@@ -157,7 +157,7 @@ struct PendingReply {
     rx: Receiver<Result<String, String>>,
     author: &'static str,
     // Pid of the in-flight curl request, so erase_chat_history can cancel it
-    // instead of leaving it running for up to REQUEST_TIMEOUT_SECS after the
+    // instead of leaving it running for up to the request timeout after the
     // reply is no longer wanted.
     pid_slot: openrouter::PidSlot,
 }
@@ -473,7 +473,7 @@ impl Fwends {
             && let Some(pid) = *pending.pid_slot.lock().unwrap()
         {
             // Best-effort: kill the in-flight curl so it doesn't keep running
-            // for up to REQUEST_TIMEOUT_SECS after we've discarded the chat
+            // for up to the request timeout after we've discarded the chat
             // that wanted its reply. Safe to ignore failure (e.g. it already
             // exited between the check and the kill).
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
@@ -1244,6 +1244,11 @@ fn send_openrouter_request(
 ) -> Result<String, String> {
     let response = openrouter::post_cancelable(
         &chat_body(model, system_prompt, history, latest_text, thinking),
+        if thinking {
+            openrouter::THINKING_TIMEOUT_SECS
+        } else {
+            openrouter::DEFAULT_TIMEOUT_SECS
+        },
         Some(pid_slot),
     )?;
     extract_content(&response).map_err(|err| format!("{err}: {}", compact_error(&response)))

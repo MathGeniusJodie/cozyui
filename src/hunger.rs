@@ -82,8 +82,14 @@ impl Hunger {
 
         let now = crate::util::now_secs();
         // Default: assume every past meal has already been eaten, so the bar
-        // simply counts down to the next upcoming meal.
-        let eaten_through = load_state().unwrap_or_else(|| prev_meal(now));
+        // simply counts down to the next upcoming meal. A persisted timestamp
+        // from the future (e.g. saved under a skewed clock that was since
+        // corrected) can't reflect a meal that's actually been eaten yet, and
+        // would fall outside next_meal's search window, so it's rejected the
+        // same as a missing/corrupt file.
+        let eaten_through = load_state()
+            .filter(|&value| value <= now)
+            .unwrap_or_else(|| prev_meal(now));
         let (target, span) = meal_window(eaten_through);
         let view = render_view(target, span, now);
 
@@ -406,5 +412,24 @@ mod tests {
         assert_eq!(prev_meal(meal), meal);
         let after = next_meal(meal);
         assert_eq!(after - meal, 3.25 * 3600.0);
+    }
+
+    #[test]
+    fn future_eaten_through_breaks_meal_window_without_guarding() {
+        // Regression / documentation: next_meal only searches a window of
+        // roughly [now - 2 days, now + 2 days] because meals_for_day is
+        // anchored to *today*, not to the timestamp passed in. A persisted
+        // "eaten through" value from beyond that window (e.g. a future
+        // timestamp saved under a skewed clock) finds no meal greater than
+        // itself, so next_meal falls back to returning the input unchanged.
+        // That collapses meal_window's span to the 1-second floor, which is
+        // exactly the degenerate case Hunger::load must avoid by rejecting
+        // future timestamps before they ever reach meal_window.
+        let now = crate::util::now_secs();
+        let implausible_future = now + 30.0 * DAY;
+        assert_eq!(next_meal(implausible_future), implausible_future);
+        let (target, span) = meal_window(implausible_future);
+        assert_eq!(target, implausible_future);
+        assert_eq!(span, 1.0);
     }
 }

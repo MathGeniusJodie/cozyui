@@ -67,6 +67,17 @@ struct Config {
     templates_dir: String,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            periods: Vec::new(),
+            dollars_per_svg: 0.0,
+            done_dir: DEFAULT_DONE_DIR.to_string(),
+            templates_dir: DEFAULT_TEMPLATES_DIR.to_string(),
+        }
+    }
+}
+
 impl Config {
     /// Parses the config text. A `[YYYY-MM-DD]` header opens a new period and
     /// the `Label = amount` lines beneath it are that period's monthly
@@ -95,8 +106,18 @@ impl Config {
                 match parse_date(date.trim()) {
                     Ok((y, m, d)) => {
                         skip_period = false;
+                        // Resolve the header's civil date to local midnight
+                        // (DST-aware) rather than raw UTC epoch arithmetic, so
+                        // the period switches over at the date it names in
+                        // the user's own timezone. `epoch_for_civil` wants a
+                        // 0-based month, unlike `parse_date`'s 1-based one.
+                        let start_secs = crate::localtime::epoch_for_civil(y, m - 1, d, 0, 0, 0)
+                            .map_or_else(
+                                || (days_from_civil(y, m, d) * 86400) as f64,
+                                |epoch| epoch as f64,
+                            );
                         periods.push(Period {
-                            start_secs: (days_from_civil(y, m, d) * 86400) as f64,
+                            start_secs,
                             burn: 0.0,
                             expenses: Vec::new(),
                         });
@@ -346,7 +367,15 @@ impl Budgit {
             &pixel_fonts::FUSION_PIXEL_8_SPEC,
         )?;
 
-        let config = Config::parse(&fs::read_to_string(crate::paths::config_file(CONFIG_FILE))?)?;
+        let config = match Config::parse(&fs::read_to_string(crate::paths::config_file(
+            CONFIG_FILE,
+        ))?) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("budgit.conf: skipping malformed config: {err}");
+                Config::default()
+            }
+        };
         let start_balance = load_ledger_balance()?;
         // The estimate starts at zero and is filled in by the background
         // counter once its first off-thread scan completes.

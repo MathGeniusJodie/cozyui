@@ -17,11 +17,16 @@ use std::sync::{Arc, Mutex};
 
 /// Shared slot a caller can use to record the pid of the in-flight curl
 /// child so it can be killed (e.g. `libc::kill(pid, libc::SIGTERM)`) to
-/// cancel a request early instead of waiting out `REQUEST_TIMEOUT_SECS`.
+/// cancel a request early instead of waiting out the request timeout.
 pub type PidSlot = Arc<Mutex<Option<u32>>>;
 
 const URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const REQUEST_TIMEOUT_SECS: &str = "30";
+
+/// Timeout for a normal (fast-model) chat request.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+/// Timeout for a "thinking" (high-effort reasoning) chat request, which
+/// routinely takes longer than a normal request to complete.
+pub const THINKING_TIMEOUT_SECS: u64 = 120;
 
 /// Free preset `OpenRouter` routes to when the requested model errors or runs
 /// out of credits. Callers append it to a `models` routing list so the chat
@@ -35,16 +40,20 @@ pub const FALLBACK_MODEL: &str = "@preset/free";
 ///
 /// If `pid_slot` is given, the spawned curl child's pid is recorded there for
 /// the duration of the request so a caller on another thread can cancel it
-/// early (e.g. `libc::kill(pid, libc::SIGTERM)`) instead of waiting out
-/// `REQUEST_TIMEOUT_SECS`.
-pub fn post_cancelable(body: &Value, pid_slot: Option<&PidSlot>) -> Result<Value, String> {
-    let raw = post_raw(body.to_string().as_bytes(), pid_slot)?;
+/// early (e.g. `libc::kill(pid, libc::SIGTERM)`) instead of waiting out the
+/// request timeout.
+pub fn post_cancelable(
+    body: &Value,
+    timeout_secs: u64,
+    pid_slot: Option<&PidSlot>,
+) -> Result<Value, String> {
+    let raw = post_raw(body.to_string().as_bytes(), timeout_secs, pid_slot)?;
     Ok(serde_json::from_slice(&raw).unwrap_or_else(
         |_| json!({"error": {"message": String::from_utf8_lossy(&raw).to_string()}}),
     ))
 }
 
-fn post_raw(body: &[u8], pid_slot: Option<&PidSlot>) -> Result<Vec<u8>, String> {
+fn post_raw(body: &[u8], timeout_secs: u64, pid_slot: Option<&PidSlot>) -> Result<Vec<u8>, String> {
     let api_key =
         env::var("OPENROUTER_API_KEY").map_err(|_| "OPENROUTER_API_KEY is not set".to_string())?;
     let body_file = CurlBodyFile::new(body)?;
@@ -53,7 +62,7 @@ fn post_raw(body: &[u8], pid_slot: Option<&PidSlot>) -> Result<Vec<u8>, String> 
             "-sS",
             "--fail-with-body",
             "--max-time",
-            REQUEST_TIMEOUT_SECS,
+            &timeout_secs.to_string(),
             "--config",
             "-",
         ])

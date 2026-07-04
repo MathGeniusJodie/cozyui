@@ -1076,6 +1076,13 @@ impl Drop for XWindow {
         for shm_image in &self.shm_images {
             let _ = self.conn.shm_detach(shm_image.seg);
         }
+        let _ = self.conn.free_pixmap(self.back_pix);
+        let _ = self.conn.free_gc(self.gc);
+        if let Some(cursors) = self.cursors {
+            for cursor in cursors {
+                let _ = self.conn.free_cursor(cursor);
+            }
+        }
         let _ = self.conn.flush();
     }
 }

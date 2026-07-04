@@ -411,9 +411,19 @@ impl Wavey {
         self.current_title.clear();
         let script_opts =
             crate::util::shell_quote(&format!("cozyui-wavey-station={}", self.station));
+        // Only glob tokens (containing `*`) are left unquoted so the shell can
+        // expand them, since mpv doesn't glob-expand its own arguments;
+        // everything else stays single-quoted so a station's config line
+        // can't smuggle in shell metacharacters (`;`, `|`, backticks, ...).
         let quoted_args = mpv_args
             .split_whitespace()
-            .map(crate::util::shell_quote)
+            .map(|token| {
+                if token.contains('*') {
+                    token.to_string()
+                } else {
+                    crate::util::shell_quote(token)
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ");
         let command_line = format!(
