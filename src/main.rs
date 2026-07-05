@@ -41,7 +41,6 @@ pub(crate) use pixel_graphics::{
 use widget::{ScrollDirection, Widget};
 use x_window::XWindow;
 
-#[allow(dead_code)]
 pub(crate) mod palette_color {
     use crate::Index;
 
@@ -63,7 +62,6 @@ pub(crate) mod palette_color {
     pub const BLACK: Index = 15;
 }
 
-#[allow(dead_code)]
 pub(crate) mod app_color {
     use crate::palette_color;
     use crate::{Index, Paint};

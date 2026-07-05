@@ -142,7 +142,7 @@ pub(super) const fn section_tag(section: Priority) -> &'static str {
 /// Identity of one on-disk file version. The inode is included so an atomic
 /// rename-over (how sync tools and we ourselves write) is always detected even
 /// if size and mtime happen to match.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(super) struct Fingerprint {
     ino: u64,
     size: u64,
@@ -784,19 +784,28 @@ impl Drop for AtomicWrite {
 struct ArchiveWriteRecord {
     path: String,
     temp_path: String,
+    /// `path`'s fingerprint at the moment this write was staged (before any
+    /// renames in this transaction happened), or `None` if it didn't exist
+    /// yet. Lets `recover_archive_transaction` tell an untouched destination
+    /// (safe to finish committing) apart from one that has since been
+    /// rewritten by something else entirely (see its doc comment).
+    expected_before: Option<Fingerprint>,
 }
 
 pub(super) fn write_archive_transaction_marker(
     marker_path: &str,
     staged_writes: &[&AtomicWrite],
 ) -> Result<(), Box<dyn Error>> {
-    let records: Vec<ArchiveWriteRecord> = staged_writes
-        .iter()
-        .map(|write| ArchiveWriteRecord {
+    let mut records = Vec::with_capacity(staged_writes.len());
+    for write in staged_writes {
+        records.push(ArchiveWriteRecord {
             path: write.path.clone(),
             temp_path: write.temp_path.clone(),
-        })
-        .collect();
+            // Called before any of this transaction's renames happen, so this
+            // is genuinely the pre-transaction state of the destination.
+            expected_before: fingerprint(&write.path)?,
+        });
+    }
     let marker = serde_json::to_vec(&records)?;
     let transaction_marker = AtomicWrite::stage(marker_path, marker)?;
     transaction_marker.commit()?;
@@ -812,6 +821,19 @@ pub(super) fn recover_archive_transaction(marker_path: &str) -> Result<(), Box<d
     let records = serde_json::from_str::<Vec<ArchiveWriteRecord>>(&marker)?;
 
     for record in records {
+        // If the destination no longer matches what it was when this write
+        // was staged, it's already been superseded -- either this exact
+        // rename already landed (possibly via a concurrent recovery), or an
+        // ordinary debounced save independently rewrote the file after
+        // `archive_completed_todos` returned early on some *other* section's
+        // failure, stranding this record. Either way, blindly replaying the
+        // stale temp file here would silently revert whatever is there now,
+        // so leave the destination alone and just discard the orphaned temp
+        // file instead.
+        if fingerprint(&record.path)? != record.expected_before {
+            let _ = fs::remove_file(&record.temp_path);
+            continue;
+        }
         // Probe by renaming rather than checking existence first: a missing
         // temp file (NotFound) just means that write was already committed,
         // and an exists-then-rename pair could race a concurrent instance
@@ -1113,6 +1135,50 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&done_path).unwrap(), "old\ndone\n");
         assert_eq!(fs::read_to_string(&page_path).unwrap(), "next\n\n\n\n\n\n");
+        assert!(!marker_path.exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archive_transaction_recovery_does_not_revert_a_write_made_after_the_failure() {
+        // Regression test for a bug: if `archive_completed_todos` fails
+        // partway (leaving a section's write stranded in the marker) and an
+        // ordinary debounced save independently rewrites that same file
+        // afterward, a later recovery pass must not replay the stale staged
+        // content over top of it.
+        let dir = unique_temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+
+        let page_path = dir.join("page.txt");
+        let marker_path = dir.join("transaction.json");
+        fs::write(&page_path, "- [x] done\n- [ ] next\n").unwrap();
+
+        let mut staged_writes =
+            [AtomicWrite::stage(page_path.to_str().unwrap(), b"- [ ] next\n").unwrap()];
+        let staged_refs: Vec<&AtomicWrite> = staged_writes.iter().collect();
+        write_archive_transaction_marker(marker_path.to_str().unwrap(), &staged_refs).unwrap();
+        // Mirrors `archive_completed_todos`: once the marker is written, the
+        // temp file's cleanup is the marker's job, not `Drop`'s -- and the
+        // commit itself never happens here, simulating it being stranded by
+        // an error partway through the real commit loop.
+        for write in &mut staged_writes {
+            write.disarm();
+        }
+
+        // An ordinary save independently rewrites the destination in the
+        // meantime, with content that has nothing to do with the stranded
+        // archive write.
+        fs::write(&page_path, "- [ ] next\n- [ ] typed since\n").unwrap();
+
+        recover_archive_transaction(marker_path.to_str().unwrap()).unwrap();
+
+        // The independent write must survive untouched, not get reverted to
+        // the stale staged content.
+        assert_eq!(
+            fs::read_to_string(&page_path).unwrap(),
+            "- [ ] next\n- [ ] typed since\n"
+        );
         assert!(!marker_path.exists());
 
         fs::remove_dir_all(dir).unwrap();
