@@ -842,20 +842,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Toodle housekeeping: debounced saves hit disk shortly after typing
         // pauses, and external edits to the todo files are folded in. The
         // latter can change the page-stack size, so it may need a relayout.
-        match app.widgets.toodle.maintain() {
-            Ok(true) => {
-                if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
-                    app.render(&mut fb, &palette);
-                    xwin.draw(&fb)?;
-                } else {
-                    app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Toodle)?;
-                }
-                drew_frame = true;
+        if log_widget_err(|| "toodle maintain".to_string(), app.widgets.toodle.maintain()) {
+            if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
+                app.render(&mut fb, &palette);
+                xwin.draw(&fb)?;
+            } else {
+                app.render_and_draw_widget(&mut fb, &mut xwin, &palette, WidgetId::Toodle)?;
             }
-            Ok(false) => {}
-            Err(err) => {
-                eprintln!("toodle maintain failed: {err}");
-            }
+            drew_frame = true;
         }
 
         let mut pending_motion_widget = None;
@@ -966,8 +960,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 /// Logs a widget-logic failure (e.g. a disk error mid-save) and degrades to
 /// the default value instead of propagating it out of `main` and taking the
-/// whole desktop down over one widget's transient error — mirrors the
-/// toodle-maintain handling above.
+/// whole desktop down over one widget's transient error.
 fn log_widget_err<T: Default>(op: impl FnOnce() -> String, result: Result<T, Box<dyn Error>>) -> T {
     result.unwrap_or_else(|err| {
         eprintln!("{} failed: {err}", op());

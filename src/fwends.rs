@@ -181,14 +181,12 @@ impl PendingReply {
     /// Cancels the in-flight curl (if any) without waiting for its request
     /// thread to unwind: called from `erase_chat_history`, which runs on the
     /// UI thread and must not freeze the whole overlay for up to the request
-    /// timeout if the pid hasn't been recorded yet. The thread's
-    /// `CurlBodyFile` cleanup still runs (just detached, on its own thread,
-    /// rather than joined here) since the process keeps running afterward.
+    /// timeout if the pid hasn't been recorded yet. Dropping `self.handle`
+    /// here without joining it still lets the thread (and its `CurlBodyFile`
+    /// cleanup) run to completion detached, since the process keeps running
+    /// afterward — std detaches a `JoinHandle`'s thread on drop.
     fn cancel(self) {
         self.signal_cancel();
-        thread::spawn(move || {
-            let _ = self.handle.join();
-        });
     }
 
     /// Cancels and waits, but only up to `timeout`: called from `shutdown`,
@@ -382,13 +380,15 @@ impl Fwends {
         input: &KeyInput,
         clipboard_text: Option<&str>,
     ) -> Option<String> {
+        let key = edit_key(input);
+
         // Tab/Left/Right intentionally switch models even mid-edit, mirroring
         // a click on the fwend avatar, rather than moving the text cursor or
         // doing focus navigation — so this must run before the input gets a
         // chance to consume Left/Right for cursor movement below. Shift+Left
         // /Right is excluded so text selection in the input still works;
         // `edit_key` doesn't distinguish shift on its own.
-        match edit_key(input) {
+        match key {
             EditKey::Tab => {
                 self.select_next_model();
                 return None;
@@ -415,7 +415,7 @@ impl Fwends {
             }
         }
 
-        match edit_key(input) {
+        match key {
             EditKey::Enter if self.focused => self.send(),
             EditKey::Escape => self.focused = false,
             _ => {}

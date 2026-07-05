@@ -761,7 +761,7 @@ struct Terminal {
     event_thread: Option<TerminalThread>,
     clipboard: FairMutex<String>,
     /// Set after the first failed pty write so we only diagnose it once.
-    pty_send_failed: std::cell::Cell<bool>,
+    pty_send_failed: crate::util::FailureLog,
 }
 
 impl Terminal {
@@ -805,7 +805,7 @@ impl Terminal {
         Ok(Self {
             rx,
             tx,
-            pty_send_failed: std::cell::Cell::new(false),
+            pty_send_failed: crate::util::FailureLog::new(),
             term,
             window_size,
             event_thread,
@@ -819,8 +819,10 @@ impl Terminal {
 
     /// Send a message to the pty event loop, diagnosing (once) if it fails.
     fn send_pty(&self, msg: Msg) {
-        if self.tx.send(msg).is_err() && !self.pty_send_failed.replace(true) {
-            eprintln!("puter: failed to write to pty (further failures will be suppressed)");
+        if self.tx.send(msg).is_err() {
+            self.pty_send_failed.record_err(|| {
+                "puter: failed to write to pty (further failures will be suppressed)".to_string()
+            });
         }
     }
 
@@ -1396,7 +1398,7 @@ fn screen_point(x: i16, y: i16, size: &WindowSize) -> Option<Point> {
         return None;
     }
 
-    Some(cell_at(x, y, size))
+    Some(cell_at(x, y, screen_x, screen_y, size))
 }
 
 /// Like `screen_point`, but clamps out-of-grid coordinates to the nearest
@@ -1411,15 +1413,13 @@ fn clamped_screen_point(x: i16, y: i16, size: &WindowSize) -> Point {
     let screen_y = art_y(SCREEN_SOURCE_Y);
     let x = (x.max(0) as usize).clamp(screen_x, screen_x + SCREEN_W - 1);
     let y = (y.max(0) as usize).clamp(screen_y, screen_y + SCREEN_H - 1);
-    cell_at(x, y, size)
+    cell_at(x, y, screen_x, screen_y, size)
 }
 
 /// Column/line math shared by `screen_point` and `clamped_screen_point`;
 /// `x`/`y` must already be within the screen rect.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn cell_at(x: usize, y: usize, size: &WindowSize) -> Point {
-    let screen_x = art_x(SCREEN_SOURCE_X);
-    let screen_y = art_y(SCREEN_SOURCE_Y);
+fn cell_at(x: usize, y: usize, screen_x: usize, screen_y: usize, size: &WindowSize) -> Point {
     let column =
         ((x - screen_x) / size.cell_width as usize).min((size.num_cols as usize).saturating_sub(1));
     let line = ((y - screen_y) / size.cell_height as usize)

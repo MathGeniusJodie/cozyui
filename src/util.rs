@@ -215,16 +215,22 @@ pub(crate) fn atomic_write(path: &str, contents: impl AsRef<[u8]>) -> io::Result
         file.write_all(contents.as_ref())?;
         file.sync_all()?;
         fs::rename(&temp_path, path)?;
-        let parent = std::path::Path::new(path)
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty());
-        if let Some(parent) = parent {
-            fs::File::open(parent)?.sync_all()?;
-        }
-        Ok(())
+        sync_parent_dir(path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp_path);
     }
     result
+}
+
+/// fsync the directory containing `path`, making a just-committed rename (or
+/// a new directory entry) in it durable.
+pub(crate) fn sync_parent_dir(path: &str) -> io::Result<()> {
+    let parent = std::path::Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }

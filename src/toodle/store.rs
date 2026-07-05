@@ -595,7 +595,7 @@ impl AtomicWrite {
         // `write_archive_transaction_marker`) could survive a crash while
         // this temp file's entry doesn't, leaving recovery to find it
         // missing and wrongly conclude the write was already committed.
-        sync_parent_dir(&write.temp_path)?;
+        crate::util::sync_parent_dir(&write.temp_path)?;
         Ok(write)
     }
 
@@ -617,21 +617,9 @@ impl AtomicWrite {
         // The rename itself is not durable until the directory is fsynced;
         // without this, a crash right after "saved" can silently revert the
         // file to its previous version on some filesystems.
-        sync_parent_dir(&self.path)?;
+        crate::util::sync_parent_dir(&self.path)?;
         Ok(written)
     }
-}
-
-/// fsync the directory containing `path`, making a just-committed rename in
-/// it durable.
-fn sync_parent_dir(path: &str) -> io::Result<()> {
-    let parent = Path::new(path)
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty());
-    if let Some(parent) = parent {
-        fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
 }
 
 /// Background writer running section saves (write, fsync, rename, directory
@@ -731,7 +719,7 @@ pub(super) fn recover_archive_transaction(marker_path: &str) -> Result<(), Box<d
         // and an exists-then-rename pair could race a concurrent instance
         // running the same recovery and abort it halfway.
         match fs::rename(&record.temp_path, &record.path) {
-            Ok(()) => sync_parent_dir(&record.path)?,
+            Ok(()) => crate::util::sync_parent_dir(&record.path)?,
             Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(err) => return Err(err.into()),
         }

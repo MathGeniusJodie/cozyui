@@ -381,34 +381,18 @@ fn next_grapheme_end(text: &str, cursor: usize) -> usize {
 /// grapheme-cluster boundary. A caller that derived `index` from something
 /// grapheme-unaware (e.g. a pixel-based click hit test) could otherwise land
 /// the cursor mid-cluster; a later backspace there deletes only part of a
-/// flag or ZWJ emoji instead of the whole thing, since `prev_grapheme_start`
-/// treats "mid-cluster" as "inside this cluster" and only walks back to its
-/// start, not past the already-split remainder.
+/// flag or ZWJ emoji instead of the whole thing. `prev_grapheme_start`
+/// already finds the boundary at or before `index`, and `next_grapheme_end`
+/// (started from there, so it lands on the boundary right after that same
+/// cluster) finds the one at or after it — `index` sits between the two, so
+/// picking whichever is nearer snaps it out of the cluster.
 fn snap_to_grapheme_boundary(text: &str, index: usize) -> usize {
-    let target_byte = char_to_byte(text, index);
-    let mut boundary_before = 0;
-    for (byte, _) in text.grapheme_indices(true) {
-        if byte == target_byte {
-            return index;
-        }
-        if byte > target_byte {
-            let boundary_after = text[..byte].chars().count();
-            return if index - boundary_before <= boundary_after - index {
-                boundary_before
-            } else {
-                boundary_after
-            };
-        }
-        boundary_before = text[..byte].chars().count();
-    }
-    // `index` fell inside the last grapheme cluster (no boundary found after
-    // it): the same nearer-boundary tie-break as above still applies, just
-    // with `char_len(text)` standing in as the boundary after it.
-    let boundary_after = char_len(text);
-    if index - boundary_before <= boundary_after - index {
-        boundary_before
+    let before = prev_grapheme_start(text, index);
+    let after = next_grapheme_end(text, before);
+    if index - before <= after - index {
+        before
     } else {
-        boundary_after
+        after
     }
 }
 
