@@ -92,12 +92,26 @@ struct DateParts {
     day_num: i32,
 }
 
+/// Whether the wall clock has been read successfully at least once.
+/// `Unknown` only occurs right at startup, if the very first `localtime_r`
+/// call fails (afterward `Day::update` always keeps the previous `Known` date
+/// rather than overwrite it — see its doc comment). Keeping this as an enum,
+/// instead of a sentinel `DateParts` with deliberately bogus numeric fields
+/// (year 0, etc.), means `render`/`render_calendar` can't accidentally treat
+/// placeholder numbers as a real date: there are no numeric fields to read at
+/// all in the `Unknown` case.
+#[derive(Clone, PartialEq, Eq)]
+enum DateState {
+    Known(DateParts),
+    Unknown,
+}
+
 pub struct Day {
     background: Sprite,
     label_font: BitmapFont,
     number_font: BitmapFont,
     calendar_font: BitmapFont,
-    date: DateParts,
+    date: DateState,
     last_check: Instant,
     calendar_mode: bool,
 }
@@ -116,8 +130,9 @@ impl Day {
                 &pixel_fonts::FUSION_PIXEL_8_SPEC,
             )?,
             // No previous date to fall back to at startup, so show a clearly
-            // invalid placeholder rather than a plausible-looking wrong date.
-            date: current_date_parts().unwrap_or_else(placeholder_date_parts),
+            // invalid placeholder (see `DateState::Unknown`) rather than a
+            // plausible-looking wrong date.
+            date: current_date_parts().map_or(DateState::Unknown, DateState::Known),
             last_check: Instant::now(),
             calendar_mode: false,
         })
@@ -182,10 +197,12 @@ impl Day {
             BG_BOTTOM_CAP,
         );
 
-        if self.calendar_mode {
-            self.render_calendar(fb, palette);
-        } else {
-            self.render_day(fb, palette);
+        match &self.date {
+            DateState::Known(date) if self.calendar_mode => self.render_calendar(fb, palette, date),
+            DateState::Known(date) => self.render_day(fb, palette, date),
+            // No numeric fields exist to feed a calendar grid or single-date
+            // view, so both modes fall back to the same "?" placeholder text.
+            DateState::Unknown => self.render_day_text(fb, "????", "?", "?", "?"),
         }
     }
 
@@ -193,37 +210,49 @@ impl Day {
         self.calendar_mode = !self.calendar_mode;
     }
 
-    fn render_day(&self, fb: &mut Framebuffer, _palette: &Palette) {
+    fn render_day(&self, fb: &mut Framebuffer, _palette: &Palette, date: &DateParts) {
+        self.render_day_text(fb, &date.year, &date.weekday, &date.day, &date.month);
+    }
+
+    /// Draws the single-date view's four text lines directly, used both by
+    /// `render_day` (with a real date's fields) and by `render` for the
+    /// `DateState::Unknown` placeholder (with literal "?" strings) — so the
+    /// placeholder never has to fake numeric `DateParts` fields just to reuse
+    /// this drawing code.
+    fn render_day_text(
+        &self,
+        fb: &mut Framebuffer,
+        year: &str,
+        weekday: &str,
+        day: &str,
+        month: &str,
+    ) {
         let black = palette_color::BLACK;
         let cream = palette_color::CREAM;
         let crimson = palette_color::CRIMSON;
         let purple = palette_color::PURPLE;
         let rose = palette_color::ROSE;
-        let year_h = self.tight_height(&self.label_font, &self.date.year);
-        let weekday_h = self.tight_height(&self.label_font, &self.date.weekday);
-        let day_h = self.tight_height(&self.number_font, &self.date.day);
+        let year_h = self.tight_height(&self.label_font, year);
+        let weekday_h = self.tight_height(&self.label_font, weekday);
+        let day_h = self.tight_height(&self.number_font, day);
         let mut y = TOP_GAP;
 
-        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y - 1, purple);
-        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y + 1, rose);
-        self.draw_centered_tight(fb, &self.label_font, &self.date.year, y, cream);
+        self.draw_centered_tight(fb, &self.label_font, year, y - 1, purple);
+        self.draw_centered_tight(fb, &self.label_font, year, y + 1, rose);
+        self.draw_centered_tight(fb, &self.label_font, year, y, cream);
         y += year_h + LABEL_GAP;
-        self.draw_centered_tight(fb, &self.label_font, &self.date.weekday, y, black);
+        self.draw_centered_tight(fb, &self.label_font, weekday, y, black);
         y += weekday_h + NUMBER_GAP;
-        self.draw_centered_tight(fb, &self.number_font, &self.date.day, y, crimson);
+        self.draw_centered_tight(fb, &self.number_font, day, y, crimson);
         y += day_h + MONTH_GAP;
-        self.draw_centered_tight(fb, &self.label_font, &self.date.month, y, black);
+        self.draw_centered_tight(fb, &self.label_font, month, y, black);
     }
 
-    fn render_calendar(&self, fb: &mut Framebuffer, _palette: &Palette) {
+    fn render_calendar(&self, fb: &mut Framebuffer, _palette: &Palette, date: &DateParts) {
         let black = palette_color::BLACK;
         let cream = palette_color::CREAM;
         let crimson = palette_color::CRIMSON;
-        let title = format!(
-            "{} {}",
-            short_month_name(self.date.month_index),
-            self.date.year_num
-        );
+        let title = format!("{} {}", short_month_name(date.month_index), date.year_num);
 
         self.draw_centered(fb, &self.calendar_font, &title, CALENDAR_TITLE_Y, cream);
 
@@ -232,20 +261,16 @@ impl Day {
         }
 
         let first_day_epoch =
-            localtime::days_from_civil(self.date.year_num, self.date.month_index as i32 + 1, 1);
+            localtime::days_from_civil(date.year_num, date.month_index as i32 + 1, 1);
         let first_weekday = weekday_of(first_day_epoch);
-        let days = days_in_month(self.date.year_num, self.date.month_index);
+        let days = days_in_month(date.year_num, date.month_index);
         for day in 1..=days {
             let index = first_weekday + day as usize - 1;
             let col = index % 7;
             let row = index / 7;
             let y = CALENDAR_GRID_Y + row * CALENDAR_ROW_H;
-            let color = if day == self.date.day_num {
-                cream
-            } else {
-                black
-            };
-            if day == self.date.day_num {
+            let color = if day == date.day_num { cream } else { black };
+            if day == date.day_num {
                 let (center_x, center_y) = self.calendar_cell_center(col, y);
                 draw_filled_circle(fb, center_x, center_y, TODAY_CIRCLE_RADIUS, crimson);
             }
@@ -282,6 +307,7 @@ impl Day {
         let Some(date) = current_date_parts() else {
             return false;
         };
+        let date = DateState::Known(date);
         if date == self.date {
             return false;
         }
@@ -414,21 +440,6 @@ fn current_date_parts() -> Option<DateParts> {
         month_index,
         day_num: tm.tm_mday.clamp(1, 31),
     })
-}
-
-/// Used only when the clock can't be read at all and there's no previous date
-/// to fall back to (i.e. at startup). Renders as "?" rather than a plausible
-/// but wrong date like January 1, 1900.
-fn placeholder_date_parts() -> DateParts {
-    DateParts {
-        year: "????".to_string(),
-        weekday: "?".to_string(),
-        day: "?".to_string(),
-        month: "?".to_string(),
-        year_num: 0,
-        month_index: 0,
-        day_num: 1,
-    }
 }
 
 /// Weekday index (0 = Sunday) of the given epoch day (days since

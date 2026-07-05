@@ -15,7 +15,7 @@ const SHADOW_X_OFFSET: isize = 1;
 const SHADOW_Y_OFFSET: isize = 4;
 
 const SEGMENT_COUNT: usize = 6;
-const SEGMENT_NUMBERS: [&str; SEGMENT_COUNT] = ["1", "2", "4", "8", "16", "100"];
+const SEGMENT_VALUES: [u64; SEGMENT_COUNT] = [1, 2, 4, 8, 16, 100];
 
 const SEGMENT_LIGHT_COLORS: [Index; SEGMENT_COUNT] = [
     palette_color::CYAN,
@@ -45,11 +45,22 @@ const CLICK_DURATION_SECONDS: f32 = 0.012;
 const CLICK_VOLUME: f32 = 1200.0;
 const TOTAL_GAP: usize = 4;
 
+/// Whether the wheel is spinning, and if so how fast. Replaces a `speed: f32`
+/// that used `0.0` as a sentinel for "not spinning" (checked via two
+/// separate comparisons against zero): a spinning speed is always positive
+/// by construction, and the transition to `Idle` happens explicitly at the
+/// one place speed decays past `STOP_SPEED`.
+#[derive(Clone, Copy)]
+enum Spin {
+    Idle,
+    Spinning(f32),
+}
+
 pub struct Twirl {
     wheel: Sprite,
     font: BitmapFont,
     angle: f32,
-    speed: f32,
+    spin: Spin,
     last_update: Instant,
     last_click_segment: usize,
     total: u64,
@@ -71,7 +82,7 @@ impl Twirl {
                 &pixel_fonts::FUSION_PIXEL_10_SPEC,
             )?,
             angle: 0.0,
-            speed: 0.0,
+            spin: Spin::Idle,
             last_update: Instant::now(),
             last_click_segment: 0,
             total: load_total(&crate::paths::expand_tilde(TOTAL_PATH))?,
@@ -147,13 +158,13 @@ impl Twirl {
         let dt = now.duration_since(self.last_update);
         self.last_update = now;
 
-        if self.speed <= 0.0 {
+        let Spin::Spinning(mut speed) = self.spin else {
             return Ok(false);
-        }
+        };
 
         let previous_segment = self.pointer_segment();
-        self.angle = normalize_angle(self.speed.mul_add(dt.as_secs_f32(), self.angle));
-        self.speed *= FRICTION_PER_SECOND.powf(dt.as_secs_f32());
+        self.angle = normalize_angle(speed.mul_add(dt.as_secs_f32(), self.angle));
+        speed *= FRICTION_PER_SECOND.powf(dt.as_secs_f32());
 
         let current_segment = self.pointer_segment();
         if current_segment != previous_segment && current_segment != self.last_click_segment {
@@ -161,13 +172,15 @@ impl Twirl {
             play_click();
         }
 
-        if self.speed < STOP_SPEED {
-            self.speed = 0.0;
+        if speed < STOP_SPEED {
+            self.spin = Spin::Idle;
             if let Err(err) = self.add_landed_value() {
                 eprintln!("twirl save failed: {err}");
             } else {
                 play_jingle();
             }
+        } else {
+            self.spin = Spin::Spinning(speed);
         }
 
         Ok(true)
@@ -217,12 +230,13 @@ impl Twirl {
         // Spinning while already spinning shouldn't discard the in-progress
         // spin, but awarding the current pointer segment would let players time
         // their re-spin to pick a result. Award a random segment instead.
-        if self.speed > 0.0
+        if matches!(self.spin, Spin::Spinning(_))
             && let Err(err) = self.add_random_value()
         {
             eprintln!("twirl save failed: {err}");
         }
-        self.speed = crate::util::random_unit().mul_add(START_SPEED_RANGE, START_SPEED_MIN);
+        self.spin =
+            Spin::Spinning(crate::util::random_unit().mul_add(START_SPEED_RANGE, START_SPEED_MIN));
         self.last_update = Instant::now();
         self.last_click_segment = self.pointer_segment();
         play_click();
@@ -240,14 +254,15 @@ impl Twirl {
     fn draw_numbers(&self, fb: &mut Framebuffer, _palette: &Palette) {
         let (center_x, center_y) = self.wheel_center();
         let color = palette_color::BLACK;
-        for (segment, number) in SEGMENT_NUMBERS.iter().enumerate() {
+        for (segment, value) in SEGMENT_VALUES.iter().enumerate() {
+            let number = value.to_string();
             let angle = segment_center_angle(segment) - self.angle;
-            let text_w = self.font.text_width(number);
+            let text_w = self.font.text_width(&number);
             let text_h = self.font.cell_h();
             let x = angle.cos().mul_add(NUMBER_RADIUS, center_x) - text_w as f32 / 2.0;
             let y = angle.sin().mul_add(NUMBER_RADIUS, center_y) - text_h as f32 / 2.0;
             self.font
-                .draw_text(fb, number, x.max(0.0) as usize, y.max(0.0) as usize, color);
+                .draw_text(fb, &number, x.max(0.0) as usize, y.max(0.0) as usize, color);
         }
     }
 
@@ -269,7 +284,7 @@ impl Twirl {
     }
 
     fn add_segment_value(&mut self, segment: usize) -> Result<(), Box<dyn Error>> {
-        self.total = self.total.saturating_add(segment_value(segment)?);
+        self.total = self.total.saturating_add(SEGMENT_VALUES[segment]);
         save_total(&crate::paths::expand_tilde(TOTAL_PATH), self.total)
     }
 
@@ -294,10 +309,6 @@ fn segment_for_angle(angle: f32) -> usize {
 
 fn normalize_angle(angle: f32) -> f32 {
     angle.rem_euclid(TAU)
-}
-
-fn segment_value(segment: usize) -> Result<u64, Box<dyn Error>> {
-    Ok(SEGMENT_NUMBERS[segment].parse()?)
 }
 
 fn load_total(path: &str) -> Result<u64, Box<dyn Error>> {
@@ -502,11 +513,5 @@ mod tests {
         assert_eq!(&bytes[8..12], b"WAVE");
         assert_eq!(&bytes[36..40], b"data");
         assert_eq!(bytes.len(), 50);
-    }
-
-    #[test]
-    fn segment_value_uses_customizable_numbers() {
-        assert_eq!(segment_value(0).unwrap(), 1);
-        assert_eq!(segment_value(SEGMENT_COUNT - 1).unwrap(), 100);
     }
 }

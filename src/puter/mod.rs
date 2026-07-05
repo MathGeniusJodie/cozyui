@@ -124,40 +124,44 @@ const BUTTON_TARGETS: [Button; 5] = [
         y: MODE_BUTTON_Y,
         w: BUTTON_W,
         h: BUTTON_H,
-        pressed_sprite: Some(0),
-        action: ButtonAction::Brightness,
+        kind: ButtonKind::Setting {
+            sprite_index: 0,
+            action: SettingAction::Brightness,
+        },
     },
     Button {
         x: COLOR_BUTTON_X,
         y: MODE_BUTTON_Y,
         w: BUTTON_W,
         h: BUTTON_H,
-        pressed_sprite: Some(1),
-        action: ButtonAction::Color,
+        kind: ButtonKind::Setting {
+            sprite_index: 1,
+            action: SettingAction::Color,
+        },
     },
     Button {
         x: CONTRAST_BUTTON_X,
         y: MODE_BUTTON_Y,
         w: BUTTON_W,
         h: BUTTON_H,
-        pressed_sprite: Some(2),
-        action: ButtonAction::Contrast,
+        kind: ButtonKind::Setting {
+            sprite_index: 2,
+            action: SettingAction::Contrast,
+        },
     },
     Button {
         x: POWER_BUTTON_X,
         y: ICON_BUTTON_Y,
         w: ICON_BUTTON_W,
         h: ICON_BUTTON_H,
-        pressed_sprite: None,
-        action: ButtonAction::Power,
+        kind: ButtonKind::Icon(IconAction::Power),
     },
     Button {
         x: LOCK_BUTTON_X,
         y: ICON_BUTTON_Y,
         w: ICON_BUTTON_W,
         h: ICON_BUTTON_H,
-        pressed_sprite: None,
-        action: ButtonAction::Lock,
+        kind: ButtonKind::Icon(IconAction::Lock),
     },
 ];
 
@@ -170,13 +174,12 @@ pub struct Puter {
     atlas: GlyphAtlas,
     terminal: Option<Terminal>,
     settings: DisplaySettings,
-    active_button: Option<usize>,
-    /// Set true only when a mouse-down was actually forwarded to the pty
-    /// terminal (via `term.mouse_press`'s SGR-mouse-mode branch), so
-    /// `release_button` knows whether it owes the terminal a matching
-    /// mouse-up escape.
-    mouse_down_forwarded: bool,
-    selection_point: Option<Point>,
+    /// What an in-progress mouse press is doing: nothing, holding a chrome
+    /// button, dragging out a terminal text selection, or having forwarded a
+    /// mouse-down escape to the pty (awaiting the matching mouse-up). These
+    /// were three separately nullable fields that could disagree with each
+    /// other; now there's exactly one state to keep in sync.
+    press_state: PressState,
     /// `render_chrome`'s output, cached because it's static apart from the
     /// `DisplaySettings` it was last drawn with. Rebuilt (via interior
     /// mutability, since `render` only takes `&self`) whenever `settings`
@@ -195,9 +198,7 @@ impl Puter {
             atlas: GlyphAtlas::load(),
             terminal: None,
             settings: DisplaySettings::new(),
-            active_button: None,
-            mouse_down_forwarded: false,
-            selection_point: None,
+            press_state: PressState::None,
             chrome_cache: std::cell::RefCell::new(None),
         })
     }
@@ -216,52 +217,48 @@ impl Puter {
     }
 
     pub(crate) fn press_button(&mut self, x: i16, y: i16, state: u16) {
-        self.active_button = button_at(x, y);
-        self.selection_point = None;
-        self.mouse_down_forwarded = false;
-        if self.active_button.is_some() {
-            return;
-        }
-
-        let (selection_point, forwarded) = self
-            .terminal()
-            .map_or((None, false), |term| term.mouse_press(x, y, state));
-        self.selection_point = selection_point;
-        self.mouse_down_forwarded = forwarded;
+        self.press_state = match button_at(x, y) {
+            Some(index) => PressState::Chrome(index),
+            None => self
+                .terminal()
+                .map_or(PressState::None, |term| term.mouse_press(x, y, state)),
+        };
     }
 
     /// Returns true when the power button was clicked and the app should quit.
     pub(crate) fn release_button(&mut self, x: i16, y: i16) -> bool {
         let mut quit = false;
         let released_button = button_at(x, y);
-        if let (Some(pressed), Some(released)) = (self.active_button, released_button)
+        if let (PressState::Chrome(pressed), Some(released)) = (self.press_state, released_button)
             && pressed == released
         {
-            match BUTTON_TARGETS[pressed].action {
-                ButtonAction::Power => quit = true,
-                ButtonAction::Lock => {
+            match BUTTON_TARGETS[pressed].kind {
+                ButtonKind::Icon(IconAction::Power) => quit = true,
+                ButtonKind::Icon(IconAction::Lock) => {
                     if let Err(err) =
                         crate::util::spawn_and_reap(&mut std::process::Command::new("xflock4"))
                     {
                         eprintln!("puter: failed to spawn xflock4: {err}");
                     }
                 }
-                action => self.settings.toggle(action),
+                ButtonKind::Setting { action, .. } => self.settings.toggle(action),
             }
         }
-        self.active_button = None;
         if let Some(term) = self.terminal() {
-            if self.selection_point.is_some() {
-                term.selection_to_clipboard();
-            } else if self.mouse_down_forwarded {
-                // Only balance the pty's mouse-down with a mouse-up if we
-                // actually forwarded a mouse-down in the first place (e.g.
-                // not when the press landed on a chrome button).
-                term.mouse_release(x, y);
+            match self.press_state {
+                PressState::Selection(_) => {
+                    term.selection_to_clipboard();
+                }
+                PressState::ForwardedMouse => {
+                    // Only balance the pty's mouse-down with a mouse-up if we
+                    // actually forwarded a mouse-down in the first place (e.g.
+                    // not when the press landed on a chrome button).
+                    term.mouse_release(x, y);
+                }
+                PressState::None | PressState::Chrome(_) => {}
             }
         }
-        self.mouse_down_forwarded = false;
-        self.selection_point = None;
+        self.press_state = PressState::None;
         quit
     }
 
@@ -284,18 +281,18 @@ impl Puter {
     }
 
     pub(crate) fn motion(&mut self, x: i16, y: i16) -> bool {
-        if self.selection_point.is_none() {
+        let PressState::Selection(current) = self.press_state else {
             return false;
-        }
+        };
 
         let Some(point) = self.terminal().and_then(|term| term.screen_point(x, y)) else {
             return false;
         };
-        if self.selection_point == Some(point) {
+        if current == point {
             return false;
         }
 
-        self.selection_point = Some(point);
+        self.press_state = PressState::Selection(point);
         self.terminal().is_some_and(|term| term.mouse_motion(point))
     }
 
@@ -386,9 +383,9 @@ impl Puter {
             fb.fill_rect(cursor_x, cursor_y, cell_w, cell_h, COLOR_CURSOR);
         }
 
-        if let Some(index) = self.active_button {
+        if let PressState::Chrome(index) = self.press_state {
             let button = BUTTON_TARGETS[index];
-            if let Some(sprite_index) = button.pressed_sprite {
+            if let ButtonKind::Setting { sprite_index, .. } = button.kind {
                 fb.draw_sprite_region(
                     &self.button_pressed_sprites,
                     Rect::new(
@@ -411,20 +408,18 @@ impl Puter {
     /// the cache; everything else it draws (case art, control strip, mode
     /// buttons, lights, power/lock icons) is fully determined by it.
     fn blit_chrome(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let stale = self
-            .chrome_cache
-            .borrow()
+        let mut cache = self.chrome_cache.borrow_mut();
+        if cache
             .as_ref()
-            .is_none_or(|(cached_settings, _)| *cached_settings != self.settings);
-        if stale {
+            .is_some_and(|(cached_settings, _)| *cached_settings != self.settings)
+        {
+            cache.take();
+        }
+        let (_, chrome_fb) = cache.get_or_insert_with(|| {
             let mut chrome_fb = Framebuffer::new(fb.width, fb.height, TRANSPARENT);
             self.render_chrome(&mut chrome_fb, palette);
-            *self.chrome_cache.borrow_mut() = Some((self.settings, chrome_fb));
-        }
-        let cache = self.chrome_cache.borrow();
-        let (_, chrome_fb) = cache
-            .as_ref()
-            .expect("just populated above if it was stale");
+            (self.settings, chrome_fb)
+        });
         fb.blit_from(chrome_fb, 0, 0);
     }
 
@@ -870,25 +865,25 @@ impl Terminal {
         }
     }
 
-    /// Returns the selection anchor point (if a text selection was started)
-    /// and whether a mouse-down escape was forwarded to the pty. The two are
-    /// mutually exclusive: a forwarded mouse-down never starts a selection.
+    /// Whether the mouse-down started a text selection or was forwarded as a
+    /// mouse-down escape to the pty's SGR mouse mode. The two are mutually
+    /// exclusive: a forwarded mouse-down never starts a selection.
     #[allow(clippy::significant_drop_tightening)]
-    fn mouse_press(&self, x: i16, y: i16, state: u16) -> (Option<Point>, bool) {
+    fn mouse_press(&self, x: i16, y: i16, state: u16) -> PressState {
         let Some(point) = screen_point(x, y, &self.window_size) else {
-            return (None, false);
+            return PressState::None;
         };
 
         let mouse_mode = self.term.lock().mode().intersects(TermMode::MOUSE_MODE);
         if mouse_mode && state & SHIFT_MASK == 0 {
             self.send_mouse(point, 0, true);
-            return (None, true);
+            return PressState::ForwardedMouse;
         }
 
         self.scroll(Scroll::Bottom);
         let mut term = self.term.lock();
         term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
-        (Some(point), false)
+        PressState::Selection(point)
     }
 
     fn mouse_motion(&self, point: Point) -> bool {
@@ -957,14 +952,56 @@ pub struct TerminalEvents {
     pub(crate) dirty: bool,
 }
 
+/// Mutually exclusive states for an in-progress mouse press. Replaces three
+/// separately nullable fields (`active_button`, `selection_point`,
+/// `mouse_down_forwarded`) that could otherwise disagree with each other.
+#[derive(Clone, Copy)]
+enum PressState {
+    /// Nothing pressed.
+    None,
+    /// Holding down the front-panel button at this index into `BUTTON_TARGETS`.
+    Chrome(usize),
+    /// Dragging out a terminal text selection anchored at this point.
+    Selection(Point),
+    /// A mouse-down escape was forwarded to the pty's SGR mouse mode; the
+    /// matching mouse-up is still owed.
+    ForwardedMouse,
+}
+
 #[derive(Clone, Copy)]
 struct Button {
     x: usize,
     y: usize,
     w: usize,
     h: usize,
-    pressed_sprite: Option<usize>,
-    action: ButtonAction,
+    kind: ButtonKind,
+}
+
+/// A front-panel button is either an icon button (power/lock: no "pressed"
+/// sprite swap, and a side effect instead of a `DisplaySettings` toggle) or a
+/// setting button (one of the mode buttons: swaps to `sprite_index`'s pressed
+/// sprite and toggles a `DisplaySettings` field). Structurally distinct so
+/// `DisplaySettings::toggle` only has to accept the setting-capable variant.
+#[derive(Clone, Copy)]
+enum ButtonKind {
+    Icon(IconAction),
+    Setting {
+        sprite_index: usize,
+        action: SettingAction,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum IconAction {
+    Power,
+    Lock,
+}
+
+#[derive(Clone, Copy)]
+enum SettingAction {
+    Brightness,
+    Color,
+    Contrast,
 }
 
 #[derive(Clone, Copy)]
@@ -986,15 +1023,6 @@ enum LightState {
     Off,
     Red,
     Green,
-}
-
-#[derive(Clone, Copy)]
-enum ButtonAction {
-    Power,
-    Brightness,
-    Color,
-    Contrast,
-    Lock,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1019,17 +1047,16 @@ impl DisplaySettings {
         }
     }
 
-    const fn toggle(&mut self, action: ButtonAction) {
+    const fn toggle(&mut self, action: SettingAction) {
         match action {
-            ButtonAction::Power | ButtonAction::Lock => {}
-            ButtonAction::Brightness => self.high_brightness = !self.high_brightness,
-            ButtonAction::Color => {
+            SettingAction::Brightness => self.high_brightness = !self.high_brightness,
+            SettingAction::Color => {
                 self.text_mode = match self.text_mode {
                     TextMode::Green => TextMode::Orange,
                     TextMode::Orange => TextMode::Green,
                 };
             }
-            ButtonAction::Contrast => self.high_contrast = !self.high_contrast,
+            SettingAction::Contrast => self.high_contrast = !self.high_contrast,
         }
     }
 
@@ -1107,7 +1134,7 @@ impl ModeImages {
 
 fn draw_mode_buttons(fb: &mut Framebuffer, button_sprites: &Sprite, palette: &Palette) {
     for button in BUTTON_TARGETS {
-        let Some(sprite_index) = button.pressed_sprite else {
+        let ButtonKind::Setting { sprite_index, .. } = button.kind else {
             continue;
         };
 
@@ -1428,4 +1455,3 @@ fn cell_at(x: usize, y: usize, screen_x: usize, screen_y: usize, size: &WindowSi
         .min((size.num_lines as usize).saturating_sub(1));
     Point::new(Line(line as i32), Column(column))
 }
-

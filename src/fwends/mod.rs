@@ -80,7 +80,10 @@ pub struct Fwends {
     scroll_y: usize,
     model_slot_w: usize,
     model_slot_h: usize,
-    pending: Option<chat::PendingReply>,
+    /// Whether a reply is in flight (and for whom); the single source of
+    /// truth the "..." placeholder bubble is rendered from, instead of that
+    /// bubble being a real (and separately tracked) entry in `messages`.
+    state: chat::ChatState,
     system_prompt: String,
     // message_layouts() wraps every message through the font engine, so the
     // result is cached here and refreshed via messages_changed() instead of
@@ -88,9 +91,10 @@ pub struct Fwends {
     layouts: Vec<MessageLayout>,
     // Per-message layout cache (paired with the `Message` that produced it),
     // indexed the same as `messages`. Lets message_layouts() only recompute
-    // wrapping for messages that are new or have changed (e.g. a pending
-    // reply's text being filled in) instead of re-wrapping the whole history
-    // on every new message.
+    // wrapping for messages that are new or have changed instead of
+    // re-wrapping the whole history on every new message. The pending-reply
+    // placeholder bubble is appended separately (see `message_layouts`),
+    // since it isn't a real message and so isn't part of this cache.
     layout_cache: Vec<(chat::Message, MessageLayout)>,
 }
 
@@ -129,7 +133,7 @@ impl Fwends {
             scroll_y: 0,
             model_slot_w,
             model_slot_h,
-            pending: None,
+            state: chat::ChatState::Idle,
             system_prompt: chat::load_system_prompt(),
             layouts: Vec::new(),
             layout_cache: Vec::new(),
@@ -206,7 +210,7 @@ impl Fwends {
         // While a reply is pending the sticky shows "wait a sec..." instead
         // of the input text, so clicks would select against invisible text.
         let input_x = self.input_sticky_x();
-        if self.pending.is_none()
+        if !self.state.is_awaiting()
             && x >= input_x
             && x < input_x + self.input_sticky_w()
             && y >= self.input_y()
@@ -232,7 +236,7 @@ impl Fwends {
             return CursorKind::Hand;
         }
         let input_x = self.input_sticky_x();
-        if self.pending.is_none()
+        if !self.state.is_awaiting()
             && x >= input_x
             && x < input_x + self.input_sticky_w()
             && y >= self.input_y()
@@ -293,7 +297,7 @@ impl Fwends {
             _ => {}
         }
 
-        if self.focused && self.pending.is_none() {
+        if self.focused && !self.state.is_awaiting() {
             let layout = self.input_layout(&self.font);
             let outcome = self.input.handle_key(input, clipboard_text, &layout);
             if let TextEditOutcome::Handled { changed: _, copy } = outcome {
@@ -314,26 +318,27 @@ impl Fwends {
     }
 
     pub(crate) fn drain_reply(&mut self) -> bool {
-        let Some(pending) = &self.pending else {
+        let chat::ChatState::Awaiting(pending) = &self.state else {
             return false;
         };
         let Some(reply) = pending.poll() else {
             return false;
         };
 
+        // Already matched `Awaiting` above; `reply` was drained from the one
+        // and only poll of this pending request, so it's safe to move it out.
+        let chat::ChatState::Awaiting(pending) =
+            std::mem::replace(&mut self.state, chat::ChatState::Idle)
+        else {
+            unreachable!("just matched Awaiting above")
+        };
         let author = pending.author();
-        self.pending = None;
         let text = match reply {
             Ok(text) => chat::strip_self_prefix(&text, author),
             Err(err) => format!("oops: {err}"),
         };
-        if let Some(message) = self.messages.last_mut()
-            && message.kind() == chat::MessageKind::Pending
-        {
-            message.mark_resolved(text);
-        } else {
-            self.messages.push(chat::Message::assistant(text).with_author(author));
-        }
+        self.messages
+            .push(chat::Message::assistant_with_author(text, author));
         self.messages_changed();
         true
     }
@@ -353,7 +358,7 @@ impl Fwends {
     }
 
     fn send(&mut self) {
-        if self.pending.is_some() {
+        if self.state.is_awaiting() {
             return;
         }
 
@@ -376,23 +381,24 @@ impl Fwends {
         let history = chat::request_history(&self.messages, model.name, chat::user_name());
 
         self.messages.push(chat::Message::user(text.clone()));
-        self.messages.push(chat::Message::pending(model.name));
-        self.messages_changed();
-        // Sending your own message always jumps to it.
-        self.scroll_to_bottom();
 
         let text = format!("{}: {text}", chat::user_name());
-        self.pending = Some(chat::PendingReply::spawn(
+        self.state = chat::ChatState::Awaiting(chat::PendingReply::spawn(
             model,
             thinking,
             system_prompt,
             history,
             text,
         ));
+        self.messages_changed();
+        // Sending your own message always jumps to it.
+        self.scroll_to_bottom();
     }
 
     fn erase_chat_history(&mut self) {
-        if let Some(pending) = self.pending.take() {
+        if let chat::ChatState::Awaiting(pending) =
+            std::mem::replace(&mut self.state, chat::ChatState::Idle)
+        {
             pending.cancel();
         }
         self.messages = vec![chat::intro_message()];
@@ -404,7 +410,9 @@ impl Fwends {
     /// `PendingReply::cancel_and_wait` and `PendingReply::handle` for why
     /// this must (boundedly) join, not just signal.
     pub(crate) fn shutdown(&mut self) {
-        if let Some(pending) = self.pending.take() {
+        if let chat::ChatState::Awaiting(pending) =
+            std::mem::replace(&mut self.state, chat::ChatState::Idle)
+        {
             pending.cancel_and_wait(std::time::Duration::from_secs(2));
         }
     }
@@ -557,6 +565,10 @@ impl Fwends {
     /// was last computed. Only new/changed messages pay the wrapping cost;
     /// unchanged ones are just cloned out of the cache. Cumulative `y` is
     /// always recomputed since earlier heights may have changed.
+    ///
+    /// If a reply is currently pending, one more layout for the "..."
+    /// placeholder bubble is appended after the cached ones. It isn't a real
+    /// message, so it isn't cached — it's just one extra (cheap) wrap.
     fn message_layouts(&mut self) -> Vec<MessageLayout> {
         self.layout_cache.truncate(self.messages.len());
         for (i, message) in self.messages.iter().enumerate() {
@@ -574,7 +586,7 @@ impl Fwends {
             }
         }
 
-        let mut layouts = Vec::with_capacity(self.layout_cache.len());
+        let mut layouts = Vec::with_capacity(self.layout_cache.len() + 1);
         let mut y = 0;
         for (_, cached) in &self.layout_cache {
             let mut layout = cached.clone();
@@ -582,6 +594,15 @@ impl Fwends {
             y += layout.h + BUBBLE_GAP;
             layouts.push(layout);
         }
+
+        if let chat::ChatState::Awaiting(pending) = &self.state {
+            let placeholder =
+                chat::Message::assistant_with_author("...".to_string(), pending.author());
+            let mut layout = self.compute_message_layout(&placeholder);
+            layout.y = y;
+            layouts.push(layout);
+        }
+
         layouts
     }
 
@@ -678,7 +699,7 @@ impl Fwends {
         );
 
         let layout = self.input_layout(&self.font);
-        if self.pending.is_some() {
+        if self.state.is_awaiting() {
             layout.draw(fb, "wait a sec...", palette_color::BLACK);
         } else {
             self.input
@@ -717,7 +738,7 @@ impl Fwends {
     }
 
     fn draw_focused_pencil(&self, fb: &mut Framebuffer, palette: &Palette) {
-        if !self.focused || self.pending.is_some() {
+        if !self.focused || self.state.is_awaiting() {
             return;
         }
 

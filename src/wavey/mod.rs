@@ -73,6 +73,36 @@ enum MediaButton {
     Forward,
 }
 
+/// What's currently playing, collapsing what used to be three independently
+/// (and manually) synchronized fields — `playing: bool`, `current_title`,
+/// `current_url` — into one. `Playing.title` can legitimately be empty: right
+/// after a station starts, before the title poller's first metadata reading
+/// comes back.
+enum Playback {
+    Stopped,
+    Playing { title: String, url: Option<String> },
+}
+
+impl Playback {
+    const fn is_playing(&self) -> bool {
+        matches!(self, Self::Playing { .. })
+    }
+
+    fn title(&self) -> &str {
+        match self {
+            Self::Playing { title, .. } => title,
+            Self::Stopped => "",
+        }
+    }
+
+    fn url(&self) -> Option<&str> {
+        match self {
+            Self::Playing { url, .. } => url.as_deref(),
+            Self::Stopped => None,
+        }
+    }
+}
+
 pub struct Wavey {
     image: Sprite,
     font: BitmapFont,
@@ -90,13 +120,13 @@ pub struct Wavey {
     /// previous cozyui instance (blocking IPC, so not done in `load`).
     resume_probe: mpsc::Receiver<Option<usize>>,
     title_updates: mpsc::Receiver<player::TitleUpdate>,
-    current_title: String,
-    /// Stream URL matching `current_title`, cached by the poller thread so a
-    /// title click never does blocking mpv IPC on the UI thread.
-    current_url: Option<String>,
+    /// What's currently playing, if anything: cached by the poller thread so
+    /// a title click never does blocking mpv IPC on the UI thread. `title`
+    /// can legitimately be empty while `Playing`, before the poller's first
+    /// metadata reading arrives.
+    playback: Playback,
     marquee_offset: usize,
     last_marquee_step: Instant,
-    playing: bool,
     /// The volume value last written (or about to be written) to the OS,
     /// throttled separately from `volume` itself so a knob drag's flood of
     /// motion ticks doesn't spawn one detached `wpctl`/`pactl` per tick. See
@@ -123,11 +153,9 @@ impl Wavey {
             volume_updates: player::spawn_volume_poller(),
             resume_probe: player::spawn_resume_probe(),
             title_updates: player::spawn_title_poller(),
-            current_title: String::new(),
-            current_url: None,
+            playback: Playback::Stopped,
             marquee_offset: 0,
             last_marquee_step: Instant::now(),
-            playing: false,
             // Seeded to match the placeholder `volume` above so the pair
             // starts in sync and the first real reading (below) doesn't
             // read as a user-driven change worth pushing back to the OS.
@@ -175,7 +203,10 @@ impl Wavey {
         // Reconnect to an mpv left running by a previous cozyui instance,
         // once the off-thread probe reports one.
         if let Ok(station) = self.resume_probe.try_recv() {
-            self.playing = true;
+            self.playback = Playback::Playing {
+                title: String::new(),
+                url: None,
+            };
             if let Some(station) = station.filter(|&station| station < self.stations.len()) {
                 self.station = station;
             }
@@ -200,26 +231,26 @@ impl Wavey {
         }
         self.push_volume(false);
 
-        if let Some(update) = self.title_updates.try_iter().last() {
-            let (title, url) = if self.playing {
-                (update.title, update.url)
-            } else {
-                (String::new(), None)
-            };
-            self.current_url = url;
-            if title != self.current_title {
-                self.current_title = title;
+        // A reading that arrives after `stop_player` (e.g. a stale in-flight
+        // poll) is simply dropped: there's no title/url to update once
+        // `playback` is `Stopped`.
+        if let Some(update) = self.title_updates.try_iter().last()
+            && let Playback::Playing { title, url } = &mut self.playback
+        {
+            *url = update.url;
+            if update.title != *title {
+                *title = update.title;
                 self.marquee_offset = 0;
                 dirty = true;
             }
         }
 
-        if self.font.text_width(&self.current_title) > TITLE_W
+        if self.font.text_width(self.playback.title()) > TITLE_W
             && now.duration_since(self.last_marquee_step) >= MARQUEE_STEP
         {
             self.last_marquee_step = now;
             let loop_w =
-                self.font.text_width(&self.current_title) + self.font.text_width(MARQUEE_SEP);
+                self.font.text_width(self.playback.title()) + self.font.text_width(MARQUEE_SEP);
             self.marquee_offset = (self.marquee_offset + 1) % loop_w;
             dirty = true;
         }
@@ -286,7 +317,7 @@ impl Wavey {
     }
 
     fn title_contains(&self, x: usize, y: usize) -> bool {
-        !self.current_title.is_empty()
+        !self.playback.title().is_empty()
             && (TITLE_X.saturating_sub(TITLE_BOX_PAD)..TITLE_X + TITLE_W + TITLE_BOX_PAD)
                 .contains(&x)
             && (TITLE_Y.saturating_sub(TITLE_BOX_PAD)..TITLE_Y + self.font.cell_h() + TITLE_BOX_PAD)
@@ -295,8 +326,8 @@ impl Wavey {
 
     #[allow(clippy::unnecessary_wraps)]
     fn title_copy_text(&self) -> Option<String> {
-        let title = self.current_title.clone();
-        match &self.current_url {
+        let title = self.playback.title().to_string();
+        match self.playback.url() {
             Some(url) => Some(format!("{title}\n{url}")),
             None => Some(title),
         }
@@ -425,10 +456,6 @@ impl Wavey {
         let Some(station) = self.stations.get(self.station) else {
             return;
         };
-        if station.mpv_args.trim().is_empty() {
-            eprintln!("wavey: selected station has no mpv_args, leaving playback untouched");
-            return;
-        }
         let mpv_args = station.mpv_args.clone();
         self.stop_player();
 
@@ -441,7 +468,6 @@ impl Wavey {
                 ipc_path.display()
             );
         }
-        self.current_title.clear();
         let script_opts =
             crate::util::shell_quote(&format!("cozyui-wavey-station={}", self.station));
         // Only glob tokens (containing `*`) are left unquoted so the shell can
@@ -464,13 +490,16 @@ impl Wavey {
              --script-opts={script_opts} {quoted_args}"
         );
         player::start_player(command_line);
-        self.playing = true;
+        self.playback = Playback::Playing {
+            title: String::new(),
+            url: None,
+        };
     }
 
     fn press_media_button(&mut self, button: MediaButton) {
         match button {
             MediaButton::PlayPause => {
-                if self.playing {
+                if self.playback.is_playing() {
                     self.send_mpv_command(&["cycle", "pause"]);
                 } else {
                     self.play_station();
@@ -484,7 +513,7 @@ impl Wavey {
 
     #[allow(clippy::needless_pass_by_ref_mut)]
     fn send_mpv_command(&mut self, command: &[&str]) {
-        if !self.playing {
+        if !self.playback.is_playing() {
             return;
         }
         player::send_command(command);
@@ -493,9 +522,7 @@ impl Wavey {
     fn stop_player(&mut self) {
         player::kill_player();
         let _ = fs::remove_file(player::mpv_ipc_path());
-        self.playing = false;
-        self.current_title.clear();
-        self.current_url = None;
+        self.playback = Playback::Stopped;
     }
 
     fn draw_clock(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -532,7 +559,7 @@ impl Wavey {
                 .draw_text(fb, &station.label, label_x, label_y, text);
         }
 
-        let marker_x = if self.playing {
+        let marker_x = if self.playback.is_playing() {
             station_center(self.station, count)
         } else {
             TUNER_X.saturating_sub(TUNER_MARK_SIZE + 2)
@@ -552,7 +579,8 @@ impl Wavey {
     }
 
     fn draw_title(&self, fb: &mut Framebuffer, _palette: &Palette) {
-        if self.current_title.is_empty() {
+        let title = self.playback.title();
+        if title.is_empty() {
             return;
         }
 
@@ -566,16 +594,16 @@ impl Wavey {
         );
 
         let cream = palette_color::CREAM;
-        let text_w = self.font.text_width(&self.current_title);
+        let text_w = self.font.text_width(title);
         if text_w <= TITLE_W {
             let x = TITLE_X + (TITLE_W - text_w) / 2;
-            self.font.draw_text(fb, &self.current_title, x, y, cream);
+            self.font.draw_text(fb, title, x, y, cream);
             return;
         }
 
         // Two copies around the separator cover the window for any pixel
         // offset within the loop (title width + separator width).
-        let looped = format!("{}{MARQUEE_SEP}{}", self.current_title, self.current_title);
+        let looped = format!("{title}{MARQUEE_SEP}{title}");
         self.font.draw_text_clipped(
             fb,
             &looped,

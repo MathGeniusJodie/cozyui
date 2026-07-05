@@ -34,6 +34,36 @@ const WINDOW_END_MIN: i64 = 20 * 60;
 /// Five meals spread across the window (including both endpoints).
 const MEALS_PER_DAY: i64 = 5;
 
+/// A validated "eaten through" timestamp: never later than the instant it was
+/// validated against. `meal_window` only searches a window of roughly
+/// `[now - 2 days, now + 2 days]` (see [`meals_for_day`]/[`next_meal`]), so an
+/// out-of-window future value would find no meal later than itself and
+/// `next_meal` would fall back to returning it unchanged, collapsing
+/// `meal_window`'s span to the 1-second floor. Restricting construction to
+/// values `<= now` makes that degenerate case structurally unreachable
+/// instead of relying on a call site remembering to filter it out.
+#[derive(Clone, Copy)]
+struct EatenThrough(f64);
+
+impl EatenThrough {
+    /// The latest meal at or before `now`. Always valid: `prev_meal` never
+    /// returns later than the instant it's given.
+    fn at_or_before(now: f64) -> Self {
+        Self(prev_meal(now))
+    }
+
+    /// Validates a persisted timestamp against `now`. `None` if `value` is
+    /// later than `now` (e.g. saved under a clock that was since corrected
+    /// back), since that can't reflect a meal that's actually been eaten yet.
+    fn new(value: f64, now: f64) -> Option<Self> {
+        (value <= now).then_some(Self(value))
+    }
+
+    const fn get(self) -> f64 {
+        self.0
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct HungerView {
     /// Quarter-apple units remaining, `0..=APPLES * 4`. Zero means the meal is
@@ -83,13 +113,12 @@ impl Hunger {
         let now = crate::util::now_secs();
         // Default: assume every past meal has already been eaten, so the bar
         // simply counts down to the next upcoming meal. A persisted timestamp
-        // from the future (e.g. saved under a skewed clock that was since
-        // corrected) can't reflect a meal that's actually been eaten yet, and
-        // would fall outside next_meal's search window, so it's rejected the
-        // same as a missing/corrupt file.
+        // that fails `EatenThrough::new`'s validation (e.g. saved under a
+        // skewed clock that was since corrected) is rejected the same as a
+        // missing/corrupt file.
         let eaten_through = load_state()
-            .filter(|&value| value <= now)
-            .unwrap_or_else(|| prev_meal(now));
+            .and_then(|value| EatenThrough::new(value, now))
+            .unwrap_or_else(|| EatenThrough::at_or_before(now));
         let (target, span) = meal_window(eaten_through);
         let view = render_view(target, span, now);
 
@@ -135,8 +164,8 @@ impl Hunger {
             return false;
         }
         let now = crate::util::now_secs();
-        let eaten_through = prev_meal(now);
-        if let Err(err) = save_state(eaten_through) {
+        let eaten_through = EatenThrough::at_or_before(now);
+        if let Err(err) = save_state(eaten_through.get()) {
             eprintln!("hunger save failed: {err}");
             return false;
         }
@@ -281,7 +310,8 @@ fn prev_meal(t: f64) -> f64 {
 
 /// The meal the bar counts down to after `eaten_through`, and the length of
 /// that countdown window.
-fn meal_window(eaten_through: f64) -> (f64, f64) {
+fn meal_window(eaten_through: EatenThrough) -> (f64, f64) {
+    let eaten_through = eaten_through.get();
     let target = next_meal(eaten_through);
     (target, (target - eaten_through).max(1.0))
 }
@@ -381,7 +411,7 @@ mod tests {
     fn full_just_after_a_meal_empty_at_the_next() {
         // 1s after the first meal: bar is essentially full.
         let first = meals_for_day(0).next().unwrap();
-        let (target, span) = meal_window(first);
+        let (target, span) = meal_window(EatenThrough::at_or_before(first));
         let view = render_view(target, span, first + 1.0);
         assert!(!view.is_empty());
         assert_eq!(view.fill, APPLES * 4);
@@ -419,21 +449,16 @@ mod tests {
     }
 
     #[test]
-    fn future_eaten_through_breaks_meal_window_without_guarding() {
-        // Regression / documentation: next_meal only searches a window of
-        // roughly [now - 2 days, now + 2 days] because meals_for_day is
-        // anchored to *today*, not to the timestamp passed in. A persisted
-        // "eaten through" value from beyond that window (e.g. a future
-        // timestamp saved under a skewed clock) finds no meal greater than
-        // itself, so next_meal falls back to returning the input unchanged.
-        // That collapses meal_window's span to the 1-second floor, which is
-        // exactly the degenerate case Hunger::load must avoid by rejecting
-        // future timestamps before they ever reach meal_window.
+    fn eaten_through_rejects_implausible_future_timestamps() {
+        // EatenThrough::new is the only fallible way to build an EatenThrough
+        // from an arbitrary (e.g. persisted) value, and it's the sole gate
+        // between untrusted input and meal_window; a value beyond next_meal's
+        // ~2-day search window (see next_meal/meals_for_day) can no longer
+        // reach meal_window at all, so the degenerate 1-second-span case this
+        // used to regression-test is now unreachable rather than merely
+        // guarded.
         let now = crate::util::now_secs();
         let implausible_future = now + 30.0 * DAY;
-        assert_eq!(next_meal(implausible_future), implausible_future);
-        let (target, span) = meal_window(implausible_future);
-        assert_eq!(target, implausible_future);
-        assert_eq!(span, 1.0);
+        assert!(EatenThrough::new(implausible_future, now).is_none());
     }
 }

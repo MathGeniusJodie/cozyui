@@ -160,6 +160,18 @@ impl WidgetId {
     }
 }
 
+/// What the mouse is doing after a press, until the matching release.
+/// Replaces two independent fields (`puter_pressed: bool`,
+/// `text_drag: Option<WidgetId>`) that were always reset together in
+/// `click()` and priority-dispatched together in `release()` — one state
+/// machine instead of two fields that could disagree.
+#[derive(Clone, Copy)]
+enum PointerAction {
+    None,
+    TextDrag(WidgetId),
+    PuterButton,
+}
+
 struct App {
     widgets: Widgets,
     desk: Sprite,
@@ -167,9 +179,11 @@ struct App {
     fbs: [Framebuffer; WIDGET_COUNT],
     rects: [Rect; WIDGET_COUNT],
     focus: WidgetId,
-    puter_pressed: bool,
     quit_requested: bool,
-    text_drag: Option<WidgetId>,
+    /// What the mouse is currently doing after a press: nothing, dragging out
+    /// a text selection/cursor in some widget, or holding down a Puter
+    /// chrome button. Set in `click()`, consumed (and reset) by `release()`.
+    pointer_action: PointerAction,
     /// Widget that just lost focus and needs one repaint to drop its
     /// focus-only visuals (text cursor, selection highlight).
     blurred: Option<WidgetId>,
@@ -273,9 +287,8 @@ impl App {
             fbs,
             rects,
             focus: WidgetId::Toodle,
-            puter_pressed: false,
             quit_requested: false,
-            text_drag: None,
+            pointer_action: PointerAction::None,
             blurred: None,
             min_width: 0,
             min_height: 0,
@@ -393,8 +406,7 @@ impl App {
         }
 
         let heights = self.widget_heights();
-        let screen_h =
-            layout::required_screen_height(&heights, self.desk.height, self.min_height);
+        let screen_h = layout::required_screen_height(&heights, self.desk.height, self.min_height);
         let positions = layout::widget_positions(&heights, screen_h);
         for (rect, (x, y)) in self.rects.iter_mut().zip(positions) {
             changed |= layout::move_rect(rect, x, y);
@@ -458,8 +470,7 @@ impl App {
 
     /// Returns text the clicked widget wants copied to the clipboard.
     fn click(&mut self, x: i16, y: i16, state: u16) -> Result<Option<String>, Box<dyn Error>> {
-        self.puter_pressed = false;
-        self.text_drag = None;
+        self.pointer_action = PointerAction::None;
         let Some((widget, x, y)) = self.widget_at(x, y) else {
             return Ok(None);
         };
@@ -468,14 +479,17 @@ impl App {
             self.blurred = Some(self.focus);
         }
         self.focus = widget;
-        self.puter_pressed = widget == WidgetId::Puter;
         let outcome = self.widgets.get_mut(widget).click(x, y, state)?;
         if outcome.spin_twirl {
             self.widgets.twirl.spin();
         }
-        if outcome.text_drag {
-            self.text_drag = Some(widget);
-        }
+        self.pointer_action = if outcome.text_drag {
+            PointerAction::TextDrag(widget)
+        } else if widget == WidgetId::Puter {
+            PointerAction::PuterButton
+        } else {
+            PointerAction::None
+        };
         Ok(outcome.copy_text)
     }
 
@@ -485,7 +499,8 @@ impl App {
     }
 
     fn release(&mut self, x: i16, y: i16) -> Option<WidgetId> {
-        if let Some(widget) = self.text_drag.take() {
+        if let PointerAction::TextDrag(widget) = self.pointer_action {
+            self.pointer_action = PointerAction::None;
             self.widgets.get_mut(widget).end_text_drag();
             return Some(widget);
         }
@@ -494,12 +509,12 @@ impl App {
             return Some(WidgetId::Wavey);
         }
 
-        if self.puter_pressed {
+        if matches!(self.pointer_action, PointerAction::PuterButton) {
             let (x, y) = self.rect_for(WidgetId::Puter).local(x, y);
             if self.widgets.puter.release_button(x, y) {
                 self.quit_requested = true;
             }
-            self.puter_pressed = false;
+            self.pointer_action = PointerAction::None;
             return Some(WidgetId::Puter);
         }
 
@@ -507,7 +522,7 @@ impl App {
     }
 
     fn motion(&mut self, x: i16, y: i16) -> Option<WidgetId> {
-        if let Some(widget) = self.text_drag {
+        if let PointerAction::TextDrag(widget) = self.pointer_action {
             let (local_x, local_y) = self.rect_for(widget).local(x, y);
             return self
                 .widgets
@@ -558,7 +573,7 @@ impl App {
 
     /// Which cursor shape fits whatever is under the pointer.
     fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
-        if self.text_drag.is_some() {
+        if matches!(self.pointer_action, PointerAction::TextDrag(_)) {
             return CursorKind::Text;
         }
         let Some((widget, x, y)) = self.widget_at(x, y) else {
@@ -705,7 +720,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // signal arriving mid-wait wakes the loop instead of sleeping out the
     // timeout.
     let shutdown_requested = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown_requested))?;
+    signal_hook::flag::register(
+        signal_hook::consts::SIGTERM,
+        Arc::clone(&shutdown_requested),
+    )?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown_requested))?;
 
     let mut running = true;
@@ -733,7 +751,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Toodle housekeeping: debounced saves hit disk shortly after typing
         // pauses, and external edits to the todo files are folded in. The
         // latter can change the page-stack size, so it may need a relayout.
-        if log_widget_err(|| "toodle maintain".to_string(), app.widgets.toodle.maintain()) {
+        if log_widget_err(
+            || "toodle maintain".to_string(),
+            app.widgets.toodle.maintain(),
+        ) {
             if sync_window_layout(&mut app, &mut fb, &mut xwin, &palette)? {
                 app.render(&mut fb, &palette);
                 xwin.draw(&fb)?;

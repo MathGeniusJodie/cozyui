@@ -50,10 +50,17 @@ const STAT_ROW_H: usize = 12;
 /// `start_secs` (Unix seconds) and runs until the next period begins.
 struct Period {
     start_secs: f64,
-    /// Total monthly burn for this period (sum of `expenses`).
-    burn: f64,
     /// Labelled monthly expenses for this period.
     expenses: Vec<(String, f64)>,
+}
+
+impl Period {
+    /// Total monthly burn for this period: always the live sum of
+    /// `expenses`, so it can never drift from a later mutation the way a
+    /// field cached once at parse time could.
+    fn burn(&self) -> f64 {
+        self.expenses.iter().map(|(_, amount)| amount).sum()
+    }
 }
 
 /// Parsed budget config: a chronological list of expense periods plus the
@@ -78,6 +85,19 @@ impl Default for Config {
     }
 }
 
+/// Parser state for the section currently being read: no `[date]` header seen
+/// yet, inside one being discarded due to a bad date, or actively
+/// accumulating expenses into a `Period`. Pushing an expense is only
+/// reachable from the `Active` arm, so misattributing an expense to a
+/// discarded section or one that doesn't exist yet is a compile-time
+/// impossibility rather than a runtime `if skip_period` check a future call
+/// site could forget.
+enum ParseState {
+    None,
+    Skipped,
+    Active(Period),
+}
+
 impl Config {
     /// Parses the config text. A `[YYYY-MM-DD]` header opens a new period and
     /// the `Label = amount` lines beneath it are that period's monthly
@@ -88,7 +108,7 @@ impl Config {
     /// #4)`) doesn't truncate the line. Blank lines are ignored.
     fn parse(text: &str) -> Result<Self, Box<dyn Error>> {
         let mut periods: Vec<Period> = Vec::new();
-        let mut skip_period = false;
+        let mut state = ParseState::None;
         let mut dollars_per_svg = 0.0;
         let mut done_dir = DEFAULT_DONE_DIR.to_string();
         let mut templates_dir = DEFAULT_TEMPLATES_DIR.to_string();
@@ -99,13 +119,18 @@ impl Config {
                 continue;
             }
             if let Some(date) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                // Whatever section was active is done, successfully parsed or
+                // not, now that the next one is starting.
+                if let ParseState::Active(period) = std::mem::replace(&mut state, ParseState::None)
+                {
+                    periods.push(period);
+                }
                 // A bad date skips the whole period (header and its expenses)
                 // rather than aborting the widget, so a typo in one section
                 // can't take down the app or misattribute its expenses to the
                 // previous period.
                 match parse_date(date.trim()) {
                     Ok((y, m, d)) => {
-                        skip_period = false;
                         // Resolve the header's civil date to local midnight
                         // (DST-aware) rather than raw UTC epoch arithmetic, so
                         // the period switches over at the date it names in
@@ -116,15 +141,14 @@ impl Config {
                                 || (days_from_civil(y, m, d) * 86400) as f64,
                                 |epoch| epoch as f64,
                             );
-                        periods.push(Period {
+                        state = ParseState::Active(Period {
                             start_secs,
-                            burn: 0.0,
                             expenses: Vec::new(),
                         });
                     }
                     Err(err) => {
                         eprintln!("budgit.conf: skipping [{}] section: {err}", date.trim());
-                        skip_period = true;
+                        state = ParseState::Skipped;
                     }
                 }
                 continue;
@@ -160,14 +184,17 @@ impl Config {
                     continue;
                 }
             };
-            if skip_period {
-                continue;
+            match &mut state {
+                ParseState::Active(period) => period.expenses.push((label.to_string(), amount)),
+                ParseState::Skipped => {}
+                ParseState::None => {
+                    return Err("budgit.conf: expense before any [date] section".into());
+                }
             }
-            let period = periods
-                .last_mut()
-                .ok_or("budgit.conf: expense before any [date] section")?;
-            period.burn += amount;
-            period.expenses.push((label.to_string(), amount));
+        }
+
+        if let ParseState::Active(period) = state {
+            periods.push(period);
         }
 
         if periods.is_empty() {
@@ -569,9 +596,9 @@ fn compute_view(
             .get(i + 1)
             .map_or(now, |next| next.start_secs.min(now));
         let active = (end - period.start_secs).max(0.0);
-        spent += active / MONTH_SECS * period.burn;
+        spent += active / MONTH_SECS * period.burn();
         if period.start_secs <= now {
-            burn = period.burn;
+            burn = period.burn();
         }
     }
     // Completed SVG work is credited to the balance at the configured rate.
@@ -777,7 +804,6 @@ mod tests {
     fn period(start_secs: f64, burn: f64) -> Period {
         Period {
             start_secs,
-            burn,
             expenses: vec![("x".to_string(), burn)],
         }
     }
@@ -794,10 +820,10 @@ mod tests {
             Rent = 750\n";
         let cfg = Config::parse(text).unwrap();
         assert_eq!(cfg.periods.len(), 2);
-        assert!((cfg.periods[0].burn - 730.5).abs() < 1e-9);
+        assert!((cfg.periods[0].burn() - 730.5).abs() < 1e-9);
         assert_eq!(cfg.periods[0].expenses.len(), 2);
         assert_eq!(cfg.periods[0].expenses[0], ("Rent".to_string(), 700.0));
-        assert!((cfg.periods[1].burn - 750.0).abs() < 1e-9);
+        assert!((cfg.periods[1].burn() - 750.0).abs() < 1e-9);
     }
 
     #[test]
@@ -805,7 +831,7 @@ mod tests {
         let text = "[2026-05-01]\nA = 5\n[2026-01-01]\nB = 1\n";
         let cfg = Config::parse(text).unwrap();
         assert!(cfg.periods[0].start_secs < cfg.periods[1].start_secs);
-        assert!((cfg.periods[0].burn - 1.0).abs() < 1e-9);
+        assert!((cfg.periods[0].burn() - 1.0).abs() < 1e-9);
     }
 
     #[test]

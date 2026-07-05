@@ -107,6 +107,7 @@ dependencies = [
  "phf",
  "pixel-fonts",
  "pixel-graphics",
+ "serde",
  "serde_json",
  "signal-hook",
  "unicode-segmentation",

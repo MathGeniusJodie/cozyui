@@ -87,79 +87,81 @@ pub(super) enum Role {
 pub(super) enum MessageKind {
     Normal,
     Intro,
-    Pending,
 }
 
+/// A chat message. `kind`/`author` only ever make sense for `Assistant`
+/// messages (the intro blurb and the "which fwend said this" tag), so they
+/// live in that variant instead of being optional fields on a single struct
+/// that a `User` message could also (invalidly) be built with.
 #[derive(Clone, PartialEq)]
-pub(super) struct Message {
-    role: Role,
-    text: String,
-    kind: MessageKind,
-    author: Option<&'static str>,
+pub(super) enum Message {
+    User {
+        text: String,
+    },
+    Assistant {
+        text: String,
+        kind: MessageKind,
+        author: Option<&'static str>,
+    },
 }
 
 impl Message {
     pub(super) const fn user(text: String) -> Self {
-        Self {
-            role: Role::User,
+        Self::User { text }
+    }
+
+    #[cfg(test)]
+    pub(super) const fn assistant(text: String) -> Self {
+        Self::Assistant {
             text,
             kind: MessageKind::Normal,
             author: None,
         }
     }
 
-    pub(super) const fn assistant(text: String) -> Self {
-        Self {
-            role: Role::Assistant,
+    /// Builds a resolved reply tagged with which fwend sent it (used once
+    /// `drain_reply` has the finished text in hand — see `ChatState`).
+    pub(super) const fn assistant_with_author(text: String, author: &'static str) -> Self {
+        Self::Assistant {
             text,
             kind: MessageKind::Normal,
-            author: None,
+            author: Some(author),
         }
     }
 
     fn intro(text: String) -> Self {
-        Self {
+        Self::Assistant {
+            text,
             kind: MessageKind::Intro,
-            ..Self::assistant(text)
-        }
-    }
-
-    pub(super) fn pending(author: &'static str) -> Self {
-        Self {
-            kind: MessageKind::Pending,
-            author: Some(author),
-            ..Self::assistant("...".to_string())
+            author: None,
         }
     }
 
     pub(super) const fn role(&self) -> Role {
-        self.role
+        match self {
+            Self::User { .. } => Role::User,
+            Self::Assistant { .. } => Role::Assistant,
+        }
     }
 
     pub(super) fn text(&self) -> &str {
-        &self.text
+        match self {
+            Self::User { text } | Self::Assistant { text, .. } => text,
+        }
     }
 
     pub(super) const fn kind(&self) -> MessageKind {
-        self.kind
+        match self {
+            Self::User { .. } => MessageKind::Normal,
+            Self::Assistant { kind, .. } => *kind,
+        }
     }
 
     pub(super) const fn author(&self) -> Option<&'static str> {
-        self.author
-    }
-
-    /// Tags a freshly-built message with which fwend sent it (`drain_reply`'s
-    /// non-placeholder-reuse path).
-    pub(super) fn with_author(mut self, author: &'static str) -> Self {
-        self.author = Some(author);
-        self
-    }
-
-    /// Turns a `Pending` placeholder into its resolved reply, in place, so
-    /// the placeholder's position in the message list doesn't change.
-    pub(super) fn mark_resolved(&mut self, text: String) {
-        self.text = text;
-        self.kind = MessageKind::Normal;
+        match self {
+            Self::User { .. } => None,
+            Self::Assistant { author, .. } => *author,
+        }
     }
 }
 
@@ -183,17 +185,20 @@ pub(super) fn request_history(
 ) -> Vec<Message> {
     let recent: Vec<&Message> = messages
         .iter()
-        .filter(|message| message.kind == MessageKind::Normal)
+        .filter(|message| message.kind() == MessageKind::Normal)
         .collect();
     let start = recent.len().saturating_sub(HISTORY_LIMIT);
     recent[start..]
         .iter()
-        .map(|message| match (message.role, message.author) {
-            (Role::User, _) => Message::user(format!("{user_name}: {}", message.text)),
-            (Role::Assistant, Some(author)) if author != current_name => {
-                Message::user(format!("{author}: {}", message.text))
-            }
-            (Role::Assistant, _) => (*message).clone(),
+        .copied()
+        .map(|message| match message {
+            Message::User { text } => Message::user(format!("{user_name}: {text}")),
+            Message::Assistant {
+                text,
+                author: Some(author),
+                ..
+            } if *author != current_name => Message::user(format!("{author}: {text}")),
+            _ => message.clone(),
         })
         .collect()
 }
@@ -250,11 +255,11 @@ fn chat_body(
     })];
     for message in history {
         messages.push(json!({
-            "role": match message.role {
+            "role": match message.role() {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             },
-            "content": message.text,
+            "content": message.text(),
         }));
     }
     messages.push(json!({
@@ -452,6 +457,21 @@ impl PendingReply {
     }
 }
 
+/// Whether a reply is currently in flight, and for whom. The single source
+/// of truth for the "..." placeholder bubble: previously that bubble was
+/// also stored as an ordinary (if oddly-tagged) entry in `messages`, kept in
+/// sync by hand with this state and prone to disagreeing with it.
+pub(super) enum ChatState {
+    Idle,
+    Awaiting(PendingReply),
+}
+
+impl ChatState {
+    pub(super) const fn is_awaiting(&self) -> bool {
+        matches!(self, Self::Awaiting(_))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,10 +521,8 @@ mod tests {
 
     #[test]
     fn request_history_tags_user_and_other_models() {
-        let mut claude_reply = Message::assistant("hi jodie".to_string());
-        claude_reply.author = Some("Claude");
-        let mut qwen_reply = Message::assistant("hello!".to_string());
-        qwen_reply.author = Some("Qwen");
+        let claude_reply = Message::assistant_with_author("hi jodie".to_string(), "Claude");
+        let qwen_reply = Message::assistant_with_author("hello!".to_string(), "Qwen");
         let messages = vec![
             intro_message(),
             Message::user("hey".to_string()),
@@ -515,12 +533,12 @@ mod tests {
         let history = request_history(&messages, "Qwen", "Jodie");
 
         assert_eq!(history.len(), 3);
-        assert!(matches!(history[0].role, Role::User));
-        assert_eq!(history[0].text, "Jodie: hey");
-        assert!(matches!(history[1].role, Role::User));
-        assert_eq!(history[1].text, "Claude: hi jodie");
-        assert!(matches!(history[2].role, Role::Assistant));
-        assert_eq!(history[2].text, "hello!");
+        assert!(matches!(history[0].role(), Role::User));
+        assert_eq!(history[0].text(), "Jodie: hey");
+        assert!(matches!(history[1].role(), Role::User));
+        assert_eq!(history[1].text(), "Claude: hi jodie");
+        assert!(matches!(history[2].role(), Role::Assistant));
+        assert_eq!(history[2].text(), "hello!");
     }
 
     #[test]

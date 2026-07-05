@@ -38,6 +38,10 @@ pub(super) fn load_stations(path: &str) -> Vec<Station> {
         .unwrap_or_else(default_stations)
 }
 
+/// Parses one config line into a `Station`, rejecting anything that
+/// wouldn't be playable (a blank label or blank `mpv_args`) so a `Station`
+/// with no way to play never exists — `play_station` used to accept an
+/// unplayable one and bail out at runtime instead.
 fn parse_station(line: &str) -> Option<Station> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
@@ -45,12 +49,13 @@ fn parse_station(line: &str) -> Option<Station> {
     }
     let (label, mpv_args) = line.split_once('|')?;
     let label = label.trim();
-    if label.is_empty() {
+    let mpv_args = mpv_args.trim();
+    if label.is_empty() || mpv_args.is_empty() {
         return None;
     }
     Some(Station {
         label: label.chars().take(6).collect(),
-        mpv_args: mpv_args.trim().to_string(),
+        mpv_args: mpv_args.to_string(),
     })
 }
 

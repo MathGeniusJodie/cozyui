@@ -13,9 +13,9 @@ use crate::{CursorKind, Framebuffer, Index, Paint, Palette, Rect, Sprite, Swap, 
 mod store;
 
 use store::{
-    AtomicWrite, DoneCounts, LINE_COUNT, SECTION_COUNT, SaveWorker, SectionStore, TodoList,
-    archive_transaction_path, daily_done_path, done_dir, recover_archive_transaction, todo_file,
-    toodle_root, write_archive_transaction_marker,
+    AtomicWrite, DoneCounts, LINE_COUNT, Priority, SECTION_COUNT, SaveWorker, SectionStore,
+    TodoList, archive_transaction_path, daily_done_path, done_dir, recover_archive_transaction,
+    todo_file, toodle_root, write_archive_transaction_marker,
 };
 pub(crate) use store::{PRIORITY_TAGS, done_file_path};
 
@@ -86,6 +86,121 @@ enum PageColor {
     Blue,
 }
 
+/// Which todo line (if any) is being edited, paired with the live text-edit
+/// buffer for it. These used to be two separate fields (`focused_line:
+/// Option<usize>` and a `field: TextField`) kept in sync by convention: every
+/// site that focused a line had to remember to also call
+/// `load_focused_field()`, and nothing stopped one half from happening
+/// without the other. Merging them means a line can't be focused without its
+/// text being loaded, and the field can't be inspected without a line being
+/// focused — see `Toodle::focus_line`, the only way to move focus onto a
+/// line.
+enum Focus {
+    None,
+    Line { line: usize, field: TextField },
+}
+
+impl Focus {
+    const fn line(&self) -> Option<usize> {
+        match self {
+            Self::None => None,
+            Self::Line { line, .. } => Some(*line),
+        }
+    }
+
+    /// Retarget the currently-focused line without touching its field (used
+    /// when an external edit shifts a followed todo to a new position). A
+    /// no-op if nothing is focused.
+    fn set_line(&mut self, new_line: usize) {
+        if let Self::Line { line, .. } = self {
+            *line = new_line;
+        }
+    }
+
+    /// The focused line's edit buffer. Every call site here is only reached
+    /// after confirming (via `line()` or right after `Toodle::focus_line`)
+    /// that a line is focused, so `Focus::None` reaching this is a bug.
+    fn field(&self) -> &TextField {
+        match self {
+            Self::None => unreachable!("Focus::field called with nothing focused"),
+            Self::Line { field, .. } => field,
+        }
+    }
+
+    fn field_mut(&mut self) -> &mut TextField {
+        match self {
+            Self::None => unreachable!("Focus::field_mut called with nothing focused"),
+            Self::Line { field, .. } => field,
+        }
+    }
+
+    fn text(&self) -> &str {
+        self.field().text()
+    }
+
+    fn cursor(&self) -> usize {
+        self.field().cursor()
+    }
+
+    fn set_cursor(&mut self, cursor: usize) {
+        self.field_mut().set_cursor(cursor);
+    }
+
+    fn set_cursor_end(&mut self) {
+        self.field_mut().set_cursor_end();
+    }
+
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::None => None,
+            Self::Line { field, .. } => field.selection_range(),
+        }
+    }
+
+    fn handle_key(
+        &mut self,
+        input: &KeyInput,
+        clipboard_text: Option<&str>,
+        layout: &TextLayout,
+    ) -> TextEditOutcome {
+        self.field_mut().handle_key(input, clipboard_text, layout)
+    }
+
+    fn index_at(&self, layout: &TextLayout, x: usize, y: usize) -> usize {
+        self.field().index_at(layout, x, y)
+    }
+
+    fn begin_drag(&mut self, cursor: usize) {
+        if let Self::Line { field, .. } = self {
+            field.begin_drag(cursor);
+        }
+    }
+
+    fn drag_to(&mut self, index: usize) -> bool {
+        self.field_mut().drag_to(index)
+    }
+
+    fn end_drag(&mut self) {
+        if let Self::Line { field, .. } = self {
+            field.end_drag();
+        }
+    }
+
+    fn is_dragging(&self) -> bool {
+        matches!(self, Self::Line { field, .. } if field.is_dragging())
+    }
+}
+
+/// The todo the dice last landed on, identified by its position (not its
+/// content) so it can be tracked across edits made elsewhere. Drawn crimson
+/// and fake-bolded until the dice is rolled again or it stops being eligible.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TodoRef {
+    section: Priority,
+    page: usize,
+    line: usize,
+}
+
 pub struct Toodle {
     pages: [Sprite; VISIBLE_PAGE_COUNT],
     checkboxes: Sprite,
@@ -109,11 +224,11 @@ pub struct Toodle {
     // are folded back in by maintain().
     save_worker: SaveWorker,
     page: usize,
-    focused_line: Option<usize>,
-    // The todo the dice last landed on, as (section, page, line). Drawn crimson
-    // and fake-bolded until the dice is rolled again or no todo is eligible.
-    highlighted: Option<(usize, usize, usize)>,
-    field: TextField,
+    // Which line (if any) is focused for editing, paired with its live
+    // text-edit buffer; see `Focus`'s doc comment.
+    focus: Focus,
+    // The todo the dice last landed on; see `TodoRef`'s doc comment.
+    highlighted: Option<TodoRef>,
     eraser_hovered: bool,
     // Per-keystroke saves fsync and made typing lag; edits are saved after a
     // typing pause instead (and flushed on shutdown).
@@ -163,19 +278,16 @@ impl Toodle {
                 &pixel_fonts::FUSION_PIXEL_10_SPEC,
             )?,
             sections: [
-                SectionStore::load(&todo_file(0))?,
-                SectionStore::load(&todo_file(1))?,
-                SectionStore::load(&todo_file(2))?,
-                SectionStore::load(&todo_file(3))?,
+                SectionStore::load(&todo_file(Priority::Urgent))?,
+                SectionStore::load(&todo_file(Priority::Frog))?,
+                SectionStore::load(&todo_file(Priority::Normal))?,
+                SectionStore::load(&todo_file(Priority::Snail))?,
             ],
             done_counts: DoneCounts::load()?,
             save_worker: SaveWorker::spawn(),
             page: 0,
-            focused_line: None,
+            focus: Focus::None,
             highlighted: None,
-            // The fits predicate is governed entirely by the two-line wrap, so
-            // there is no separate character cap.
-            field: TextField::new(usize::MAX, 2),
             eraser_hovered: false,
             last_edit: Instant::now(),
             last_poll: Instant::now(),
@@ -199,8 +311,8 @@ impl Toodle {
         TRANSPARENT
     }
 
-    const fn list(&self, section: usize) -> &TodoList {
-        self.sections[section].list()
+    fn list(&self, section: Priority) -> &TodoList {
+        self.sections[section.index()].list()
     }
 
     /// Geometry signature the cached page art depends on.
@@ -274,6 +386,7 @@ impl Toodle {
         let page_count = self.logical_page_count();
         let logical_page = self.page % page_count;
         let PageRef { section, page } = self.page_ref(logical_page);
+        let focused_line = self.focus.line();
 
         self.draw_focused_pencil_shadow(fb, palette);
 
@@ -285,10 +398,10 @@ impl Toodle {
         };
         for (line, _) in LINE_Y.iter().enumerate().take(LINE_COUNT) {
             let todo = self.list(section).item(page, line);
-            if todo.renders_checkbox(self.focused_line == Some(line)) {
+            if todo.renders_checkbox(focused_line == Some(line)) {
                 self.draw_checkbox_box(fb, palette, line);
             }
-            if todo.checked {
+            if todo.checked() {
                 self.draw_check(fb, palette, section, line);
             }
 
@@ -299,7 +412,7 @@ impl Toodle {
             // fonts have no '…' glyph), shedding characters until they fit.
             // Cursor placement and hit-testing still use the full wrap, so
             // overflow text is reachable but not painted.
-            let mut lines = layout.wrap(&todo.text);
+            let mut lines = layout.wrap(todo.text());
             if lines.len() > 2 {
                 lines.truncate(2);
                 let dots_width = self.font.text_width("...");
@@ -311,21 +424,27 @@ impl Toodle {
                 }
                 last.push_str("...");
             }
-            if self.focused_line == Some(line) {
+            if focused_line == Some(line) {
                 layout.draw_selection_lines(
                     fb,
                     &lines,
-                    self.field.selection_range(),
+                    self.focus.selection_range(),
                     palette_color::LAVENDER,
                 );
             }
-            if self.highlighted == Some((section, page, line)) {
+            if self.highlighted
+                == Some(TodoRef {
+                    section,
+                    page,
+                    line,
+                })
+            {
                 layout.draw_lines_bold(fb, &lines, palette_color::CRIMSON);
             } else {
                 layout.draw_lines(
                     fb,
                     &lines,
-                    if todo.checked {
+                    if todo.checked() {
                         completed_text_color
                     } else {
                         text_color
@@ -357,29 +476,29 @@ impl Toodle {
     }
 
     pub(crate) fn click(&mut self, x: i16, y: i16) -> Result<bool, Box<dyn Error>> {
-        self.field.end_drag();
+        self.focus.end_drag();
         if self.eraser_at(x, y) {
             self.archive_completed_todos()?;
-            self.focused_line = None;
+            self.focus = Focus::None;
             return Ok(false);
         }
 
         if self.dice_at(x, y) {
             self.roll_highlight();
-            self.focused_line = None;
+            self.focus = Focus::None;
             return Ok(false);
         }
 
         let abs_x = x.max(0) as usize;
         let abs_y = y.max(0) as usize;
         let Some(page_x) = abs_x.checked_sub(PAGE_OFFSET_X) else {
-            self.focused_line = None;
+            self.focus = Focus::None;
             return Ok(false);
         };
 
         if page_x >= PAGE_CURL_X && abs_y >= PAGE_CURL_Y {
             self.page = (self.page + 1) % self.logical_page_count();
-            self.focused_line = None;
+            self.focus = Focus::None;
             return Ok(false);
         }
 
@@ -387,51 +506,57 @@ impl Toodle {
             && self.checkbox_clickable(line)
         {
             let PageRef { section, page } = self.current_page_ref();
-            let checked = {
-                let item = self.sections[section].list_mut().item_mut(page, line);
-                item.checked = !item.checked;
-                item.checked
+            let checked = self.sections[section.index()]
+                .list_mut()
+                .item_mut(page, line)
+                .toggle_checked();
+            let todo_ref = TodoRef {
+                section,
+                page,
+                line,
             };
-            if checked && self.highlighted == Some((section, page, line)) {
+            if checked && self.highlighted == Some(todo_ref) {
                 self.highlighted = None;
             }
             self.save_current_section()?;
             return Ok(checked && self.twirl_on_check_page());
         }
 
-        self.focused_line = line_at(abs_y);
-        if let Some(line) = self.focused_line {
-            self.load_focused_field();
-            let cursor = self
-                .field
-                .index_at(&Self::line_layout(&self.font, line), abs_x, abs_y);
-            self.field.begin_drag(cursor);
+        match line_at(abs_y) {
+            Some(line) => {
+                self.focus_line(line);
+                let cursor =
+                    self.focus
+                        .index_at(&Self::line_layout(&self.font, line), abs_x, abs_y);
+                self.focus.begin_drag(cursor);
+            }
+            None => self.focus = Focus::None,
         }
         Ok(false)
     }
 
     pub(crate) fn drag_text(&mut self, x: i16, y: i16) -> bool {
-        if !self.field.is_dragging() {
+        if !self.focus.is_dragging() {
             return false;
         }
 
-        let Some(line) = self.focused_line else {
+        let Some(line) = self.focus.line() else {
             return false;
         };
         let abs_x = x.max(0) as usize;
         let abs_y = y.max(0) as usize;
         let cursor = self
-            .field
+            .focus
             .index_at(&Self::line_layout(&self.font, line), abs_x, abs_y);
-        self.field.drag_to(cursor)
+        self.focus.drag_to(cursor)
     }
 
-    pub(crate) const fn end_text_drag(&mut self) {
-        self.field.end_drag();
+    pub(crate) fn end_text_drag(&mut self) {
+        self.focus.end_drag();
     }
 
-    pub(crate) const fn text_dragging(&self) -> bool {
-        self.field.is_dragging()
+    pub(crate) fn text_dragging(&self) -> bool {
+        self.focus.is_dragging()
     }
 
     /// Mirrors the hit-testing in `click`, without side effects.
@@ -466,7 +591,7 @@ impl Toodle {
     fn checkbox_clickable(&self, line: usize) -> bool {
         let PageRef { section, page } = self.current_page_ref();
         let item = self.list(section).item(page, line);
-        item.is_checkbox && (item.checked || !item.text.is_empty())
+        item.is_checkbox() && (item.checked() || !item.text().is_empty())
     }
 
     pub(crate) fn hover(&mut self, x: i16, y: i16) -> bool {
@@ -484,37 +609,42 @@ impl Toodle {
         input: &KeyInput,
         clipboard_text: Option<&str>,
     ) -> Result<Option<String>, Box<dyn Error>> {
-        let Some(line) = self.focused_line else {
+        let Some(line) = self.focus.line() else {
             return Ok(None);
         };
 
         let PageRef { section, page } = self.current_page_ref();
-        if matches!(edit_key(input), EditKey::Backspace) && self.field.text().is_empty() {
+        if matches!(edit_key(input), EditKey::Backspace) && self.focus.text().is_empty() {
             // Deleting goes through the async save path like every other
             // edit, so a backspace never blocks the UI thread on fsyncs. If a
             // save is already in flight, begin_save (inside
             // save_current_section) leaves the section dirty and the debounce
             // retries once it completes — no rename race, no lost delete.
-            if self.sections[section].list_mut().delete_item(page, line) {
-                self.sections[section].mark_dirty();
+            if self.sections[section.index()]
+                .list_mut()
+                .delete_item(page, line)
+            {
+                self.sections[section.index()].mark_dirty();
                 self.last_edit = Instant::now();
                 self.save_current_section()?;
             }
             self.keep_section_page_visible(PageRef { section, page });
-            self.focused_line = Some(line);
-            self.load_focused_field();
-            self.field.set_cursor(0);
+            self.focus_line(line);
+            self.focus.set_cursor(0);
             return Ok(None);
         }
 
         let layout = Self::line_layout(&self.font, line);
-        let outcome = self.field.handle_key(input, clipboard_text, &layout);
+        let outcome = self.focus.handle_key(input, clipboard_text, &layout);
         if let TextEditOutcome::Handled { changed, copy } = outcome {
             if changed {
-                self.sections[section].list_mut().item_mut(page, line).text =
-                    self.field.text().to_string();
+                let text = self.focus.text().to_string();
+                self.sections[section.index()]
+                    .list_mut()
+                    .item_mut(page, line)
+                    .set_text(text);
                 // Deferred save: an fsync per keystroke makes typing lag.
-                self.sections[section].mark_dirty();
+                self.sections[section.index()].mark_dirty();
                 self.last_edit = Instant::now();
                 self.keep_section_page_visible(PageRef { section, page });
             }
@@ -523,17 +653,16 @@ impl Toodle {
 
         match edit_key(input) {
             EditKey::Enter => {
-                self.focused_line = Some((line + 1).min(LINE_COUNT - 1));
-                self.load_focused_field();
-                self.field.set_cursor_end();
+                self.focus_line((line + 1).min(LINE_COUNT - 1));
+                self.focus.set_cursor_end();
             }
             EditKey::Escape => {
-                self.focused_line = None;
+                self.focus = Focus::None;
             }
             // No line-editing action for these: Tab (no focus navigation
             // here) or an unrecognized/textless key press.
             EditKey::Tab | EditKey::None => return Ok(None),
-            // `self.field.handle_key` above always consumes these itself
+            // `self.focus.handle_key` above always consumes these itself
             // (returning `Handled`, which returns early before this match),
             // so they can never actually reach here. Panicking rather than
             // silently no-opping means a change that broke that invariant
@@ -559,15 +688,28 @@ impl Toodle {
         )
     }
 
-    /// Load the focused line's text into the editing field (the field is the
-    /// live buffer while a line is focused; edits are mirrored back into the
-    /// todo item so the rest of the widget can keep rendering from the lists).
-    fn load_focused_field(&mut self) {
-        if let Some(line) = self.focused_line {
-            let PageRef { section, page } = self.current_page_ref();
-            let text = self.list(section).item(page, line).text.clone();
-            self.field.set_text(&text);
-        }
+    /// Focus `line` on the current page and load its text into a fresh
+    /// edit buffer. This is the only way to move focus onto a line — see
+    /// `Focus`'s doc comment for why that pairing matters.
+    fn focus_line(&mut self, line: usize) {
+        let PageRef { section, page } = self.current_page_ref();
+        let text = self.list(section).item(page, line).text().to_string();
+        let mut field = TextField::new(usize::MAX, 2);
+        field.set_text(&text);
+        self.focus = Focus::Line { line, field };
+    }
+
+    /// Re-sync the focused line's edit buffer with the todo it currently
+    /// points at (its content may have changed via an external edit). The
+    /// cursor is clamped in place rather than reset, so the user's position
+    /// survives when the text is unchanged. A no-op when nothing is focused.
+    fn reload_focused_field(&mut self) {
+        let Some(line) = self.focus.line() else {
+            return;
+        };
+        let PageRef { section, page } = self.current_page_ref();
+        let text = self.list(section).item(page, line).text().to_string();
+        self.focus.field_mut().set_text(&text);
     }
 
     /// Blit just the front page's checkbox box for one line out of the combined
@@ -592,8 +734,8 @@ impl Toodle {
     /// not a page index — only the front page's checks are ever live-drawn
     /// (see `draw_front_overlay`'s doc comment), so there's no page-relative
     /// offset to apply here either.
-    fn draw_check(&self, fb: &mut Framebuffer, palette: &Palette, section: usize, line: usize) {
-        let src_x = (section + line) % CHECK_VARIANTS * CHECK_SPRITE_W;
+    fn draw_check(&self, fb: &mut Framebuffer, palette: &Palette, section: Priority, line: usize) {
+        let src_x = (section.index() + line) % CHECK_VARIANTS * CHECK_SPRITE_W;
         let dest_x = PAGE_OFFSET_X + CHECK_X - 1;
         let dest_y = CHECK_Y[line] - 4;
         let src = Rect::new(src_x, 0, CHECK_SPRITE_W, CHECK_SPRITE_H);
@@ -620,7 +762,8 @@ impl Toodle {
         // Async save: the fsync-heavy disk work happens on the save worker.
         // If a save for this section is already in flight the section stays
         // dirty and maintain()'s debounce retries once it completes.
-        let (externally_changed, text) = self.sections[section].begin_save(&todo_file(section))?;
+        let (externally_changed, text) =
+            self.sections[section.index()].begin_save(&todo_file(section))?;
         if let Some(text) = text {
             self.save_worker.submit(section, todo_file(section), text);
         }
@@ -655,7 +798,7 @@ impl Toodle {
     /// Neither changes anything visible.
     fn drain_save_results(&mut self) {
         while let Some((section, result)) = self.save_worker.try_result() {
-            self.sections[section].complete_save(result);
+            self.sections[section.index()].complete_save(result);
         }
     }
 
@@ -666,7 +809,7 @@ impl Toodle {
             let Some((section, result)) = self.save_worker.wait_result() else {
                 return;
             };
-            self.sections[section].complete_save(result);
+            self.sections[section.index()].complete_save(result);
         }
     }
 
@@ -676,11 +819,11 @@ impl Toodle {
     fn queue_saves(&mut self) -> Result<bool, Box<dyn Error>> {
         let current_page = self.current_page_ref();
         let mut externally_changed = false;
-        for section in 0..SECTION_COUNT {
-            if !self.sections[section].is_dirty() {
+        for section in Priority::ALL {
+            if !self.sections[section.index()].is_dirty() {
                 continue;
             }
-            let (changed, text) = self.sections[section].begin_save(&todo_file(section))?;
+            let (changed, text) = self.sections[section.index()].begin_save(&todo_file(section))?;
             externally_changed |= changed;
             if let Some(text) = text {
                 self.save_worker.submit(section, todo_file(section), text);
@@ -697,8 +840,8 @@ impl Toodle {
     fn sync_with_disk(&mut self) -> Result<bool, Box<dyn Error>> {
         let current_page = self.current_page_ref();
         let mut lists_changed = false;
-        for section in 0..SECTION_COUNT {
-            lists_changed |= self.sections[section].absorb_external(&todo_file(section))?;
+        for section in Priority::ALL {
+            lists_changed |= self.sections[section.index()].absorb_external(&todo_file(section))?;
         }
         if lists_changed {
             self.fix_ui_after_sync(current_page);
@@ -715,9 +858,9 @@ impl Toodle {
         self.wait_for_saves();
         let current_page = self.current_page_ref();
         let mut externally_changed = false;
-        for section in 0..SECTION_COUNT {
-            if self.sections[section].is_dirty() {
-                externally_changed |= self.sections[section].save(&todo_file(section))?;
+        for section in Priority::ALL {
+            if self.sections[section.index()].is_dirty() {
+                externally_changed |= self.sections[section.index()].save(&todo_file(section))?;
             }
         }
         if externally_changed {
@@ -733,19 +876,19 @@ impl Toodle {
     fn fix_ui_after_sync(&mut self, current_page: PageRef) {
         self.keep_section_page_visible(current_page);
 
-        if self.focused_line.is_some() {
-            let text = self.field.text().to_owned();
+        if let Some(line) = self.focus.line() {
+            let text = self.focus.text().to_owned();
             let index = if text.is_empty() {
                 // A blank focused line has no identity to follow; any blank
                 // spot is as good as another, so stay put.
                 None
             } else {
-                let old_index = current_page.page * LINE_COUNT + self.focused_line.unwrap_or(0);
+                let old_index = current_page.page * LINE_COUNT + line;
                 self.list(current_page.section)
                     .items
                     .iter()
                     .enumerate()
-                    .filter(|(_, item)| item.text == text)
+                    .filter(|(_, item)| item.text() == text)
                     .map(|(index, _)| index)
                     // Several todos can share text; follow whichever match sits
                     // closest to where focus used to be, preferring the earlier
@@ -754,7 +897,7 @@ impl Toodle {
             };
             if let Some(index) = index {
                 // Follow the focused todo to wherever it landed.
-                self.focused_line = Some(index % LINE_COUNT);
+                self.focus.set_line(index % LINE_COUNT);
                 self.keep_section_page_visible(PageRef {
                     section: current_page.section,
                     page: index / LINE_COUNT,
@@ -762,19 +905,13 @@ impl Toodle {
             }
             // Show whatever is at the focused spot now (the todo may have been
             // edited or removed on disk); the cursor is clamped by the field.
-            self.load_focused_field();
+            self.reload_focused_field();
         }
 
-        if let Some((section, page, line)) = self.highlighted {
-            let list = self.list(section);
-            let item = list.item(page, line);
-            if page >= list.page_count()
-                || !item.is_checkbox
-                || item.checked
-                || item.text.trim().is_empty()
-            {
-                self.highlighted = None;
-            }
+        if let Some(todo_ref) = self.highlighted
+            && !self.still_eligible(todo_ref)
+        {
+            self.highlighted = None;
         }
     }
 
@@ -795,20 +932,20 @@ impl Toodle {
             .map(|section| section.list().clone())
             .collect();
 
-        for (section, list) in staged_lists.iter_mut().enumerate() {
+        for (section, list) in Priority::ALL.into_iter().zip(staged_lists.iter_mut()) {
             let mut remaining = Vec::new();
             for item in list.items.iter().cloned() {
-                if item.checked {
-                    if !item.text.trim().is_empty() {
-                        archived[section].push(item.text.clone());
+                if item.checked() {
+                    if !item.text().trim().is_empty() {
+                        archived[section.index()].push(item.text().to_string());
                     }
-                    changed_sections[section] = true;
+                    changed_sections[section.index()] = true;
                 } else {
                     remaining.push(item);
                 }
             }
 
-            if changed_sections[section] {
+            if changed_sections[section.index()] {
                 list.items = remaining;
                 list.trim_trailing_blank_items();
             }
@@ -822,7 +959,7 @@ impl Toodle {
             fs::create_dir_all(done_dir())?;
         }
         let mut staged: StagedArchiveWrites = std::array::from_fn(|_| (None, None));
-        for (section, archived_section) in archived.iter().enumerate() {
+        for (section, archived_section) in Priority::ALL.into_iter().zip(archived.iter()) {
             if archived_section.is_empty() {
                 continue;
             }
@@ -841,13 +978,14 @@ impl Toodle {
                 done_text.push_str(todo);
                 done_text.push('\n');
             }
-            staged[section].0 = Some(AtomicWrite::stage(&done_path, done_text.into_bytes())?);
+            staged[section.index()].0 =
+                Some(AtomicWrite::stage(&done_path, done_text.into_bytes())?);
         }
-        for (section, changed) in changed_sections.into_iter().enumerate() {
+        for (section, changed) in Priority::ALL.into_iter().zip(changed_sections) {
             if changed {
-                let text = staged_lists[section].serialized_text();
+                let text = staged_lists[section.index()].serialized_text();
                 let write = AtomicWrite::stage(&todo_file(section), text.as_bytes())?;
-                staged[section].1 = Some((text, write));
+                staged[section.index()].1 = Some((text, write));
             }
         }
 
@@ -889,14 +1027,18 @@ impl Toodle {
         // except (at most) the section that was in flight when the error
         // hit, and the marker above lets a subsequent restart finish that
         // section's rename if it had made it to disk.
-        for section in 0..SECTION_COUNT {
-            let (done_write, section_write) = &mut staged[section];
+        for section in Priority::ALL {
+            let (done_write, section_write) = &mut staged[section.index()];
             if let Some(write) = done_write.take() {
                 write.commit()?;
             }
             if let Some((text, write)) = section_write.take() {
                 let written = write.commit()?;
-                self.sections[section].adopt(staged_lists[section].clone(), text, written);
+                self.sections[section.index()].adopt(
+                    staged_lists[section.index()].clone(),
+                    text,
+                    written,
+                );
             }
         }
         fs::remove_file(&marker_path)?;
@@ -948,7 +1090,7 @@ impl Toodle {
     }
 
     fn page_ref(&self, mut page: usize) -> PageRef {
-        for (section, store) in self.sections.iter().enumerate() {
+        for (section, store) in Priority::ALL.into_iter().zip(self.sections.iter()) {
             let section_pages = store.list().page_count();
             if page < section_pages {
                 return PageRef { section, page };
@@ -957,15 +1099,15 @@ impl Toodle {
         }
 
         PageRef {
-            section: SECTION_COUNT - 1,
-            page: self.list(SECTION_COUNT - 1).page_count().saturating_sub(1),
+            section: Priority::Snail,
+            page: self.list(Priority::Snail).page_count().saturating_sub(1),
         }
     }
 
-    fn page_index_for(&self, section: usize, section_page: usize) -> usize {
+    fn page_index_for(&self, section: Priority, section_page: usize) -> usize {
         self.sections
             .iter()
-            .take(section)
+            .take(section.index())
             .map(|store| store.list().page_count())
             .sum::<usize>()
             + section_page.min(self.list(section).page_count().saturating_sub(1))
@@ -977,6 +1119,20 @@ impl Toodle {
             self.page_index_for(page.section, page.page.min(section_pages.saturating_sub(1)));
     }
 
+    /// Whether `todo_ref` still points at a valid dice-roll target: a
+    /// checkbox line, unchecked, with non-blank text, on a page that still
+    /// exists. The single source of this predicate so revalidating the
+    /// highlight after an external edit can't drift from the predicate that
+    /// picked it in the first place (see `roll_highlight`).
+    fn still_eligible(&self, todo_ref: TodoRef) -> bool {
+        let list = self.list(todo_ref.section);
+        if todo_ref.page >= list.page_count() {
+            return false;
+        }
+        let item = list.item(todo_ref.page, todo_ref.line);
+        item.is_checkbox() && !item.checked() && !item.text().trim().is_empty()
+    }
+
     /// Gold-star tally for the current priority: todos already archived into
     /// today's done file plus checked todos not yet swept there.
     fn goldstar_count(&self) -> usize {
@@ -985,7 +1141,7 @@ impl Toodle {
             .list(section)
             .items
             .iter()
-            .filter(|item| item.checked && !item.text.trim().is_empty())
+            .filter(|item| item.checked() && !item.text().trim().is_empty())
             .count();
         self.done_counts.count(section) + checked_unarchived
     }
@@ -1077,21 +1233,21 @@ impl Toodle {
     }
 
     fn focused_pencil_position(&self) -> Option<(usize, usize, usize, bool)> {
-        let line = self.focused_line?;
+        let line = self.focus.line()?;
         let PageRef { section, page } = self.current_page_ref();
         let todo = self.list(section).item(page, line);
         let layout = Self::line_layout(&self.font, line);
-        let (cursor_x, cursor_y) = layout.cursor_position(&todo.text, self.field.cursor());
+        let (cursor_x, cursor_y) = layout.cursor_position(todo.text(), self.focus.cursor());
         // A cursor sitting in overflow text (wrapped past the two drawn
         // lines) would place the pencil inside the todo below; pin it to the
         // second line's row instead.
         let cursor_y = cursor_y.min(LINE_Y[line] - TEXT_Y_OFFSET + WRAPPED_SECOND_LINE_OFFSET_Y);
-        Some((line, cursor_x, cursor_y, layout.wrap(&todo.text).len() > 1))
+        Some((line, cursor_x, cursor_y, layout.wrap(todo.text()).len() > 1))
     }
 
     fn should_draw_pencil_shadow(&self, line: usize) -> bool {
         let PageRef { section, page } = self.current_page_ref();
-        let char_count = self.list(section).item(page, line).text.chars().count();
+        let char_count = self.list(section).item(page, line).text().chars().count();
         match line {
             line if line == LINE_COUNT - 2 => char_count <= PENULTIMATE_LINE_SHADOW_MAX_CHARS,
             line if line == LINE_COUNT - 1 => char_count <= LAST_LINE_SHADOW_MAX_CHARS,
@@ -1119,13 +1275,20 @@ impl Toodle {
         let PageRef { section, page } = self.current_page_ref();
         let candidates: Vec<usize> = (0..LINE_COUNT)
             .filter(|&line| {
-                let item = self.list(section).item(page, line);
-                item.is_checkbox && !item.checked && !item.text.trim().is_empty()
+                self.still_eligible(TodoRef {
+                    section,
+                    page,
+                    line,
+                })
             })
             .collect();
         self.highlighted = candidates
             .get(crate::util::random_index(candidates.len()))
-            .map(|&line| (section, page, line));
+            .map(|&line| TodoRef {
+                section,
+                page,
+                line,
+            });
     }
 
     fn eraser_at(&self, x: i16, y: i16) -> bool {
@@ -1172,8 +1335,7 @@ impl crate::widget::Widget for Toodle {
     }
 
     fn blur(&mut self) {
-        self.focused_line = None;
-        self.field.end_drag();
+        self.focus = Focus::None;
     }
 
     fn hover(&mut self, x: i16, y: i16) -> bool {
@@ -1207,7 +1369,7 @@ impl crate::widget::Widget for Toodle {
 
 #[derive(Clone, Copy)]
 struct PageRef {
-    section: usize,
+    section: Priority,
     page: usize,
 }
 
@@ -1259,12 +1421,12 @@ fn page_swap(page_color: PageColor, pencil_on_second_line: bool) -> Swap {
     Swap::from_indices(&indices)
 }
 
-const fn section_color(section: usize) -> PageColor {
-    match section % SECTION_COUNT {
-        0 => PageColor::Pink,
-        1 => PageColor::Green,
-        2 => PageColor::Yellow,
-        _ => PageColor::Blue,
+const fn section_color(section: Priority) -> PageColor {
+    match section {
+        Priority::Urgent => PageColor::Pink,
+        Priority::Frog => PageColor::Green,
+        Priority::Normal => PageColor::Yellow,
+        Priority::Snail => PageColor::Blue,
     }
 }
 

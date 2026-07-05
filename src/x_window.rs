@@ -43,8 +43,9 @@ pub struct XWindow {
     /// Two SHM segments used alternately: while the server is still reading
     /// one (busy until its completion event arrives), the next frame is
     /// written into the other, so presenting normally never blocks on a
-    /// round trip.
-    shm_images: Vec<ShmImage>,
+    /// round trip. `Unavailable` when SHM couldn't be set up, falling back
+    /// to the slower `put_image` path.
+    shm_backing: ShmBacking,
     clipboard_atoms: ClipboardAtoms,
     clipboard_text: Option<String>,
     /// Index -> BGRA table applied when presenting; refreshed via `set_palette`.
@@ -87,6 +88,31 @@ struct ShmImage {
     /// A `shm_put_image` from this segment is still in flight; cleared by its
     /// completion event (or a full sync).
     busy: bool,
+}
+
+/// The SHM double-buffer is always either entirely absent or exactly two
+/// segments by construction (`open_shm_images_logged` never produces any
+/// other shape); this says so in the type instead of leaving `Vec<ShmImage>`
+/// to informally hold that invariant.
+enum ShmBacking {
+    Unavailable,
+    Double([ShmImage; 2]),
+}
+
+impl ShmBacking {
+    fn as_slice(&self) -> &[ShmImage] {
+        match self {
+            Self::Unavailable => &[],
+            Self::Double(images) => images,
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [ShmImage] {
+        match self {
+            Self::Unavailable => &mut [],
+            Self::Double(images) => images,
+        }
+    }
 }
 
 struct ClipboardAtoms {
@@ -184,7 +210,7 @@ impl XWindow {
         conn.flush()?;
         let keyboard = text_input::Keyboard::new(&conn)?;
         let clipboard_atoms = ClipboardAtoms::load(&conn)?;
-        let shm_images = Self::open_shm_images_logged(&conn, width, height);
+        let shm_backing = Self::open_shm_images_logged(&conn, width, height);
 
         Ok(Self {
             conn,
@@ -194,7 +220,7 @@ impl XWindow {
             back_pix,
             keyboard,
             upload_buffer: Vec::new(),
-            shm_images,
+            shm_backing,
             clipboard_atoms,
             clipboard_text: None,
             lut: Box::new([[0, 0, 0, 0xFF]; 256]),
@@ -234,7 +260,7 @@ impl XWindow {
 
     /// The server finished reading `seg`; its segment can be reused.
     fn shm_completed(&mut self, seg: Seg) {
-        for image in &mut self.shm_images {
+        for image in self.shm_backing.as_mut_slice() {
             if image.seg == seg {
                 image.busy = false;
             }
@@ -441,23 +467,25 @@ impl XWindow {
         })
     }
 
-    /// Open the two alternating SHM segments, degrading to an empty list (the
+    /// Open the two alternating SHM segments, degrading to `Unavailable` (the
     /// slow `put_image` path) with a diagnostic instead of failing.
-    fn open_shm_images_logged(conn: &XCBConnection, width: usize, height: usize) -> Vec<ShmImage> {
-        let mut images = Vec::new();
-        for _ in 0..2 {
-            match Self::open_shm_image(conn, width, height) {
-                Ok(image) => images.push(image),
-                Err(err) => {
-                    eprintln!("MIT-SHM unavailable, falling back to put_image: {err}");
-                    for image in &images {
-                        let _ = conn.shm_detach(image.seg);
-                    }
-                    return Vec::new();
-                }
+    fn open_shm_images_logged(conn: &XCBConnection, width: usize, height: usize) -> ShmBacking {
+        let first = match Self::open_shm_image(conn, width, height) {
+            Ok(image) => image,
+            Err(err) => {
+                eprintln!("MIT-SHM unavailable, falling back to put_image: {err}");
+                return ShmBacking::Unavailable;
             }
-        }
-        images
+        };
+        let second = match Self::open_shm_image(conn, width, height) {
+            Ok(image) => image,
+            Err(err) => {
+                eprintln!("MIT-SHM unavailable, falling back to put_image: {err}");
+                let _ = conn.shm_detach(first.seg);
+                return ShmBacking::Unavailable;
+            }
+        };
+        ShmBacking::Double([first, second])
     }
 
     #[cfg(not(unix))]
@@ -583,14 +611,19 @@ impl XWindow {
     /// completion events first (buffering unrelated events); if both segments
     /// are somehow still in flight, falls back to a full sync.
     fn free_shm_index(&mut self) -> Result<Option<usize>, Box<dyn Error>> {
-        if self.shm_images.is_empty() {
+        if self.shm_backing.as_slice().is_empty() {
             return Ok(None);
         }
-        if !self.shm_images.iter().any(|image| image.busy) {
+        if !self.shm_backing.as_slice().iter().any(|image| image.busy) {
             return Ok(Some(0));
         }
         self.drain_shm_completions()?;
-        if let Some(index) = self.shm_images.iter().position(|image| !image.busy) {
+        if let Some(index) = self
+            .shm_backing
+            .as_slice()
+            .iter()
+            .position(|image| !image.busy)
+        {
             return Ok(Some(index));
         }
         self.sync_shm()?;
@@ -598,12 +631,19 @@ impl XWindow {
         // now. Re-check instead of assuming: if the ordering guarantee this
         // relies on ever breaks, skip the frame rather than put_image into a
         // segment the server may still be reading.
-        Ok(self.shm_images.iter().position(|image| !image.busy))
+        Ok(self
+            .shm_backing
+            .as_slice()
+            .iter()
+            .position(|image| !image.busy))
     }
 
     pub(crate) fn draw(&mut self, fb: &Framebuffer) -> Result<(), Box<dyn Error>> {
         self.update_shape_rows(fb, 0, fb.height)?;
-        self.blit_rect(fb, Rect::new(0, 0, fb.width, fb.height))
+        let Some(rect) = clip_to_fb(Rect::new(0, 0, fb.width, fb.height), fb) else {
+            return Ok(());
+        };
+        self.blit_rect(fb, rect)
     }
 
     pub(crate) fn resize(&mut self, width: usize, height: usize) -> Result<(), Box<dyn Error>> {
@@ -625,13 +665,13 @@ impl XWindow {
         height: usize,
     ) -> Result<(), Box<dyn Error>> {
         // Make sure no put is still reading the old segments before detaching.
-        if self.shm_images.iter().any(|image| image.busy) {
+        if self.shm_backing.as_slice().iter().any(|image| image.busy) {
             self.sync_shm()?;
         }
-        for shm_image in self.shm_images.drain(..) {
+        for shm_image in self.shm_backing.as_slice() {
             self.conn.shm_detach(shm_image.seg)?;
         }
-        self.shm_images = Self::open_shm_images_logged(&self.conn, width, height);
+        self.shm_backing = Self::open_shm_images_logged(&self.conn, width, height);
         // A background pixmap smaller than the window would tile; replace it
         // before the caller's full-frame draw fills the new one.
         self.conn.free_pixmap(self.back_pix)?;
@@ -645,40 +685,29 @@ impl XWindow {
         // Widget rects can momentarily disagree with the framebuffer size
         // (mid-relayout); a clipped partial repaint beats an out-of-bounds
         // panic in present_rect_into.
-        let Some(rect) = clip_to_fb(rect, fb) else {
+        let Some(clipped) = clip_to_fb(rect, fb) else {
             return Ok(());
         };
+        let rect = clipped.rect();
         if rect.x == 0 && rect.y == 0 && rect.w == fb.width && rect.h == fb.height {
             return self.draw(fb);
         }
         self.update_shape_rows(fb, rect.y, rect.y.saturating_add(rect.h))?;
-        self.blit_rect(fb, rect)
+        self.blit_rect(fb, clipped)
     }
 
     /// Present `rect` of the framebuffer, via SHM when available, else a
     /// `put_image` upload. Pixels land in `back_pix` (the window's
     /// background), and a `clear_area` tells the server to show that region
     /// — the copy the server keeps is what it also repaints exposes from.
-    /// Callers must pass a rect that lies within `fb`; `draw_rect` clips
-    /// before getting here.
-    fn blit_rect(&mut self, fb: &Framebuffer, rect: Rect) -> Result<(), Box<dyn Error>> {
+    /// Taking a `ClippedRect` (producible only via `clip_to_fb`) instead of a
+    /// plain `Rect` means the bounds invariant is enforced by the type, not a
+    /// runtime re-check here.
+    fn blit_rect(&mut self, fb: &Framebuffer, rect: ClippedRect) -> Result<(), Box<dyn Error>> {
+        let rect = rect.rect();
         let byte_len = rect.w * rect.h * Framebuffer::BYTES_PER_PIXEL;
         if let Some(index) = self.free_shm_index()? {
-            let shm_image = &mut self.shm_images[index];
-            // This slice is only sound while fb and shm_images resize in
-            // lockstep; guard against that invariant breaking silently.
-            debug_assert!(
-                byte_len <= shm_image.mmap.len(),
-                "blit_rect: byte_len {byte_len} exceeds shm mmap len {}",
-                shm_image.mmap.len()
-            );
-            if byte_len > shm_image.mmap.len() {
-                eprintln!(
-                    "blit_rect: byte_len {byte_len} exceeds shm mmap len {}, skipping blit",
-                    shm_image.mmap.len()
-                );
-                return Ok(());
-            }
+            let shm_image = &mut self.shm_backing.as_mut_slice()[index];
             fb.present_rect_into(rect, &mut shm_image.mmap[..byte_len], &self.lut);
             self.conn.shm_put_image(
                 self.back_pix,
@@ -1114,7 +1143,7 @@ impl XWindow {
 
 impl Drop for XWindow {
     fn drop(&mut self) {
-        for shm_image in &self.shm_images {
+        for shm_image in self.shm_backing.as_slice() {
             let _ = self.conn.shm_detach(shm_image.seg);
         }
         let _ = self.conn.free_pixmap(self.back_pix);
@@ -1213,15 +1242,34 @@ fn selection_property(event: SelectionRequestEvent) -> Atom {
     }
 }
 
-/// Intersect `rect` with the framebuffer bounds; `None` if nothing remains.
-fn clip_to_fb(rect: Rect, fb: &Framebuffer) -> Option<Rect> {
-    if rect.x >= fb.width || rect.y >= fb.height {
-        return None;
+use clipped_rect::{ClippedRect, clip_to_fb};
+
+/// A `Rect` guaranteed to lie fully within some framebuffer's bounds. The
+/// inner `Rect` is private to this module, so the only way to build one is
+/// `clip_to_fb` — callers that receive a `ClippedRect` don't need to
+/// re-check it themselves.
+mod clipped_rect {
+    use crate::{Framebuffer, Rect};
+
+    #[derive(Clone, Copy)]
+    pub(super) struct ClippedRect(Rect);
+
+    impl ClippedRect {
+        pub(super) const fn rect(self) -> Rect {
+            self.0
+        }
     }
-    let w = rect.w.min(fb.width - rect.x);
-    let h = rect.h.min(fb.height - rect.y);
-    if w == 0 || h == 0 {
-        return None;
+
+    /// Intersect `rect` with the framebuffer bounds; `None` if nothing remains.
+    pub(super) fn clip_to_fb(rect: Rect, fb: &Framebuffer) -> Option<ClippedRect> {
+        if rect.x >= fb.width || rect.y >= fb.height {
+            return None;
+        }
+        let w = rect.w.min(fb.width - rect.x);
+        let h = rect.h.min(fb.height - rect.y);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        Some(ClippedRect(Rect::new(rect.x, rect.y, w, h)))
     }
-    Some(Rect::new(rect.x, rect.y, w, h))
 }

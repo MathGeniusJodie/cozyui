@@ -8,13 +8,42 @@ use super::input::{EditKey, KeyInput, edit_key};
 /// Oldest undo states are dropped past this depth.
 const UNDO_LIMIT: usize = 100;
 
+/// The selection's origin, if any, and whether it's an in-progress mouse
+/// drag. This is the single field driving `selection_range`/`is_dragging`/
+/// cursor movement, so a stray keypress mid-drag can't leave a drag anchor
+/// stale while some other field disagrees about whether selecting stopped.
+#[derive(Clone, Copy, Default)]
+enum Selection {
+    #[default]
+    None,
+    /// Anchored by a keyboard shift+move (Shift+Left/Right/Home/End) or
+    /// Ctrl+A.
+    Keyboard { anchor: usize },
+    /// Anchored by an in-progress mouse drag; distinct from `Keyboard` only
+    /// in that `is_dragging` reports true and any keypress ends it (see
+    /// `TextEdit::move_impl`).
+    Dragging { anchor: usize },
+}
+
+impl Selection {
+    const fn anchor(self) -> Option<usize> {
+        match self {
+            Self::None => None,
+            Self::Keyboard { anchor } | Self::Dragging { anchor } => Some(anchor),
+        }
+    }
+
+    const fn is_dragging(self) -> bool {
+        matches!(self, Self::Dragging { .. })
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct TextEdit {
     cursor: usize,
-    anchor: Option<usize>,
+    selection: Selection,
     /// Snapshots of (text, cursor) taken before each mutation.
     undo: VecDeque<(String, usize)>,
-    drag_anchor: Option<usize>,
 }
 
 pub enum TextEditOutcome {
@@ -37,45 +66,45 @@ impl TextEdit {
 
     pub(crate) fn set_cursor(&mut self, cursor: usize, text: &str) {
         self.cursor = snap_to_grapheme_boundary(text, cursor.min(char_len(text)));
-        self.anchor = None;
-        self.drag_anchor = None;
+        self.selection = Selection::None;
     }
 
     pub(crate) fn begin_drag(&mut self, cursor: usize, text: &str) {
         let cursor = snap_to_grapheme_boundary(text, cursor.min(char_len(text)));
         self.cursor = cursor;
-        self.anchor = None;
-        self.drag_anchor = Some(cursor);
+        self.selection = Selection::Dragging { anchor: cursor };
     }
 
     pub(crate) fn drag_to(&mut self, cursor: usize, text: &str) -> bool {
-        let Some(anchor) = self.drag_anchor else {
+        if !self.selection.is_dragging() {
             return false;
-        };
+        }
         let cursor = snap_to_grapheme_boundary(text, cursor.min(char_len(text)));
-        let old_cursor = self.cursor;
-        let old_anchor = self.anchor;
+        let changed = self.cursor != cursor;
         self.cursor = cursor;
-        self.anchor = (anchor != cursor).then_some(anchor);
-        old_cursor != self.cursor || old_anchor != self.anchor
+        changed
     }
 
     pub(crate) const fn end_drag(&mut self) {
-        self.drag_anchor = None;
+        // A mouse-up keeps the selection highlighted (if any), but it's no
+        // longer a drag; `None`/`Keyboard` are left untouched.
+        self.selection = match self.selection {
+            Selection::Dragging { anchor } => Selection::Keyboard { anchor },
+            other => other,
+        };
     }
 
     pub(crate) const fn is_dragging(&self) -> bool {
-        self.drag_anchor.is_some()
+        self.selection.is_dragging()
     }
 
     pub(crate) fn select_all(&mut self, text: &str) {
-        self.anchor = Some(0);
+        self.selection = Selection::Keyboard { anchor: 0 };
         self.cursor = char_len(text);
-        self.drag_anchor = None;
     }
 
     pub(crate) fn selection_range(&self) -> Option<(usize, usize)> {
-        let anchor = self.anchor?;
+        let anchor = self.selection.anchor()?;
         if anchor == self.cursor {
             return None;
         }
@@ -135,8 +164,7 @@ impl TextEdit {
                     };
                     *text = previous;
                     self.cursor = cursor.min(char_len(text));
-                    self.anchor = None;
-                    self.drag_anchor = None;
+                    self.selection = Selection::None;
                     return handled(true);
                 }
                 _ => {}
@@ -171,9 +199,15 @@ impl TextEdit {
     fn clamp(&mut self, text: &str) {
         let len = char_len(text);
         self.cursor = self.cursor.min(len);
-        if let Some(anchor) = &mut self.anchor {
-            *anchor = (*anchor).min(len);
-        }
+        self.selection = match self.selection {
+            Selection::None => Selection::None,
+            Selection::Keyboard { anchor } => Selection::Keyboard {
+                anchor: anchor.min(len),
+            },
+            Selection::Dragging { anchor } => Selection::Dragging {
+                anchor: anchor.min(len),
+            },
+        };
     }
 
     fn save_undo(&mut self, text: &str) {
@@ -209,10 +243,14 @@ impl TextEdit {
     fn move_impl(&mut self, text: &str, cursor: usize, selecting: bool, collapse_to_edge: bool) {
         let cursor = cursor.min(char_len(text));
         if selecting {
-            self.anchor.get_or_insert(self.cursor);
+            // Shift+move always yields a keyboard selection, even if a mouse
+            // drag was in progress: the anchor carries over, but the drag
+            // ends here (this is what keeps a keypress from leaving a drag
+            // anchor stale while the cursor moves via the keyboard).
+            let anchor = self.selection.anchor().unwrap_or(self.cursor);
+            self.selection = Selection::Keyboard { anchor };
         } else if let Some((start, end)) = self.selection_range() {
-            self.anchor = None;
-            self.drag_anchor = None;
+            self.selection = Selection::None;
             // Plain Left/Right on a selection collapses to its edge; absolute
             // moves (Home/End) still go to their target.
             if collapse_to_edge {
@@ -220,11 +258,11 @@ impl TextEdit {
                 return;
             }
         } else {
-            self.anchor = None;
+            self.selection = Selection::None;
         }
         self.cursor = cursor;
-        if self.anchor == Some(self.cursor) {
-            self.anchor = None;
+        if self.selection.anchor() == Some(self.cursor) {
+            self.selection = Selection::None;
         }
     }
 
@@ -314,7 +352,7 @@ impl TextEdit {
         let byte = char_to_byte(text, self.cursor);
         text.insert_str(byte, &prefix);
         self.cursor += accepted;
-        self.anchor = None;
+        self.selection = Selection::None;
         true
     }
 
@@ -336,6 +374,7 @@ impl TextEdit {
         let end = char_to_byte(text, self.cursor);
         text.replace_range(start..end, "");
         self.cursor = start_char;
+        self.selection = Selection::None;
         true
     }
 
@@ -345,8 +384,7 @@ impl TextEdit {
         };
         text.replace_range(char_to_byte(text, start)..char_to_byte(text, end), "");
         self.cursor = start;
-        self.anchor = None;
-        self.drag_anchor = None;
+        self.selection = Selection::None;
     }
 }
 

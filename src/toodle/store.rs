@@ -13,6 +13,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::mpsc;
 
+use serde::{Deserialize, Serialize};
+
 pub(super) const LINE_COUNT: usize = 6;
 pub(super) const SECTION_COUNT: usize = 4;
 /// Cap on how many pages a single category can show; extra overflow pages are
@@ -55,8 +57,41 @@ pub(super) fn toodle_root() -> &'static str {
     })
 }
 
-pub(super) fn todo_file(section: usize) -> String {
-    format!("{}/{}", toodle_root(), TODO_FILE_NAMES[section])
+/// A todo section's priority, matching the on-disk file/tag order (urgent,
+/// frog, normal, snail). Every place that used to index `sections`,
+/// `TODO_FILE_NAMES`, or `PRIORITY_TAGS` with a raw `usize` (defensively
+/// wrapped with `% SECTION_COUNT` since an out-of-range index would panic)
+/// now takes one of these instead: only `SECTION_COUNT`-many values exist, so
+/// an invalid section index simply cannot be constructed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Priority {
+    Urgent,
+    Frog,
+    Normal,
+    Snail,
+}
+
+impl Priority {
+    /// Every priority in on-disk/stacking order, for looping over all
+    /// sections without a raw index.
+    pub(super) const ALL: [Self; SECTION_COUNT] =
+        [Self::Urgent, Self::Frog, Self::Normal, Self::Snail];
+
+    /// Position in [`Self::ALL`] / the `sections` array / `TODO_FILE_NAMES` /
+    /// `PRIORITY_TAGS`. Always in `0..SECTION_COUNT` by construction, so
+    /// indexing a `[T; SECTION_COUNT]` with it can never panic.
+    pub(super) const fn index(self) -> usize {
+        match self {
+            Self::Urgent => 0,
+            Self::Frog => 1,
+            Self::Normal => 2,
+            Self::Snail => 3,
+        }
+    }
+}
+
+pub(super) fn todo_file(section: Priority) -> String {
+    format!("{}/{}", toodle_root(), TODO_FILE_NAMES[section.index()])
 }
 
 pub(super) fn done_dir() -> String {
@@ -75,7 +110,7 @@ pub(crate) fn done_file_path(year: i32, month: i32, day: i32, tag: &str) -> Stri
 }
 
 /// Path of the done-todo file for `section` today, named by date and priority.
-pub(super) fn daily_done_path(section: usize) -> String {
+pub(super) fn daily_done_path(section: Priority) -> String {
     let tm = crate::localtime::local_time().unwrap_or_else(|| {
         // Should never happen; if it does, the misfiled date is at least
         // loud. tm_mday: 1 because Tm::default()'s day-of-month is 0, which
@@ -100,8 +135,8 @@ pub(super) fn daily_done_path(section: usize) -> String {
 pub(crate) const PRIORITY_TAGS: [&str; SECTION_COUNT] = ["urgent", "frog", "normal", "snail"];
 
 /// Priority tag used in daily done filenames (`YYYY-MM-DD_<tag>.md`).
-pub(super) const fn section_tag(section: usize) -> &'static str {
-    PRIORITY_TAGS[section % SECTION_COUNT]
+pub(super) const fn section_tag(section: Priority) -> &'static str {
+    PRIORITY_TAGS[section.index()]
 }
 
 /// Identity of one on-disk file version. The inode is included so an atomic
@@ -139,24 +174,26 @@ fn read_or_empty(path: &str) -> io::Result<String> {
     }
 }
 
+/// One line of a todo file: either a plain line kept verbatim (e.g. a
+/// markdown heading) or a checkbox todo (`- [ ]` / `- [x]`) with its check
+/// state. Modeling these as one struct with a `checked: bool` that was
+/// meaningful only when `is_checkbox` was also true let a plain line be
+/// constructed with `checked: true`, a state several call sites (archiving,
+/// the gold-star count) would have had to remember to guard against by hand;
+/// as an enum, "checked but not a checkbox" is simply not expressible.
 #[derive(Clone)]
-pub(super) struct TodoItem {
-    pub(super) text: String,
-    pub(super) checked: bool,
-    /// Whether this line is a markdown checkbox (`- [ ]` / `- [x]`). Plain lines
-    /// from the file are kept verbatim and rendered without a checkbox to their
-    /// left. New lines typed in the widget default to checkboxes.
-    pub(super) is_checkbox: bool,
+pub(super) enum TodoItem {
+    Plain(String),
+    Checkbox { text: String, checked: bool },
 }
 
 /// New lines created in the widget are checkbox todos by default; plain lines
 /// only arise from non-checkbox text in the backing file.
 impl Default for TodoItem {
     fn default() -> Self {
-        Self {
+        Self::Checkbox {
             text: String::new(),
             checked: false,
-            is_checkbox: true,
         }
     }
 }
@@ -165,39 +202,78 @@ impl TodoItem {
     pub(super) fn parse(line: &str) -> Self {
         for (prefix, checked) in [("- [x]", true), ("- [X]", true), ("- [ ]", false)] {
             if let Some(rest) = line.strip_prefix(prefix) {
-                return Self {
+                return Self::Checkbox {
                     text: rest.strip_prefix(' ').unwrap_or(rest).to_string(),
                     checked,
-                    is_checkbox: true,
                 };
             }
         }
-        Self {
-            text: line.to_string(),
-            checked: false,
-            is_checkbox: false,
-        }
+        Self::Plain(line.to_string())
     }
 
     pub(super) fn serialize(&self) -> String {
-        if !self.is_checkbox {
-            self.text.clone()
-        } else if self.checked {
-            format!("- [x] {}", self.text)
-        } else {
-            format!("- [ ] {}", self.text)
+        match self {
+            Self::Plain(text) => text.clone(),
+            Self::Checkbox {
+                text,
+                checked: true,
+            } => format!("- [x] {text}"),
+            Self::Checkbox {
+                text,
+                checked: false,
+            } => format!("- [ ] {text}"),
         }
+    }
+
+    pub(super) fn text(&self) -> &str {
+        match self {
+            Self::Plain(text) | Self::Checkbox { text, .. } => text,
+        }
+    }
+
+    /// Replace this item's text in place, keeping whichever variant (plain or
+    /// checkbox) it already was.
+    pub(super) fn set_text(&mut self, new_text: String) {
+        match self {
+            Self::Plain(text) | Self::Checkbox { text, .. } => *text = new_text,
+        }
+    }
+
+    pub(super) const fn checked(&self) -> bool {
+        matches!(self, Self::Checkbox { checked: true, .. })
+    }
+
+    pub(super) const fn is_checkbox(&self) -> bool {
+        matches!(self, Self::Checkbox { .. })
+    }
+
+    /// Flip a checkbox item's check state and return the new state. Callers
+    /// only reach this after confirming the item is a checkbox (e.g. via
+    /// `checkbox_clickable`), so a non-checkbox item here means that guard was
+    /// skipped somewhere.
+    pub(super) fn toggle_checked(&mut self) -> bool {
+        let Self::Checkbox { checked, .. } = self else {
+            unreachable!("toggle_checked called on a non-checkbox TodoItem")
+        };
+        *checked = !*checked;
+        *checked
     }
 
     /// Whether a checkbox should be drawn to the left of this line. Plain lines
     /// never show one; a checkbox todo shows one once it has content, is
     /// checked, or is the line currently being edited.
-    pub(super) const fn renders_checkbox(&self, focused: bool) -> bool {
-        self.is_checkbox && (focused || self.checked || !self.text.is_empty())
+    pub(super) fn renders_checkbox(&self, focused: bool) -> bool {
+        match self {
+            Self::Plain(_) => false,
+            Self::Checkbox { text, checked } => focused || *checked || !text.is_empty(),
+        }
     }
 
-    pub(super) const fn is_blank(&self) -> bool {
-        !self.checked && self.text.is_empty()
+    pub(super) fn is_blank(&self) -> bool {
+        match self {
+            Self::Plain(text) => text.is_empty(),
+            Self::Checkbox { text, checked } => !checked && text.is_empty(),
+        }
     }
 }
 
@@ -230,10 +306,9 @@ impl TodoList {
     }
 
     pub(super) fn item(&self, page: usize, line: usize) -> &TodoItem {
-        static BLANK_ITEM: TodoItem = TodoItem {
+        static BLANK_ITEM: TodoItem = TodoItem::Checkbox {
             text: String::new(),
             checked: false,
-            is_checkbox: true,
         };
         self.items
             .get(page * LINE_COUNT + line)
@@ -283,6 +358,20 @@ impl TodoList {
     }
 }
 
+/// A section's sync bookkeeping. `dirty` (unsaved in-memory edits not yet
+/// reflected on disk) and whether a background save is in flight are tracked
+/// together here instead of as two independent fields: while a save is in
+/// flight the in-flight text must be retained (to become the new synced base
+/// once it lands), and folding that into the same enum as `dirty` is what
+/// lets [`SectionStore::save`] turn "called mid-save" from a runtime error
+/// into an assertion that can never actually fire given the real call sites
+/// (every caller waits out in-flight saves first — see
+/// `Toodle::wait_for_saves`).
+enum SyncState {
+    Idle { dirty: bool },
+    Saving { dirty: bool, pending: String },
+}
+
 /// One section's todo list plus everything needed to keep it in lockstep with
 /// its backing file: `base` is the exact disk text the list was last synced
 /// with (loaded, merged, or written), and `fingerprint` identifies that disk
@@ -291,11 +380,7 @@ pub(super) struct SectionStore {
     list: TodoList,
     base: String,
     fingerprint: Option<Fingerprint>,
-    dirty: bool,
-    /// Text handed to the save worker and not yet confirmed written; while
-    /// set, disk syncing is suspended (the file is about to be replaced by
-    /// our own rename, which must not read as an external change).
-    saving: Option<String>,
+    sync: SyncState,
 }
 
 impl SectionStore {
@@ -310,8 +395,7 @@ impl SectionStore {
             list: TodoList::from_text(&base),
             base,
             fingerprint,
-            dirty: false,
-            saving: None,
+            sync: SyncState::Idle { dirty: false },
         })
     }
 
@@ -324,19 +408,27 @@ impl SectionStore {
     }
 
     /// Flag unsaved in-memory edits; they reach disk via [`Self::save`].
-    pub(super) const fn mark_dirty(&mut self) {
-        self.dirty = true;
+    pub(super) fn mark_dirty(&mut self) {
+        match &mut self.sync {
+            SyncState::Idle { dirty } | SyncState::Saving { dirty, .. } => *dirty = true,
+        }
     }
 
-    pub(super) const fn is_dirty(&self) -> bool {
-        self.dirty
+    pub(super) fn is_dirty(&self) -> bool {
+        match &self.sync {
+            SyncState::Idle { dirty } | SyncState::Saving { dirty, .. } => *dirty,
+        }
+    }
+
+    pub(super) fn is_saving(&self) -> bool {
+        matches!(self.sync, SyncState::Saving { .. })
     }
 
     /// Detect and fold in an external change to the backing file. Unsaved
     /// in-app edits are preserved by a three-way merge and re-flagged dirty so
     /// the merged result is written back. Returns whether the list changed.
     pub(super) fn absorb_external(&mut self, path: &str) -> Result<bool, Box<dyn Error>> {
-        if self.saving.is_some() {
+        if self.is_saving() {
             // Our own rename is in flight; the fingerprint is stale by
             // construction. complete_save re-arms syncing with the written
             // version, and any genuinely external rewrite after that still
@@ -362,11 +454,12 @@ impl SectionStore {
         let merged = merge_lines(&base_lines, &our_lines, &their_lines);
 
         let changed = merged != our_lines;
-        self.dirty = merged != their_lines;
+        let dirty = merged != their_lines;
         self.list.items = merged.iter().map(|line| TodoItem::parse(line)).collect();
         self.list.trim_trailing_blank_items();
         self.base = disk_text;
         self.fingerprint = disk_fingerprint;
+        self.sync = SyncState::Idle { dirty };
         Ok(changed)
     }
 
@@ -376,22 +469,24 @@ impl SectionStore {
     pub(super) fn save(&mut self, path: &str) -> Result<bool, Box<dyn Error>> {
         // A synchronous save while the worker still holds an older snapshot
         // would race its rename and let complete_save clobber the base with
-        // stale text; callers must wait_for_saves first.
-        if self.saving.is_some() {
-            return Err("synchronous save while a background save is in flight".into());
-        }
+        // stale text. Every real caller (see `Toodle::flush_saves`) waits out
+        // any in-flight save first, so this can only fire if that contract is
+        // broken — in which case failing loudly beats silently discarding the
+        // pending edits (returning an error here used to be swallowed by the
+        // shutdown path with an eprintln, which would have lost them).
+        assert!(
+            !self.is_saving(),
+            "SectionStore::save called while a background save is in flight; \
+             callers must wait_for_saves first"
+        );
         let externally_changed = self.absorb_external(path)?;
         self.list.trim_trailing_blank_items();
         let text = self.list.serialized_text();
         let written = AtomicWrite::stage(path, text.as_bytes())?.commit()?;
         self.base = text;
         self.fingerprint = Some(written);
-        self.dirty = false;
+        self.sync = SyncState::Idle { dirty: false };
         Ok(externally_changed)
-    }
-
-    pub(super) fn is_saving(&self) -> bool {
-        self.saving.is_some()
     }
 
     /// Start an asynchronous save: absorb any external change first (so the
@@ -404,14 +499,16 @@ impl SectionStore {
         &mut self,
         path: &str,
     ) -> Result<(bool, Option<String>), Box<dyn Error>> {
-        if self.saving.is_some() {
+        if self.is_saving() {
             return Ok((false, None));
         }
         let externally_changed = self.absorb_external(path)?;
         self.list.trim_trailing_blank_items();
         let text = self.list.serialized_text();
-        self.saving = Some(text.clone());
-        self.dirty = false;
+        self.sync = SyncState::Saving {
+            dirty: false,
+            pending: text.clone(),
+        };
         Ok((externally_changed, Some(text)))
     }
 
@@ -419,17 +516,20 @@ impl SectionStore {
     /// the new synced base; on failure the section is re-flagged dirty so the
     /// next debounce retries.
     pub(super) fn complete_save(&mut self, result: Result<Fingerprint, String>) {
-        let Some(text) = self.saving.take() else {
+        let SyncState::Saving { dirty, pending } = &mut self.sync else {
             return;
         };
+        let dirty = *dirty;
+        let pending = std::mem::take(pending);
         match result {
             Ok(written) => {
-                self.base = text;
+                self.base = pending;
                 self.fingerprint = Some(written);
+                self.sync = SyncState::Idle { dirty };
             }
             Err(err) => {
                 eprintln!("toodle background save failed: {err}");
-                self.dirty = true;
+                self.sync = SyncState::Idle { dirty: true };
             }
         }
     }
@@ -440,7 +540,7 @@ impl SectionStore {
         self.list = list;
         self.base = base;
         self.fingerprint = Some(fingerprint);
-        self.dirty = false;
+        self.sync = SyncState::Idle { dirty: false };
     }
 }
 
@@ -527,7 +627,7 @@ impl DoneCounts {
     /// changed. Returns whether any count changed.
     pub(super) fn refresh(&mut self) -> Result<bool, Box<dyn Error>> {
         let mut changed = false;
-        for (section, state) in self.sections.iter_mut().enumerate() {
+        for (section, state) in Priority::ALL.into_iter().zip(self.sections.iter_mut()) {
             let path = daily_done_path(section);
             let fingerprint = fingerprint(&path)?;
             if path == state.path && fingerprint == state.fingerprint {
@@ -550,8 +650,8 @@ impl DoneCounts {
         Ok(changed)
     }
 
-    pub(super) fn count(&self, section: usize) -> usize {
-        self.sections[section].count
+    pub(super) fn count(&self, section: Priority) -> usize {
+        self.sections[section.index()].count
     }
 }
 
@@ -625,14 +725,14 @@ impl AtomicWrite {
 /// Background writer running section saves (write, fsync, rename, directory
 /// fsync) off the UI thread; done inline from the input path, the fsyncs
 /// caused visible frame hitches on slow disks. Jobs and results both carry
-/// the section index; the single worker thread keeps saves ordered.
+/// the section, the single worker thread keeps saves ordered.
 pub(super) struct SaveWorker {
     jobs: mpsc::Sender<SaveJob>,
-    results: mpsc::Receiver<(usize, Result<Fingerprint, String>)>,
+    results: mpsc::Receiver<(Priority, Result<Fingerprint, String>)>,
 }
 
 struct SaveJob {
-    section: usize,
+    section: Priority,
     path: String,
     text: String,
 }
@@ -655,7 +755,7 @@ impl SaveWorker {
         Self { jobs, results }
     }
 
-    pub(super) fn submit(&self, section: usize, path: String, text: String) {
+    pub(super) fn submit(&self, section: Priority, path: String, text: String) {
         let _ = self.jobs.send(SaveJob {
             section,
             path,
@@ -663,13 +763,13 @@ impl SaveWorker {
         });
     }
 
-    pub(super) fn try_result(&self) -> Option<(usize, Result<Fingerprint, String>)> {
+    pub(super) fn try_result(&self) -> Option<(Priority, Result<Fingerprint, String>)> {
         self.results.try_recv().ok()
     }
 
     /// Blocking receive, for the flush paths that must not proceed while a
     /// save is still in flight.
-    pub(super) fn wait_result(&self) -> Option<(usize, Result<Fingerprint, String>)> {
+    pub(super) fn wait_result(&self) -> Option<(Priority, Result<Fingerprint, String>)> {
         self.results.recv().ok()
     }
 }
@@ -682,20 +782,27 @@ impl Drop for AtomicWrite {
     }
 }
 
+/// One staged write recorded in the archive transaction marker, so a crash
+/// mid-archive can be finished (or safely no-op'd) on the next launch by
+/// `recover_archive_transaction`.
+#[derive(Serialize, Deserialize)]
+struct ArchiveWriteRecord {
+    path: String,
+    temp_path: String,
+}
+
 pub(super) fn write_archive_transaction_marker(
     marker_path: &str,
     staged_writes: &[&AtomicWrite],
 ) -> Result<(), Box<dyn Error>> {
-    let writes = staged_writes
+    let records: Vec<ArchiveWriteRecord> = staged_writes
         .iter()
-        .map(|write| {
-            serde_json::json!({
-                "path": write.path.as_str(),
-                "temp_path": write.temp_path.as_str(),
-            })
+        .map(|write| ArchiveWriteRecord {
+            path: write.path.clone(),
+            temp_path: write.temp_path.clone(),
         })
-        .collect::<Vec<_>>();
-    let marker = serde_json::to_vec(&writes)?;
+        .collect();
+    let marker = serde_json::to_vec(&records)?;
     let transaction_marker = AtomicWrite::stage(marker_path, marker)?;
     transaction_marker.commit()?;
     Ok(())
@@ -707,13 +814,9 @@ pub(super) fn recover_archive_transaction(marker_path: &str) -> Result<(), Box<d
     }
 
     let marker = fs::read_to_string(marker_path)?;
-    let writes = serde_json::from_str::<serde_json::Value>(&marker)?;
-    let Some(records) = writes.as_array() else {
-        return Err("archive transaction marker is not a JSON array".into());
-    };
+    let records = serde_json::from_str::<Vec<ArchiveWriteRecord>>(&marker)?;
 
-    for record in records.iter().map(ArchiveWriteRecord::from_json) {
-        let record = record?;
+    for record in records {
         // Probe by renaming rather than checking existence first: a missing
         // temp file (NotFound) just means that write was already committed,
         // and an exists-then-rename pair could race a concurrent instance
@@ -729,28 +832,6 @@ pub(super) fn recover_archive_transaction(marker_path: &str) -> Result<(), Box<d
     Ok(())
 }
 
-struct ArchiveWriteRecord {
-    path: String,
-    temp_path: String,
-}
-
-impl ArchiveWriteRecord {
-    fn from_json(value: &serde_json::Value) -> Result<Self, Box<dyn Error>> {
-        Ok(Self {
-            path: value
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("archive transaction marker is missing path")?
-                .to_string(),
-            temp_path: value
-                .get("temp_path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("archive transaction marker is missing temp_path")?
-                .to_string(),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,9 +841,9 @@ mod tests {
     fn todo_item_round_trips_checked_items() {
         let item = TodoItem::parse("- [x] ship the tiny desktop");
 
-        assert!(item.checked);
-        assert!(item.is_checkbox);
-        assert_eq!(item.text, "ship the tiny desktop");
+        assert!(item.checked());
+        assert!(item.is_checkbox());
+        assert_eq!(item.text(), "ship the tiny desktop");
         assert_eq!(item.serialize(), "- [x] ship the tiny desktop");
     }
 
@@ -770,9 +851,9 @@ mod tests {
     fn todo_item_round_trips_unchecked_checkbox() {
         let item = TodoItem::parse("- [ ] water the plants");
 
-        assert!(!item.checked);
-        assert!(item.is_checkbox);
-        assert_eq!(item.text, "water the plants");
+        assert!(!item.checked());
+        assert!(item.is_checkbox());
+        assert_eq!(item.text(), "water the plants");
         assert_eq!(item.serialize(), "- [ ] water the plants");
     }
 
@@ -780,8 +861,8 @@ mod tests {
     fn todo_item_keeps_plain_lines_verbatim() {
         let item = TodoItem::parse("## groceries");
 
-        assert!(!item.is_checkbox);
-        assert!(!item.checked);
+        assert!(!item.is_checkbox());
+        assert!(!item.checked());
         assert!(!item.renders_checkbox(false));
         assert!(!item.renders_checkbox(true));
         assert_eq!(item.serialize(), "## groceries");
@@ -804,7 +885,7 @@ mod tests {
     fn todo_list_adds_blank_page_after_full_page() {
         let mut list = TodoList { items: Vec::new() };
         for line in 0..LINE_COUNT {
-            list.item_mut(0, line).text = format!("todo {line}");
+            list.item_mut(0, line).set_text(format!("todo {line}"));
         }
 
         assert_eq!(list.page_count(), 2);
@@ -818,8 +899,8 @@ mod tests {
         let mut list = TodoList {
             items: vec![TodoItem::default(); LINE_COUNT],
         };
-        list.items[0].text = "first".to_string();
-        list.items[LINE_COUNT - 1].text = "last".to_string();
+        list.items[0].set_text("first".to_string());
+        list.items[LINE_COUNT - 1].set_text("last".to_string());
 
         assert_eq!(list.page_count(), 1);
     }
@@ -827,7 +908,7 @@ mod tests {
     #[test]
     fn todo_list_uses_one_file_for_overflow_pages() {
         let mut list = TodoList { items: Vec::new() };
-        list.item_mut(1, 0).text = "overflow".to_string();
+        list.item_mut(1, 0).set_text("overflow".to_string());
 
         assert_eq!(list.serialized_text().lines().count(), LINE_COUNT + 1);
         assert!(list.serialized_text().ends_with("overflow\n"));
@@ -836,14 +917,14 @@ mod tests {
     #[test]
     fn todo_list_delete_item_shifts_later_items_up() {
         let mut list = TodoList { items: Vec::new() };
-        list.item_mut(0, 0).text = "first".to_string();
-        list.item_mut(0, 1).text = String::new();
-        list.item_mut(0, 2).text = "third".to_string();
+        list.item_mut(0, 0).set_text("first".to_string());
+        list.item_mut(0, 1).set_text(String::new());
+        list.item_mut(0, 2).set_text("third".to_string());
 
         assert!(list.delete_item(0, 1));
 
-        assert_eq!(list.item(0, 0).text, "first");
-        assert_eq!(list.item(0, 1).text, "third");
+        assert_eq!(list.item(0, 0).text(), "first");
+        assert_eq!(list.item(0, 1).text(), "third");
     }
 
     fn lines(text: &[&str]) -> Vec<String> {
@@ -930,7 +1011,7 @@ mod tests {
 
         fs::write(path, "- [ ] new\n").unwrap();
         assert!(store.absorb_external(path).unwrap());
-        assert_eq!(store.list().items[0].text, "new");
+        assert_eq!(store.list().items[0].text(), "new");
         assert!(!store.is_dirty());
 
         // Nothing further changed: no-op.
@@ -947,7 +1028,7 @@ mod tests {
         let path = path.to_str().unwrap();
 
         let mut store = SectionStore::load(path).unwrap();
-        store.list_mut().item_mut(0, 0).text = "mine".to_string();
+        store.list_mut().item_mut(0, 0).set_text("mine".to_string());
         assert!(!store.save(path).unwrap());
 
         assert!(!store.absorb_external(path).unwrap());
@@ -966,7 +1047,10 @@ mod tests {
 
         fs::write(path, "- [ ] shared\n").unwrap();
         let mut store = SectionStore::load(path).unwrap();
-        store.list_mut().item_mut(0, 1).text = "typed".to_string();
+        store
+            .list_mut()
+            .item_mut(0, 1)
+            .set_text("typed".to_string());
         store.mark_dirty();
 
         fs::write(path, "- [ ] shared\n- [ ] synced\n").unwrap();
@@ -992,7 +1076,7 @@ mod tests {
 
         fs::write(path, "- [ ] a\n").unwrap();
         let mut store = SectionStore::load(path).unwrap();
-        store.list_mut().item_mut(0, 0).checked = true;
+        store.list_mut().item_mut(0, 0).toggle_checked();
         store.mark_dirty();
 
         // An external writer appends before our save lands.
@@ -1026,9 +1110,8 @@ mod tests {
         write_archive_transaction_marker(marker_path.to_str().unwrap(), &staged_refs).unwrap();
 
         let marker = fs::read_to_string(&marker_path).unwrap();
-        let writes = serde_json::from_str::<serde_json::Value>(&marker).unwrap();
-        let writes = writes.as_array().unwrap();
-        let done_temp_path = writes[0].get("temp_path").unwrap().as_str().unwrap();
+        let records = serde_json::from_str::<Vec<ArchiveWriteRecord>>(&marker).unwrap();
+        let done_temp_path = &records[0].temp_path;
         fs::rename(done_temp_path, &done_path).unwrap();
 
         recover_archive_transaction(marker_path.to_str().unwrap()).unwrap();
