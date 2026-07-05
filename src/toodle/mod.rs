@@ -693,9 +693,8 @@ impl Toodle {
     /// `Focus`'s doc comment for why that pairing matters.
     fn focus_line(&mut self, line: usize) {
         let PageRef { section, page } = self.current_page_ref();
-        let text = self.list(section).item(page, line).text().to_string();
         let mut field = TextField::new(usize::MAX, 2);
-        field.set_text(&text);
+        field.set_text(self.list(section).item(page, line).text());
         self.focus = Focus::Line { line, field };
     }
 
@@ -877,7 +876,7 @@ impl Toodle {
         self.keep_section_page_visible(current_page);
 
         if let Some(line) = self.focus.line() {
-            let text = self.focus.text().to_owned();
+            let text = self.focus.text();
             let index = if text.is_empty() {
                 // A blank focused line has no identity to follow; any blank
                 // spot is as good as another, so stay put.
@@ -934,7 +933,7 @@ impl Toodle {
 
         for (section, list) in Priority::ALL.into_iter().zip(staged_lists.iter_mut()) {
             let mut remaining = Vec::new();
-            for item in list.items.iter().cloned() {
+            for item in std::mem::take(&mut list.items) {
                 if item.checked() {
                     if !item.text().trim().is_empty() {
                         archived[section.index()].push(item.text().to_string());
@@ -945,8 +944,8 @@ impl Toodle {
                 }
             }
 
+            list.items = remaining;
             if changed_sections[section.index()] {
-                list.items = remaining;
                 list.trim_trailing_blank_items();
             }
         }
@@ -1027,18 +1026,14 @@ impl Toodle {
         // except (at most) the section that was in flight when the error
         // hit, and the marker above lets a subsequent restart finish that
         // section's rename if it had made it to disk.
-        for section in Priority::ALL {
+        for (section, list) in Priority::ALL.into_iter().zip(staged_lists) {
             let (done_write, section_write) = &mut staged[section.index()];
             if let Some(write) = done_write.take() {
                 write.commit()?;
             }
             if let Some((text, write)) = section_write.take() {
                 let written = write.commit()?;
-                self.sections[section.index()].adopt(
-                    staged_lists[section.index()].clone(),
-                    text,
-                    written,
-                );
+                self.sections[section.index()].adopt(list, text, written);
             }
         }
         fs::remove_file(&marker_path)?;

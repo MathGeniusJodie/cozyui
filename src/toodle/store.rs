@@ -339,17 +339,12 @@ impl TodoList {
     }
 
     pub(super) fn serialized_text(&self) -> String {
-        if self.items.is_empty() {
-            return String::new();
+        let mut text = String::new();
+        for item in &self.items {
+            text.push_str(&item.serialize());
+            text.push('\n');
         }
-
-        let text = self
-            .items
-            .iter()
-            .map(TodoItem::serialize)
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("{text}\n")
+        text
     }
 
     /// The items as normalized serialized lines, the form all merging works in.

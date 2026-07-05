@@ -183,14 +183,15 @@ pub(super) fn request_history(
     current_name: &str,
     user_name: &str,
 ) -> Vec<Message> {
-    let recent: Vec<&Message> = messages
+    let mut recent: Vec<&Message> = messages
         .iter()
+        .rev()
         .filter(|message| message.kind() == MessageKind::Normal)
+        .take(HISTORY_LIMIT)
         .collect();
-    let start = recent.len().saturating_sub(HISTORY_LIMIT);
-    recent[start..]
-        .iter()
-        .copied()
+    recent.reverse();
+    recent
+        .into_iter()
         .map(|message| match message {
             Message::User { text } => Message::user(format!("{user_name}: {text}")),
             Message::Assistant {

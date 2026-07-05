@@ -635,13 +635,11 @@ fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Pal
         return;
     }
 
-    let source_x: Vec<usize> = (x0..x1)
-        .map(|x| layout::stretched_desk_source_x(x, fb.width, desk.width))
-        .collect();
     for y in y0..y1 {
         let source_y = y - desk_y;
         for x in x0..x1 {
-            let paint = desk_background_paint(desk.at(source_x[x - x0], source_y));
+            let source_x = layout::stretched_desk_source_x(x, fb.width, desk.width);
+            let paint = desk_background_paint(desk.at(source_x, source_y));
             if let Some(color) = palette.resolve_paint_index(paint, x, y) {
                 fb.set_pixel(x, y, color);
             }

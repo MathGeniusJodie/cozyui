@@ -380,15 +380,15 @@ impl Fwends {
             chat::fwend_system_prompt(&self.system_prompt, model.name, chat::user_name());
         let history = chat::request_history(&self.messages, model.name, chat::user_name());
 
-        self.messages.push(chat::Message::user(text.clone()));
+        let prefixed_text = format!("{}: {text}", chat::user_name());
+        self.messages.push(chat::Message::user(text));
 
-        let text = format!("{}: {text}", chat::user_name());
         self.state = chat::ChatState::Awaiting(chat::PendingReply::spawn(
             model,
             thinking,
             system_prompt,
             history,
-            text,
+            prefixed_text,
         ));
         self.messages_changed();
         // Sending your own message always jumps to it.
@@ -489,18 +489,6 @@ impl Fwends {
             MessageSkin::Sticky => &self.user_sticky,
         };
 
-        let source_x: Vec<usize> = (0..w)
-            .map(|dx| {
-                pixel_graphics::stretch_source_coord(
-                    dx,
-                    w,
-                    image.width,
-                    style.left_cap,
-                    style.right_cap,
-                )
-            })
-            .collect();
-
         for dy in 0..h {
             let py = y + dy as isize;
             if py < clip_top as isize || py >= clip_bottom as isize {
@@ -513,7 +501,14 @@ impl Fwends {
                 style.top_cap,
                 style.bottom_cap,
             );
-            for (dx, &sx) in source_x.iter().enumerate() {
+            for dx in 0..w {
+                let sx = pixel_graphics::stretch_source_coord(
+                    dx,
+                    w,
+                    image.width,
+                    style.left_cap,
+                    style.right_cap,
+                );
                 let px = x + dx;
                 let Some(color) = palette.resolve_index(image.at(sx, sy), px, py as usize) else {
                     continue;

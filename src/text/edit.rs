@@ -273,9 +273,8 @@ impl TextEdit {
         if ch == '\n' || ch == '\r' || ch.is_control() {
             return false;
         }
-        let mut insert = String::new();
-        insert.push(ch);
-        self.insert_text(text, &insert, can_replace)
+        let mut buf = [0u8; 4];
+        self.insert_text(text, ch.encode_utf8(&mut buf), can_replace)
     }
 
     fn insert_text<F>(&mut self, text: &mut String, insert: &str, can_replace: &mut F) -> bool

@@ -326,10 +326,10 @@ impl Wavey {
 
     #[allow(clippy::unnecessary_wraps)]
     fn title_copy_text(&self) -> Option<String> {
-        let title = self.playback.title().to_string();
+        let title = self.playback.title();
         match self.playback.url() {
             Some(url) => Some(format!("{title}\n{url}")),
-            None => Some(title),
+            None => Some(title.to_string()),
         }
     }
 
