@@ -558,24 +558,52 @@ impl DoneCounts {
 pub(super) struct AtomicWrite {
     path: String,
     temp_path: String,
+    /// Whether `Drop` should clean up `temp_path`. Armed by default so a
+    /// one-shot stage-then-commit that fails partway (write, sync, or rename)
+    /// leaves nothing behind. `disarm` turns this off once the temp file's
+    /// path has been recorded in an on-disk transaction marker: from that
+    /// point on, `recover_archive_transaction` is the only thing allowed to
+    /// decide the file is gone, since it treats a missing temp file as proof
+    /// the rename already happened. If `Drop` deleted it first (e.g. this
+    /// write was abandoned because a sibling write in the same batch failed),
+    /// recovery would mistake "never committed" for "already committed" and
+    /// silently skip redoing it.
+    armed: bool,
 }
 
 impl AtomicWrite {
     pub(super) fn stage(path: &str, contents: impl AsRef<[u8]>) -> Result<Self, Box<dyn Error>> {
         let temp_path = crate::util::unique_temp_path(path);
-        {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&temp_path)?;
-            file.write_all(contents.as_ref())?;
-            file.sync_all()?;
-        }
-        Ok(Self {
+        // Constructed before the file is written (rather than after), so a
+        // `write_all`/`sync_all` failure below still runs `Drop` and cleans
+        // up the temp file it just created instead of leaking it.
+        let write = Self {
             path: path.to_string(),
             temp_path,
-        })
+            armed: true,
+        };
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&write.temp_path)?;
+        file.write_all(contents.as_ref())?;
+        file.sync_all()?;
+        // The temp file's directory entry isn't durable until its directory
+        // is fsynced too: without this, a transaction marker recorded right
+        // after `stage` (which only fsyncs its own directory, see
+        // `write_archive_transaction_marker`) could survive a crash while
+        // this temp file's entry doesn't, leaving recovery to find it
+        // missing and wrongly conclude the write was already committed.
+        sync_parent_dir(&write.temp_path)?;
+        Ok(write)
+    }
+
+    /// Hands cleanup of the temp file off to the transaction-marker recovery
+    /// protocol: see the `armed` field doc for why `Drop` must stay hands-off
+    /// from this point on.
+    pub(super) fn disarm(&mut self) {
+        self.armed = false;
     }
 
     /// Rename the temp file into place and return the resulting file's
@@ -660,7 +688,9 @@ impl SaveWorker {
 
 impl Drop for AtomicWrite {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.temp_path);
+        if self.armed {
+            let _ = fs::remove_file(&self.temp_path);
+        }
     }
 }
 

@@ -900,9 +900,10 @@ impl Terminal {
     }
 
     fn mouse_release(&self, x: i16, y: i16) {
-        let Some(point) = screen_point(x, y, &self.window_size) else {
-            return;
-        };
+        // Clamped, not rejected: the caller only forwards a release here to
+        // balance a mouse-down it already forwarded, so this must always
+        // send the matching mouse-up even if the drag ended outside the grid.
+        let point = clamped_screen_point(x, y, &self.window_size);
 
         if self.term.lock().mode().intersects(TermMode::MOUSE_MODE) {
             self.send_mouse(point, 0, false);
@@ -1367,8 +1368,8 @@ fn button_at(x: i16, y: i16) -> Option<usize> {
     let x = x.max(0) as usize;
     let y = y.max(0) as usize;
     BUTTON_TARGETS.iter().position(|button| {
-        let button_x = (button.x as isize - ART_CROP_X as isize + BUTTON_HIT_OFFSET_X) as usize;
-        let button_y = button.y - ART_CROP_Y;
+        let button_x = art_x(button.x).saturating_add_signed(BUTTON_HIT_OFFSET_X);
+        let button_y = art_y(button.y);
         x >= button_x && x < button_x + button.w && y >= button_y && y < button_y + button.h
     })
 }
@@ -1395,11 +1396,35 @@ fn screen_point(x: i16, y: i16, size: &WindowSize) -> Option<Point> {
         return None;
     }
 
+    Some(cell_at(x, y, size))
+}
+
+/// Like `screen_point`, but clamps out-of-grid coordinates to the nearest
+/// cell instead of rejecting them. Used for mouse-release: a drag can start
+/// inside the grid (forwarding a mouse-down escape) and end past its edge,
+/// and dropping that release (as `screen_point` would) leaves the remote pty
+/// app thinking the button is still held, since the matching mouse-up escape
+/// never arrives.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn clamped_screen_point(x: i16, y: i16, size: &WindowSize) -> Point {
+    let screen_x = art_x(SCREEN_SOURCE_X);
+    let screen_y = art_y(SCREEN_SOURCE_Y);
+    let x = (x.max(0) as usize).clamp(screen_x, screen_x + SCREEN_W - 1);
+    let y = (y.max(0) as usize).clamp(screen_y, screen_y + SCREEN_H - 1);
+    cell_at(x, y, size)
+}
+
+/// Column/line math shared by `screen_point` and `clamped_screen_point`;
+/// `x`/`y` must already be within the screen rect.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn cell_at(x: usize, y: usize, size: &WindowSize) -> Point {
+    let screen_x = art_x(SCREEN_SOURCE_X);
+    let screen_y = art_y(SCREEN_SOURCE_Y);
     let column =
         ((x - screen_x) / size.cell_width as usize).min((size.num_cols as usize).saturating_sub(1));
     let line = ((y - screen_y) / size.cell_height as usize)
         .min((size.num_lines as usize).saturating_sub(1));
-    Some(Point::new(Line(line as i32), Column(column)))
+    Point::new(Line(line as i32), Column(column))
 }
 
 fn is_copy_shortcut(input: &KeyInput) -> bool {
@@ -1407,10 +1432,13 @@ fn is_copy_shortcut(input: &KeyInput) -> bool {
 }
 
 fn key_bytes(input: &KeyInput) -> Option<String> {
-    if input.ctrl()
-        && let Some(byte) = control_byte(input)
-    {
-        return String::from_utf8(vec![byte]).ok();
+    if input.ctrl() {
+        if let Some(seq) = modified_nav_sequence(input) {
+            return Some(seq);
+        }
+        if let Some(byte) = control_byte(input) {
+            return String::from_utf8(vec![byte]).ok();
+        }
     }
 
     let text = match input.sym_raw() {
@@ -1433,6 +1461,28 @@ fn key_bytes(input: &KeyInput) -> Option<String> {
         None
     } else {
         Some(text.to_string())
+    }
+}
+
+/// xterm-style modified CSI sequence for Ctrl (optionally with Shift) held
+/// with a navigation key, e.g. Ctrl+Left -> `"\x1b[1;5D"` (readline
+/// word-jump, vim Ctrl+Home, etc.). Without this, `control_byte` doesn't
+/// cover these keysyms, so the caller would fall through to the plain,
+/// unmodified sequence and silently drop the Ctrl entirely. The modifier
+/// parameter follows the widely-honored `1 + shift(1) + ctrl(4)` xterm
+/// encoding; this codebase doesn't track Alt, so that term is omitted.
+fn modified_nav_sequence(input: &KeyInput) -> Option<String> {
+    let modifier = 1 + if input.shift() { 1 } else { 0 } + 4;
+    match input.sym_raw() {
+        keysyms::KEY_Up | keysyms::KEY_KP_Up => Some(format!("\x1b[1;{modifier}A")),
+        keysyms::KEY_Down | keysyms::KEY_KP_Down => Some(format!("\x1b[1;{modifier}B")),
+        keysyms::KEY_Left | keysyms::KEY_KP_Left => Some(format!("\x1b[1;{modifier}D")),
+        keysyms::KEY_Right | keysyms::KEY_KP_Right => Some(format!("\x1b[1;{modifier}C")),
+        keysyms::KEY_Home | keysyms::KEY_KP_Home => Some(format!("\x1b[1;{modifier}H")),
+        keysyms::KEY_End | keysyms::KEY_KP_End => Some(format!("\x1b[1;{modifier}F")),
+        keysyms::KEY_Prior | keysyms::KEY_KP_Prior => Some(format!("\x1b[5;{modifier}~")),
+        keysyms::KEY_Next | keysyms::KEY_KP_Next => Some(format!("\x1b[6;{modifier}~")),
+        _ => None,
     }
 }
 
@@ -1459,7 +1509,9 @@ fn control_byte(input: &KeyInput) -> Option<u8> {
 }
 
 const fn key_scroll(input: &KeyInput) -> Option<Scroll> {
-    if !input.shift() {
+    // Ctrl+Shift+Home/End/Prior/Next is a modified nav sequence meant for the
+    // pty program (see `modified_nav_sequence`), not local scrollback.
+    if !input.shift() || input.ctrl() {
         return None;
     }
 

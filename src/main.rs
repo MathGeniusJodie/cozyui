@@ -4,6 +4,8 @@
 #![allow(clippy::struct_field_names)]
 
 use std::error::Error;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use x11rb::protocol::Event as XEvent;
@@ -110,7 +112,7 @@ const SHOW_FWENDS: bool = true;
 /// fully click-through.
 const TRANSPARENT_BACKGROUND: bool = true;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum WidgetId {
     Puter,
     Toodle,
@@ -316,11 +318,6 @@ impl App {
         self.min_width = width;
         self.min_height = height;
         true
-    }
-
-    #[allow(clippy::unused_self)]
-    const fn fill_color(&self, _palette: &Palette) -> Index {
-        app_color::BACKGROUND
     }
 
     fn render_background(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -598,6 +595,7 @@ impl App {
         }
         self.widgets.wavey.shutdown();
         self.widgets.puter.shutdown_terminal();
+        self.widgets.fwends.shutdown();
     }
 }
 
@@ -800,13 +798,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::load(&palette)?;
     let width = app.width();
     let height = app.height();
-    let mut fb = Framebuffer::new(width, height, app.fill_color(&palette));
+    let mut fb = Framebuffer::new(width, height, app_color::BACKGROUND);
     let mut xwin = XWindow::open(width, height, TRANSPARENT_BACKGROUND)?;
     xwin.set_palette(&palette);
     xwin.load_cursors(&palette)?;
     app.start(u64::from(xwin.window))?;
     app.render(&mut fb, &palette);
     xwin.draw(&fb)?;
+
+    // Logout/session-end sends SIGTERM, and Ctrl-C in a launching terminal
+    // sends SIGINT; without a handler either skips `app.shutdown()` entirely,
+    // dropping toodle's still-debounced saves. The flag is polled once per
+    // loop iteration below; `wait_for_event`'s underlying poll(2) already
+    // treats EINTR as "return early" (see `XWindow::wait_for_event`), so a
+    // signal arriving mid-wait wakes the loop instead of sleeping out the
+    // timeout.
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown_requested))?;
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown_requested))?;
 
     let mut running = true;
     while running {
@@ -824,7 +833,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         for widget in WidgetId::visible() {
-            if app.update_widget(widget)? {
+            if log_widget_err(|| format!("{widget:?} update"), app.update_widget(widget)) {
                 app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
                 drew_frame = true;
             }
@@ -864,7 +873,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     } else {
                         None
                     };
-                    if let Some(copy_text) = app.handle_key_press(&input, paste_text.as_deref())? {
+                    if let Some(copy_text) = log_widget_err(
+                        || "key press".to_string(),
+                        app.handle_key_press(&input, paste_text.as_deref()),
+                    ) {
                         xwin.set_clipboard_text(copy_text)?;
                     }
                     needs_input_redraw = true;
@@ -886,9 +898,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     detail if detail == u8::from(ButtonIndex::M1) => {
-                        if let Some(copy_text) =
-                            app.click(event.event_x, event.event_y, event.state.into())?
-                        {
+                        if let Some(copy_text) = log_widget_err(
+                            || "click".to_string(),
+                            app.click(event.event_x, event.event_y, event.state.into()),
+                        ) {
                             xwin.set_clipboard_text(copy_text)?;
                         }
                         needs_input_redraw = true;
@@ -916,7 +929,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 XEvent::ConfigureNotify(event) => {
                     if app.set_min_size(event.width as usize, event.height as usize) {
                         app.sync_dynamic_layout(&palette);
-                        fb = Framebuffer::new(app.width(), app.height(), app.fill_color(&palette));
+                        fb = Framebuffer::new(app.width(), app.height(), app_color::BACKGROUND);
                         xwin.resize_backing(fb.width, fb.height)?;
                         app.render(&mut fb, &palette);
                         xwin.draw(&fb)?;
@@ -927,7 +940,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 _ => {}
             }
         }
-        if app.quit_requested {
+        if app.quit_requested || shutdown_requested.load(Ordering::Relaxed) {
             running = false;
         }
         if needs_input_redraw {
@@ -949,6 +962,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     app.shutdown();
     Ok(())
+}
+
+/// Logs a widget-logic failure (e.g. a disk error mid-save) and degrades to
+/// the default value instead of propagating it out of `main` and taking the
+/// whole desktop down over one widget's transient error — mirrors the
+/// toodle-maintain handling above.
+fn log_widget_err<T: Default>(op: impl FnOnce() -> String, result: Result<T, Box<dyn Error>>) -> T {
+    result.unwrap_or_else(|err| {
+        eprintln!("{} failed: {err}", op());
+        T::default()
+    })
 }
 
 /// After a key or click: if the layout changed, resize and redraw everything;
@@ -984,7 +1008,7 @@ fn sync_window_layout(
         return Ok(false);
     }
 
-    *fb = Framebuffer::new(app.width(), app.height(), app.fill_color(palette));
+    *fb = Framebuffer::new(app.width(), app.height(), app_color::BACKGROUND);
     xwin.resize(fb.width, fb.height)?;
     Ok(true)
 }

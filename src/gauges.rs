@@ -47,8 +47,8 @@ pub struct Gauges {
     cpu_prev: (u64, u64),
     view: GaugeView,
     last_check: Instant,
-    cpu_read_failing: bool,
-    mem_read_failing: bool,
+    cpu_read_failing: crate::util::FailureLog,
+    mem_read_failing: crate::util::FailureLog,
 }
 
 impl Gauges {
@@ -66,8 +66,8 @@ impl Gauges {
             cpu_prev,
             view: GaugeView { cpu: 0, mem, swap },
             last_check: Instant::now(),
-            cpu_read_failing: false,
-            mem_read_failing: false,
+            cpu_read_failing: crate::util::FailureLog::new(),
+            mem_read_failing: crate::util::FailureLog::new(),
         })
     }
 
@@ -95,37 +95,30 @@ impl Gauges {
 
         let cpu = match read_cpu_times() {
             Some(sample) => {
-                if self.cpu_read_failing {
-                    eprintln!("gauges: /proc/stat reads recovered");
-                    self.cpu_read_failing = false;
-                }
+                self.cpu_read_failing
+                    .record_ok(|| "gauges: /proc/stat reads recovered".to_string());
                 let pct = cpu_percent(self.cpu_prev, sample).unwrap_or(self.view.cpu);
                 self.cpu_prev = sample;
                 pct
             }
             None => {
-                if !self.cpu_read_failing {
-                    eprintln!("gauges: /proc/stat reads failing, keeping last known CPU reading");
-                    self.cpu_read_failing = true;
-                }
+                self.cpu_read_failing.record_err(|| {
+                    "gauges: /proc/stat reads failing, keeping last known CPU reading".to_string()
+                });
                 self.view.cpu
             }
         };
         let (mem, swap) = match read_mem_percents() {
             Some(pair) => {
-                if self.mem_read_failing {
-                    eprintln!("gauges: /proc/meminfo reads recovered");
-                    self.mem_read_failing = false;
-                }
+                self.mem_read_failing
+                    .record_ok(|| "gauges: /proc/meminfo reads recovered".to_string());
                 pair
             }
             None => {
-                if !self.mem_read_failing {
-                    eprintln!(
-                        "gauges: /proc/meminfo reads failing, keeping last known mem/swap reading"
-                    );
-                    self.mem_read_failing = true;
-                }
+                self.mem_read_failing.record_err(|| {
+                    "gauges: /proc/meminfo reads failing, keeping last known mem/swap reading"
+                        .to_string()
+                });
                 (self.view.mem, self.view.swap)
             }
         };

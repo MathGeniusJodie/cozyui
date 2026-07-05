@@ -90,7 +90,6 @@ struct DateParts {
     year_num: i32,
     month_index: usize,
     day_num: i32,
-    weekday_index: i32,
 }
 
 pub struct Day {
@@ -414,7 +413,6 @@ fn current_date_parts() -> Option<DateParts> {
         year_num: year,
         month_index,
         day_num: tm.tm_mday.clamp(1, 31),
-        weekday_index: tm.tm_wday.clamp(0, 6),
     })
 }
 
@@ -430,7 +428,6 @@ fn placeholder_date_parts() -> DateParts {
         year_num: 0,
         month_index: 0,
         day_num: 1,
-        weekday_index: 0,
     }
 }
 

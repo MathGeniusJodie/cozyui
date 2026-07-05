@@ -72,7 +72,7 @@ pub struct Stats {
     /// Count cache, `files[day][priority]`, keyed by path + stat identity.
     files: [[DayFile; PRIORITY_COUNT]; DAYS],
     last_check: Instant,
-    logged_error: bool,
+    week_counts_read_failing: crate::util::FailureLog,
 }
 
 impl Stats {
@@ -94,7 +94,7 @@ impl Stats {
                 })
             }),
             last_check: Instant::now(),
-            logged_error: false,
+            week_counts_read_failing: crate::util::FailureLog::new(),
         };
         stats.refresh_week_counts()?;
         Ok(stats)
@@ -124,14 +124,13 @@ impl Stats {
         self.last_check = now;
         match self.refresh_week_counts() {
             Ok(changed) => {
-                self.logged_error = false;
+                self.week_counts_read_failing
+                    .record_ok(|| "stats: week counts reads recovered".to_string());
                 changed
             }
             Err(err) => {
-                if !self.logged_error {
-                    eprintln!("stats: failed to read week counts: {err}");
-                    self.logged_error = true;
-                }
+                self.week_counts_read_failing
+                    .record_err(|| format!("stats: failed to read week counts: {err}"));
                 false
             }
         }
@@ -254,19 +253,16 @@ impl Stats {
 
 /// Set while metadata reads are failing, so the error is logged once per
 /// failure episode (with a recovery note) instead of once per file per
-/// refresh tick — matching fizzle's and gauges' log-once pattern.
-static METADATA_READ_FAILING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// refresh tick. A free function (not a `Stats` method), so this needs a
+/// `static` rather than a struct field like the other widgets' equivalents.
+static METADATA_READ_FAILING: crate::util::FailureLog = crate::util::FailureLog::new();
 
 /// The file's current stat identity, or `None` if it does not exist or its
 /// metadata could not be read.
 fn file_id(path: &str) -> Option<FileId> {
-    use std::sync::atomic::Ordering;
     match fs::metadata(path) {
         Ok(meta) => {
-            if METADATA_READ_FAILING.swap(false, Ordering::Relaxed) {
-                eprintln!("stats: metadata reads recovered");
-            }
+            METADATA_READ_FAILING.record_ok(|| "stats: metadata reads recovered".to_string());
             Some(FileId {
                 ino: meta.ino(),
                 size: meta.size(),
@@ -276,9 +272,9 @@ fn file_id(path: &str) -> Option<FileId> {
         }
         Err(err) if err.kind() == ErrorKind::NotFound => None,
         Err(err) => {
-            if !METADATA_READ_FAILING.swap(true, Ordering::Relaxed) {
-                eprintln!("stats: failed to read metadata for {path}: {err} (suppressing repeats)");
-            }
+            METADATA_READ_FAILING.record_err(|| {
+                format!("stats: failed to read metadata for {path}: {err} (suppressing repeats)")
+            });
             None
         }
     }

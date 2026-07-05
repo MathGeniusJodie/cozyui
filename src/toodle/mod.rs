@@ -289,7 +289,7 @@ impl Toodle {
                 self.draw_checkbox_box(fb, palette, line);
             }
             if todo.checked {
-                self.draw_check(fb, palette, section, line, 0);
+                self.draw_check(fb, palette, section, line);
             }
 
             let layout = Self::line_layout(&self.font, line);
@@ -530,12 +530,18 @@ impl Toodle {
             EditKey::Escape => {
                 self.focused_line = None;
             }
-            EditKey::Tab
-            | EditKey::Left
-            | EditKey::Right
-            | EditKey::Insert(_)
-            | EditKey::Backspace
-            | EditKey::None => return Ok(None),
+            // No line-editing action for these: Tab (no focus navigation
+            // here) or an unrecognized/textless key press.
+            EditKey::Tab | EditKey::None => return Ok(None),
+            // `self.field.handle_key` above always consumes these itself
+            // (returning `Handled`, which returns early before this match),
+            // so they can never actually reach here. Panicking rather than
+            // silently no-opping means a change that broke that invariant
+            // gets noticed immediately instead of just quietly dropping
+            // input.
+            EditKey::Left | EditKey::Right | EditKey::Insert(_) | EditKey::Backspace => {
+                unreachable!("TextEdit::handle_key already consumes Left/Right/Insert/Backspace")
+            }
         }
 
         Ok(None)
@@ -581,17 +587,15 @@ impl Toodle {
         );
     }
 
-    fn draw_check(
-        &self,
-        fb: &mut Framebuffer,
-        palette: &Palette,
-        page: usize,
-        line: usize,
-        page_offset: usize,
-    ) {
-        let src_x = (page + line) % CHECK_VARIANTS * CHECK_SPRITE_W;
-        let dest_x = PAGE_OFFSET_X + page_offset + CHECK_X - 1;
-        let dest_y = page_offset + CHECK_Y[line] - 4;
+    /// `section` seeds which of `CHECK_VARIANTS` check-mark sprites gets
+    /// drawn (varied per section+line so checks don't all look identical),
+    /// not a page index — only the front page's checks are ever live-drawn
+    /// (see `draw_front_overlay`'s doc comment), so there's no page-relative
+    /// offset to apply here either.
+    fn draw_check(&self, fb: &mut Framebuffer, palette: &Palette, section: usize, line: usize) {
+        let src_x = (section + line) % CHECK_VARIANTS * CHECK_SPRITE_W;
+        let dest_x = PAGE_OFFSET_X + CHECK_X - 1;
+        let dest_y = CHECK_Y[line] - 4;
         let src = Rect::new(src_x, 0, CHECK_SPRITE_W, CHECK_SPRITE_H);
 
         let swap = if self.eraser_hovered {
@@ -864,6 +868,19 @@ impl Toodle {
             })
             .collect();
         write_archive_transaction_marker(&marker_path, &marker_writes)?;
+        // From here on the marker is the sole authority on whether a staged
+        // temp file still needs committing (see `AtomicWrite::disarm`): if an
+        // error below abandons some of these writes, they must be left on
+        // disk for `recover_archive_transaction` to find on restart, not
+        // deleted by an ordinary `Drop`.
+        for (done_write, section_write) in &mut staged {
+            if let Some(write) = done_write {
+                write.disarm();
+            }
+            if let Some((_, write)) = section_write {
+                write.disarm();
+            }
+        }
 
         // Commit and adopt one section at a time: the done write, then the
         // section write, then folding the in-memory list into place. If a

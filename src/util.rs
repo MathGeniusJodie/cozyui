@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{self, Write as _};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -137,6 +137,45 @@ impl<T: PartialEq> Refresh<T> {
         }
         self.value = value;
         true
+    }
+}
+
+/// Tracks a periodic operation's failure/recovery state so a caller logs the
+/// transition ("started failing" / "recovered") exactly once per episode
+/// instead of once per failing tick. Several widgets poll something that can
+/// transiently fail (sysfs, /proc, file metadata) and used to each hand-roll
+/// this as their own `bool` field (or, for a free function with no `self`, a
+/// module-level `AtomicBool`) — this factors out the shared shape. Built on
+/// an atomic so it works the same way as a plain struct field or a `static`.
+pub(crate) struct FailureLog {
+    failing: AtomicBool,
+}
+
+impl FailureLog {
+    pub(crate) const fn new() -> Self {
+        Self {
+            failing: AtomicBool::new(false),
+        }
+    }
+
+    /// Call on a successful read; logs `recovered_msg()` the first time this
+    /// follows a failure, and does nothing otherwise. Takes a closure (rather
+    /// than an already-formatted `&str`) so a caller building the message via
+    /// `format!` only pays for it on the rare transition tick, not on every
+    /// call.
+    pub(crate) fn record_ok(&self, recovered_msg: impl FnOnce() -> String) {
+        if self.failing.swap(false, Ordering::Relaxed) {
+            eprintln!("{}", recovered_msg());
+        }
+    }
+
+    /// Call on a failed read; logs `failing_msg()` only the first time this
+    /// follows a success (or startup) — repeats are suppressed until the
+    /// next `record_ok`. See `record_ok` for why this takes a closure.
+    pub(crate) fn record_err(&self, failing_msg: impl FnOnce() -> String) {
+        if !self.failing.swap(true, Ordering::Relaxed) {
+            eprintln!("{}", failing_msg());
+        }
     }
 }
 

@@ -103,6 +103,16 @@ struct ClipboardAtoms {
     incr: Atom,
 }
 
+/// Result of one callback invocation inside `XWindow::wait_for_selection_event`.
+enum EventOutcome<T> {
+    /// The event was consumed but the wait isn't finished; keep polling.
+    Consumed,
+    /// The event finished the wait with this value.
+    Done(T),
+    /// Not the callback's concern; requeue it in `pending_events`.
+    NotMine(XEvent),
+}
+
 impl XWindow {
     pub(crate) fn open(
         width: usize,
@@ -542,14 +552,11 @@ impl XWindow {
         Ok(pixmap)
     }
 
-    /// Full barrier: round-trip to the server, after which every outstanding
-    /// `shm_put_image` has been executed and its completion event is queued.
-    /// Draining the queue (rather than force-clearing `busy`) consumes those
-    /// completions now; a blind clear would leave them behind to wrongly
-    /// free a segment re-used by a later put while the server still reads
-    /// it. Only the fallback when both segments are still busy.
-    fn sync_shm(&mut self) -> Result<(), Box<dyn Error>> {
-        self.conn.get_input_focus()?.reply()?;
+    /// Drains every currently-queued event, applying completions (freeing
+    /// their segment) and buffering anything else in `pending_events` for the
+    /// normal event loop. Shared by `sync_shm` and `free_shm_index`, which
+    /// only differ in what they do before/after this drain.
+    fn drain_shm_completions(&mut self) -> Result<(), Box<dyn Error>> {
         while let Some(event) = self.conn.poll_for_event()? {
             if let XEvent::ShmCompletion(completion) = &event {
                 let seg = completion.shmseg;
@@ -559,6 +566,17 @@ impl XWindow {
             }
         }
         Ok(())
+    }
+
+    /// Full barrier: round-trip to the server, after which every outstanding
+    /// `shm_put_image` has been executed and its completion event is queued.
+    /// Draining the queue (rather than force-clearing `busy`) consumes those
+    /// completions now; a blind clear would leave them behind to wrongly
+    /// free a segment re-used by a later put while the server still reads
+    /// it. Only the fallback when both segments are still busy.
+    fn sync_shm(&mut self) -> Result<(), Box<dyn Error>> {
+        self.conn.get_input_focus()?.reply()?;
+        self.drain_shm_completions()
     }
 
     /// A segment index that is free to write into. Drains any pending
@@ -571,14 +589,7 @@ impl XWindow {
         if !self.shm_images.iter().any(|image| image.busy) {
             return Ok(Some(0));
         }
-        while let Some(event) = self.conn.poll_for_event()? {
-            if let XEvent::ShmCompletion(completion) = &event {
-                let seg = completion.shmseg;
-                self.shm_completed(seg);
-            } else {
-                self.pending_events.push_back(event);
-            }
-        }
+        self.drain_shm_completions()?;
         if let Some(index) = self.shm_images.iter().position(|image| !image.busy) {
             return Ok(Some(index));
         }
@@ -777,20 +788,46 @@ impl XWindow {
         // Unrelated events arriving meanwhile are buffered for `poll_event`,
         // not dropped.
         let deadline = Instant::now() + Duration::from_millis(500);
+        self.wait_for_selection_event(
+            deadline,
+            "clipboard paste timed out waiting for the selection owner",
+            |xwin, event| match event {
+                XEvent::SelectionNotify(event) => {
+                    Ok(EventOutcome::Done(xwin.read_selection_notify(event)?))
+                }
+                other => Ok(EventOutcome::NotMine(other)),
+            },
+        )
+    }
+
+    /// Shared skeleton behind `clipboard_text` and `read_incr_chunks`: polls
+    /// for X events until `on_event` reports it's done, requeuing (in
+    /// `pending_events`) anything it doesn't recognize as its own and always
+    /// handling `SelectionRequest`/`SelectionClear` inline first, so a
+    /// concurrent clipboard request from another client is never starved by
+    /// our own wait. Gives up at `deadline`, logging `timeout_msg` and
+    /// returning `T::default()`.
+    fn wait_for_selection_event<T: Default>(
+        &mut self,
+        deadline: Instant,
+        timeout_msg: &str,
+        mut on_event: impl FnMut(&mut Self, XEvent) -> Result<EventOutcome<T>, Box<dyn Error>>,
+    ) -> Result<T, Box<dyn Error>> {
         loop {
             while let Some(event) = self.conn.poll_for_event()? {
                 match event {
-                    XEvent::SelectionNotify(event) => {
-                        return self.read_selection_notify(event);
-                    }
                     XEvent::SelectionRequest(event) => self.handle_selection_request(event)?,
                     XEvent::SelectionClear(event) => self.handle_selection_clear(event),
-                    other => self.pending_events.push_back(other),
+                    other => match on_event(self, other)? {
+                        EventOutcome::Done(value) => return Ok(value),
+                        EventOutcome::Consumed => {}
+                        EventOutcome::NotMine(event) => self.pending_events.push_back(event),
+                    },
                 }
             }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                eprintln!("clipboard paste timed out waiting for the selection owner");
-                return Ok(None);
+                eprintln!("{timeout_msg}");
+                return Ok(T::default());
             };
             self.wait_for_event(remaining)?;
         }
@@ -880,54 +917,58 @@ impl XWindow {
         self.conn.flush()?;
         let mut data = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            while let Some(event) = self.conn.poll_for_event()? {
-                match event {
-                    XEvent::PropertyNotify(event)
-                        if event.window == self.window
-                            && event.atom == property
-                            && event.state == Property::NEW_VALUE =>
-                    {
-                        let reply = self
-                            .conn
-                            .get_property(
-                                true,
-                                self.window,
-                                property,
-                                AtomEnum::ANY,
-                                0,
-                                u32::MAX / 4,
-                            )?
-                            .reply()?;
-                        self.conn.flush()?;
-                        let Some(bytes) = reply.value8() else {
-                            return Ok(None);
-                        };
-                        let before = data.len();
-                        data.extend(bytes);
-                        if data.len() == before {
-                            return Ok(String::from_utf8(data).ok());
-                        }
-                        if data.len() > MAX_PASTE_BYTES {
-                            eprintln!("clipboard paste exceeded {MAX_PASTE_BYTES} bytes, aborting");
-                            return Ok(None);
-                        }
-                        if Instant::now() >= deadline {
-                            eprintln!("clipboard paste timed out mid-INCR transfer");
-                            return Ok(None);
-                        }
-                    }
-                    XEvent::SelectionRequest(event) => self.handle_selection_request(event)?,
-                    XEvent::SelectionClear(event) => self.handle_selection_clear(event),
-                    other => self.pending_events.push_back(other),
-                }
-            }
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                eprintln!("clipboard paste timed out mid-INCR transfer");
-                return Ok(None);
+        let timeout_msg = "clipboard paste timed out mid-INCR transfer";
+        self.wait_for_selection_event(deadline, timeout_msg, |xwin, event| {
+            let XEvent::PropertyNotify(notify) = event else {
+                return Ok(EventOutcome::NotMine(event));
             };
-            self.wait_for_event(remaining)?;
-        }
+            if notify.window != xwin.window
+                || notify.atom != property
+                || notify.state != Property::NEW_VALUE
+            {
+                return Ok(EventOutcome::NotMine(XEvent::PropertyNotify(notify)));
+            }
+
+            let reply = xwin
+                .conn
+                .get_property(
+                    true,
+                    xwin.window,
+                    property,
+                    AtomEnum::ANY,
+                    0,
+                    // Same cap as the non-INCR path (see its comment):
+                    // without it, a single misbehaving chunk could force an
+                    // arbitrarily large allocation here before the
+                    // `data.len() > MAX_PASTE_BYTES` check below ever runs.
+                    (MAX_PASTE_BYTES / 4) as u32,
+                )?
+                .reply()?;
+            xwin.conn.flush()?;
+            let Some(bytes) = reply.value8() else {
+                return Ok(EventOutcome::Done(None));
+            };
+            let before = data.len();
+            data.extend(bytes);
+            if data.len() == before {
+                return Ok(EventOutcome::Done(
+                    String::from_utf8(std::mem::take(&mut data)).ok(),
+                ));
+            }
+            if data.len() > MAX_PASTE_BYTES {
+                eprintln!("clipboard paste exceeded {MAX_PASTE_BYTES} bytes, aborting");
+                return Ok(EventOutcome::Done(None));
+            }
+            // A continuous flood of chunks could otherwise keep this inner
+            // callback busy indefinitely without ever hitting the outer
+            // wait's own deadline check (which only runs once the event
+            // queue drains empty).
+            if Instant::now() >= deadline {
+                eprintln!("{timeout_msg}");
+                return Ok(EventOutcome::Done(None));
+            }
+            Ok(EventOutcome::Consumed)
+        })
     }
 
     fn supported_text_target(&self, target: Atom) -> bool {

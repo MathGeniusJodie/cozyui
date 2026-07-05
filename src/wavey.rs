@@ -59,6 +59,9 @@ const MAX_VOLUME: u8 = 100;
 
 const CLOCK_REFRESH: Duration = Duration::from_millis(250);
 const VOLUME_REFRESH: Duration = Duration::from_secs(3);
+/// How often a dragged/scrolled volume gets pushed to `wpctl`/`pactl`; see
+/// `Wavey::push_volume`.
+const VOLUME_PUSH_THROTTLE: Duration = Duration::from_millis(100);
 const TITLE_REFRESH: Duration = Duration::from_secs(1);
 // Song title display: TITLE_X/TITLE_Y position the text's top-left corner,
 // TITLE_W is the fixed text window width (longer titles marquee through it);
@@ -109,6 +112,11 @@ pub struct Wavey {
     marquee_offset: usize,
     last_marquee_step: Instant,
     playing: bool,
+    /// The volume value last written (or about to be written) to the OS,
+    /// throttled separately from `volume` itself so a knob drag's flood of
+    /// motion ticks doesn't spawn one detached `wpctl`/`pactl` per tick. See
+    /// `push_volume`.
+    pushed_volume: crate::util::Refresh<u8>,
 }
 
 impl Wavey {
@@ -135,6 +143,10 @@ impl Wavey {
             marquee_offset: 0,
             last_marquee_step: Instant::now(),
             playing: false,
+            // Seeded to match the placeholder `volume` above so the pair
+            // starts in sync and the first real reading (below) doesn't
+            // read as a user-driven change worth pushing back to the OS.
+            pushed_volume: crate::util::Refresh::new(50),
         };
         Ok(wavey)
     }
@@ -188,10 +200,20 @@ impl Wavey {
         if let Some(volume) = self.volume_updates.try_iter().last()
             && !self.dragging_knob
             && volume != self.volume
+            // Skip the external reading while a local change (e.g. a scroll)
+            // is still waiting on the throttled push below: the poller can
+            // race that push and report the stale pre-push OS volume, which
+            // would otherwise silently overwrite the not-yet-pushed value.
+            && self.volume == *self.pushed_volume.get()
         {
             self.volume = volume;
+            // This reading already reflects what the OS has, so record it as
+            // pushed rather than letting `push_volume` below mistake it for
+            // a user-driven change and write it straight back.
+            self.pushed_volume.set(volume);
             dirty = true;
         }
+        self.push_volume(false);
 
         if let Some(update) = self.title_updates.try_iter().last() {
             let (title, url) = if self.playing {
@@ -295,9 +317,12 @@ impl Wavey {
         }
     }
 
-    pub(crate) const fn release(&mut self) -> bool {
+    pub(crate) fn release(&mut self) -> bool {
         let was_dragging = self.dragging_knob;
         self.dragging_knob = false;
+        if was_dragging {
+            self.push_volume(true);
+        }
         was_dragging
     }
 
@@ -318,10 +343,13 @@ impl Wavey {
         self.scroll_volume(x, y, -5)
     }
 
-    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
-    pub(crate) const fn shutdown(&mut self) {
+    pub(crate) fn shutdown(&mut self) {
         // The player lives in the "wavey" abduco session and keeps playing
-        // across cozyui restarts; only the stop button kills it.
+        // across cozyui restarts; only the stop button kills it. A
+        // scroll-driven volume change right before quitting is otherwise only
+        // queued for the throttled per-tick push, never flushed — force it
+        // now so it isn't silently dropped.
+        self.push_volume(true);
     }
 
     #[allow(clippy::unused_self)]
@@ -385,7 +413,27 @@ impl Wavey {
             return;
         }
         self.volume = volume;
-        set_system_volume(volume);
+    }
+
+    /// Reconciles the OS volume with `self.volume`, throttled (`force =
+    /// false`, from the per-tick `update`) so a knob drag's flood of motion
+    /// events collapses to at most one `wpctl`/`pactl` spawn per
+    /// `VOLUME_PUSH_THROTTLE`, instead of one per event with no ordering
+    /// guarantee between them. `force = true` (from `release`) bypasses the
+    /// throttle so letting go of the knob is never left waiting out the
+    /// window before the final value lands.
+    fn push_volume(&mut self, force: bool) {
+        let volume = self.volume;
+        let changed = if force {
+            let changed = *self.pushed_volume.get() != volume;
+            self.pushed_volume.set(volume);
+            changed
+        } else {
+            self.pushed_volume.refresh(VOLUME_PUSH_THROTTLE, || volume)
+        };
+        if changed {
+            set_system_volume(volume);
+        }
     }
 
     fn play_station(&mut self) {

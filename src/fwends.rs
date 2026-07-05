@@ -156,10 +156,58 @@ pub struct Fwends {
 struct PendingReply {
     rx: Receiver<Result<String, String>>,
     author: &'static str,
-    // Pid of the in-flight curl request, so erase_chat_history can cancel it
-    // instead of leaving it running for up to the request timeout after the
-    // reply is no longer wanted.
+    // Pid of the in-flight curl request, so erase_chat_history/shutdown can
+    // cancel it instead of leaving it running for up to the request timeout
+    // after the reply is no longer wanted.
     pid_slot: openrouter::PidSlot,
+    // Joined on cancellation so the request thread's `CurlBodyFile` (whose
+    // `Drop` deletes the 0600 temp file holding the request body) actually
+    // runs before we move on — a non-main thread's destructors don't run on
+    // process exit, so without this join, quitting while a reply is pending
+    // would leak both the temp file and the curl child past app shutdown.
+    handle: thread::JoinHandle<()>,
+}
+
+impl PendingReply {
+    /// Best-effort signal: SIGTERMs the in-flight curl, if its pid has been
+    /// recorded yet. Safe to call even if curl already exited between the
+    /// pid check and the kill.
+    fn signal_cancel(&self) {
+        if let Some(pid) = *self.pid_slot.lock().unwrap() {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+    }
+
+    /// Cancels the in-flight curl (if any) without waiting for its request
+    /// thread to unwind: called from `erase_chat_history`, which runs on the
+    /// UI thread and must not freeze the whole overlay for up to the request
+    /// timeout if the pid hasn't been recorded yet. The thread's
+    /// `CurlBodyFile` cleanup still runs (just detached, on its own thread,
+    /// rather than joined here) since the process keeps running afterward.
+    fn cancel(self) {
+        self.signal_cancel();
+        thread::spawn(move || {
+            let _ = self.handle.join();
+        });
+    }
+
+    /// Cancels and waits, but only up to `timeout`: called from `shutdown`,
+    /// where joining unboundedly would risk hanging process exit for up to
+    /// the full request timeout if a SIGTERM lands in the brief window
+    /// before the request thread has recorded curl's pid (so `signal_cancel`
+    /// has nothing to kill yet). Bounding the wait keeps shutdown prompt even
+    /// then, at the cost of possibly not seeing the temp-file cleanup finish
+    /// in that rare case.
+    fn cancel_and_wait(self, timeout: std::time::Duration) {
+        self.signal_cancel();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let handle = self.handle;
+        thread::spawn(move || {
+            let _ = handle.join();
+            let _ = done_tx.send(());
+        });
+        let _ = done_rx.recv_timeout(timeout);
+    }
 }
 
 impl Fwends {
@@ -334,6 +382,31 @@ impl Fwends {
         input: &KeyInput,
         clipboard_text: Option<&str>,
     ) -> Option<String> {
+        // Tab/Left/Right intentionally switch models even mid-edit, mirroring
+        // a click on the fwend avatar, rather than moving the text cursor or
+        // doing focus navigation — so this must run before the input gets a
+        // chance to consume Left/Right for cursor movement below. Shift+Left
+        // /Right is excluded so text selection in the input still works;
+        // `edit_key` doesn't distinguish shift on its own.
+        match edit_key(input) {
+            EditKey::Tab => {
+                self.select_next_model();
+                return None;
+            }
+            EditKey::Right if !input.shift() => {
+                self.select_next_model();
+                return None;
+            }
+            EditKey::Left if !input.shift() => {
+                self.selected_model = self
+                    .selected_model
+                    .checked_sub(1)
+                    .unwrap_or(MODELS.len() - 1);
+                return None;
+            }
+            _ => {}
+        }
+
         if self.focused && self.pending.is_none() {
             let layout = self.input_layout(&self.font);
             let outcome = self.input.handle_key(input, clipboard_text, &layout);
@@ -345,15 +418,6 @@ impl Fwends {
         match edit_key(input) {
             EditKey::Enter if self.focused => self.send(),
             EditKey::Escape => self.focused = false,
-            // Tab intentionally switches models even mid-edit, mirroring
-            // Right-arrow, rather than doing focus navigation.
-            EditKey::Tab | EditKey::Right => self.select_next_model(),
-            EditKey::Left => {
-                self.selected_model = self
-                    .selected_model
-                    .checked_sub(1)
-                    .unwrap_or(MODELS.len() - 1);
-            }
             _ => {}
         }
         None
@@ -441,13 +505,9 @@ impl Fwends {
         let text = format!("{}: {text}", user_name());
         let (tx, rx) = mpsc::channel();
         let pid_slot: openrouter::PidSlot = Arc::new(Mutex::new(None));
-        self.pending = Some(PendingReply {
-            rx,
-            author: model.name,
-            pid_slot: Arc::clone(&pid_slot),
-        });
-
-        thread::spawn(move || {
+        let thread_pid_slot = Arc::clone(&pid_slot);
+        let handle = thread::spawn(move || {
+            let pid_slot = thread_pid_slot;
             // Lamp on: thinking mode — same single-model request, but using the
             // fwend's beefier thinking model with reasoning turned on. Lamp off:
             // the fast model with reasoning off.
@@ -466,20 +526,30 @@ impl Fwends {
             );
             let _ = tx.send(result);
         });
+        self.pending = Some(PendingReply {
+            rx,
+            author: model.name,
+            pid_slot,
+            handle,
+        });
     }
 
     fn erase_chat_history(&mut self) {
-        if let Some(pending) = self.pending.take()
-            && let Some(pid) = *pending.pid_slot.lock().unwrap()
-        {
-            // Best-effort: kill the in-flight curl so it doesn't keep running
-            // for up to the request timeout after we've discarded the chat
-            // that wanted its reply. Safe to ignore failure (e.g. it already
-            // exited between the check and the kill).
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if let Some(pending) = self.pending.take() {
+            pending.cancel();
         }
         self.messages = vec![intro_message()];
         self.messages_changed();
+    }
+
+    /// Cancels any in-flight request so the app can exit without leaking the
+    /// curl child or its temp request-body file. See
+    /// `PendingReply::cancel_and_wait` and `PendingReply::handle` for why
+    /// this must (boundedly) join, not just signal.
+    pub(crate) fn shutdown(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            pending.cancel_and_wait(std::time::Duration::from_secs(2));
+        }
     }
 
     /// Refresh the cached layouts. Follows new messages only when the view was

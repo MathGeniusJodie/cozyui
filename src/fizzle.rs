@@ -26,7 +26,7 @@ pub struct Fizzle {
     charge: u8,
     discharging: bool,
     last_check: Instant,
-    battery_read_failing: bool,
+    battery_read_failing: crate::util::FailureLog,
 }
 
 impl Fizzle {
@@ -57,7 +57,7 @@ impl Fizzle {
             charge,
             discharging,
             last_check: Instant::now(),
-            battery_read_failing: false,
+            battery_read_failing: crate::util::FailureLog::new(),
         })
     }
 
@@ -82,16 +82,13 @@ impl Fizzle {
         self.last_check = now;
 
         let Some((charge, discharging)) = read_battery() else {
-            if !self.battery_read_failing {
-                eprintln!("fizzle: battery sysfs reads failing, keeping last known reading");
-                self.battery_read_failing = true;
-            }
+            self.battery_read_failing.record_err(|| {
+                "fizzle: battery sysfs reads failing, keeping last known reading".to_string()
+            });
             return false;
         };
-        if self.battery_read_failing {
-            eprintln!("fizzle: battery sysfs reads recovered");
-            self.battery_read_failing = false;
-        }
+        self.battery_read_failing
+            .record_ok(|| "fizzle: battery sysfs reads recovered".to_string());
         if charge == self.charge && discharging == self.discharging {
             return false;
         }

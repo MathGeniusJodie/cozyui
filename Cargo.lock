@@ -108,6 +108,7 @@ dependencies = [
  "pixel-fonts",
  "pixel-graphics",
  "serde_json",
+ "signal-hook",
  "unicode-segmentation",
  "x11rb",
  "xkbcommon",

@@ -193,15 +193,18 @@ fn strip_comment(raw: &str) -> &str {
     if raw.trim_start().starts_with('#') {
         return "";
     }
-    let bytes = raw.as_bytes();
-    for i in 1..bytes.len() {
-        let preceded_by_space = (bytes[i - 1] as char).is_whitespace();
-        let followed_by_space_or_end = bytes
-            .get(i + 1)
-            .is_none_or(|b| (*b as char).is_whitespace());
-        if bytes[i] == b'#' && preceded_by_space && followed_by_space_or_end {
+    // Walk chars, not bytes: a UTF-8 continuation byte can numerically match
+    // a whitespace codepoint (e.g. U+00A0, U+0085) when cast to `char` on its
+    // own, which would misfire "preceded/followed by whitespace" for a
+    // non-ASCII label adjacent to a literal `#`.
+    let mut prev_whitespace = false;
+    let mut chars = raw.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        let followed_by_space_or_end = chars.peek().is_none_or(|(_, next)| next.is_whitespace());
+        if ch == '#' && prev_whitespace && followed_by_space_or_end {
             return &raw[..i];
         }
+        prev_whitespace = ch.is_whitespace();
     }
     raw
 }
@@ -367,12 +370,22 @@ impl Budgit {
             &pixel_fonts::FUSION_PIXEL_8_SPEC,
         )?;
 
-        let config = match Config::parse(&fs::read_to_string(crate::paths::config_file(
-            CONFIG_FILE,
-        ))?) {
-            Ok(config) => config,
+        let config = match fs::read_to_string(crate::paths::config_file(CONFIG_FILE)) {
+            Ok(text) => match Config::parse(&text) {
+                Ok(config) => config,
+                Err(err) => {
+                    eprintln!("budgit.conf: skipping malformed config: {err}");
+                    Config::default()
+                }
+            },
+            // A fresh install has no budgit.conf yet, and any other read
+            // error (permissions, a remounted config dir, ...) is just as
+            // unworkable — in both cases use defaults rather than failing
+            // App::load and taking down the whole desktop.
             Err(err) => {
-                eprintln!("budgit.conf: skipping malformed config: {err}");
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("budgit.conf: skipping unreadable config: {err}");
+                }
                 Config::default()
             }
         };
@@ -818,6 +831,16 @@ mod tests {
             cfg.periods[0].expenses[0],
             ("Repair (unit #4)".to_string(), 50.0)
         );
+    }
+
+    #[test]
+    fn strip_comment_is_not_fooled_by_a_continuation_byte() {
+        // 'נ' (U+05E0) encodes as bytes [0xD7, 0xA0]; 0xA0 alone numerically
+        // matches U+00A0 (NBSP), a whitespace codepoint. Casting that byte to
+        // `char` in isolation (rather than decoding the whole UTF-8 sequence)
+        // would misread it as trailing whitespace and wrongly treat the `#`
+        // right after it as a comment marker.
+        assert_eq!(strip_comment("נ# = 50"), "נ# = 50");
     }
 
     #[test]

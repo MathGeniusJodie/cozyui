@@ -36,13 +36,13 @@ impl TextEdit {
     }
 
     pub(crate) fn set_cursor(&mut self, cursor: usize, text: &str) {
-        self.cursor = cursor.min(char_len(text));
+        self.cursor = snap_to_grapheme_boundary(text, cursor.min(char_len(text)));
         self.anchor = None;
         self.drag_anchor = None;
     }
 
     pub(crate) fn begin_drag(&mut self, cursor: usize, text: &str) {
-        let cursor = cursor.min(char_len(text));
+        let cursor = snap_to_grapheme_boundary(text, cursor.min(char_len(text)));
         self.cursor = cursor;
         self.anchor = None;
         self.drag_anchor = Some(cursor);
@@ -52,7 +52,7 @@ impl TextEdit {
         let Some(anchor) = self.drag_anchor else {
             return false;
         };
-        let cursor = cursor.min(char_len(text));
+        let cursor = snap_to_grapheme_boundary(text, cursor.min(char_len(text)));
         let old_cursor = self.cursor;
         let old_anchor = self.anchor;
         self.cursor = cursor;
@@ -377,6 +377,41 @@ fn next_grapheme_end(text: &str, cursor: usize) -> usize {
         )
 }
 
+/// Snaps `index` (a char index, already `<= char_len(text)`) to the nearest
+/// grapheme-cluster boundary. A caller that derived `index` from something
+/// grapheme-unaware (e.g. a pixel-based click hit test) could otherwise land
+/// the cursor mid-cluster; a later backspace there deletes only part of a
+/// flag or ZWJ emoji instead of the whole thing, since `prev_grapheme_start`
+/// treats "mid-cluster" as "inside this cluster" and only walks back to its
+/// start, not past the already-split remainder.
+fn snap_to_grapheme_boundary(text: &str, index: usize) -> usize {
+    let target_byte = char_to_byte(text, index);
+    let mut boundary_before = 0;
+    for (byte, _) in text.grapheme_indices(true) {
+        if byte == target_byte {
+            return index;
+        }
+        if byte > target_byte {
+            let boundary_after = text[..byte].chars().count();
+            return if index - boundary_before <= boundary_after - index {
+                boundary_before
+            } else {
+                boundary_after
+            };
+        }
+        boundary_before = text[..byte].chars().count();
+    }
+    // `index` fell inside the last grapheme cluster (no boundary found after
+    // it): the same nearer-boundary tie-break as above still applies, just
+    // with `char_len(text)` standing in as the boundary after it.
+    let boundary_after = char_len(text);
+    if index - boundary_before <= boundary_after - index {
+        boundary_before
+    } else {
+        boundary_after
+    }
+}
+
 pub fn char_to_byte(text: &str, char_index: usize) -> usize {
     text.char_indices()
         .nth(char_index)
@@ -416,6 +451,48 @@ mod tests {
         assert_eq!(edit.cursor(), 2);
         edit.move_cursor(text, -1, false);
         assert_eq!(edit.cursor(), 0);
+    }
+
+    #[test]
+    fn set_cursor_snaps_out_of_a_flag_emoji() {
+        let mut edit = TextEdit::default();
+        // Flag emoji: two regional-indicator codepoints (chars 1 and 2), one
+        // grapheme. A click landing between them must snap to one edge, not
+        // stay mid-cluster.
+        let text = "a\u{1F1FA}\u{1F1F8}b";
+        edit.set_cursor(2, text);
+        assert_ne!(edit.cursor(), 2);
+        assert!(edit.cursor() == 1 || edit.cursor() == 3);
+
+        // Backspacing from the snapped position removes the whole cluster,
+        // never leaving an orphaned regional-indicator half behind.
+        edit.set_cursor(3, text);
+        let mut owned = text.to_string();
+        assert!(edit.backspace(&mut owned));
+        assert_eq!(owned, "ab");
+    }
+
+    #[test]
+    fn begin_drag_snaps_out_of_a_combining_mark() {
+        let mut edit = TextEdit::default();
+        // e + combining acute: two codepoints, one grapheme.
+        let text = "e\u{0301}x";
+        edit.begin_drag(1, text);
+        assert_ne!(edit.cursor(), 1);
+        assert!(edit.cursor() == 0 || edit.cursor() == 2);
+    }
+
+    #[test]
+    fn set_cursor_snaps_out_of_a_flag_emoji_at_the_end_of_the_text() {
+        let mut edit = TextEdit::default();
+        // Flag emoji ends the text this time, so there's no grapheme
+        // boundary after the mid-cluster index — snapping must still pick
+        // the nearer edge (here, tied, so it resolves to the boundary
+        // before) instead of always falling through to the text's end.
+        let text = "hi\u{1F1FA}\u{1F1F8}";
+        edit.set_cursor(3, text);
+        assert_ne!(edit.cursor(), 3);
+        assert!(edit.cursor() == 2 || edit.cursor() == 4);
     }
 
     #[test]

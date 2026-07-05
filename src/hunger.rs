@@ -196,8 +196,12 @@ fn save_state(eaten_through: f64) -> Result<(), Box<dyn Error>> {
 /// boundary lands on true local civil midnight even on a day DST starts or
 /// ends, rather than drifting by the DST offset delta like naive epoch
 /// arithmetic would. Falls back to a UTC day-aligned instant if local time
-/// is unavailable. Only used by tests below; production code goes through
-/// [`civil_day_midnight`] and [`meals_for_day`] directly.
+/// is unavailable. Only used by tests below; [`civil_day_midnight`] is
+/// itself test-only, so production code doesn't call either of these —
+/// [`meals_for_day`] resolves each meal's own civil time directly instead of
+/// deriving it from a shared midnight, since adding fixed seconds to
+/// midnight would drift a meal's wall-clock time across a DST transition
+/// landing between midnight and that meal.
 #[cfg(test)]
 fn today_midnight() -> f64 {
     let now = crate::util::now_secs();
