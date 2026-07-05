@@ -14,13 +14,15 @@ use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, Term, TermMode, point_to_viewport};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
-use xkbcommon::xkb::keysyms;
 
 use crate::palette_color;
 use crate::text::KeyInput;
 use crate::{
     CursorKind, Framebuffer, Index, Palette, Rect, Rgb as PaletteRgb, Sprite, TRANSPARENT,
 };
+
+mod keys;
+use keys::{is_copy_shortcut, key_bytes, key_scroll};
 
 const GLYPH_W: usize = 6;
 const GLYPH_H: usize = 12;
@@ -1427,99 +1429,3 @@ fn cell_at(x: usize, y: usize, screen_x: usize, screen_y: usize, size: &WindowSi
     Point::new(Line(line as i32), Column(column))
 }
 
-fn is_copy_shortcut(input: &KeyInput) -> bool {
-    input.ctrl() && input.shift() && input.is_letter(keysyms::KEY_c, keysyms::KEY_C, "c")
-}
-
-fn key_bytes(input: &KeyInput) -> Option<String> {
-    if input.ctrl() {
-        if let Some(seq) = modified_nav_sequence(input) {
-            return Some(seq);
-        }
-        if let Some(byte) = control_byte(input) {
-            return String::from_utf8(vec![byte]).ok();
-        }
-    }
-
-    let text = match input.sym_raw() {
-        keysyms::KEY_Escape => "\x1b",
-        keysyms::KEY_BackSpace => "\x7f",
-        keysyms::KEY_Tab | keysyms::KEY_KP_Tab => "\t",
-        keysyms::KEY_Return | keysyms::KEY_KP_Enter => "\r",
-        keysyms::KEY_Up | keysyms::KEY_KP_Up => "\x1b[A",
-        keysyms::KEY_Down | keysyms::KEY_KP_Down => "\x1b[B",
-        keysyms::KEY_Left | keysyms::KEY_KP_Left => "\x1b[D",
-        keysyms::KEY_Right | keysyms::KEY_KP_Right => "\x1b[C",
-        keysyms::KEY_Home | keysyms::KEY_KP_Home => "\x1b[H",
-        keysyms::KEY_End | keysyms::KEY_KP_End => "\x1b[F",
-        keysyms::KEY_Prior | keysyms::KEY_KP_Prior => "\x1b[5~",
-        keysyms::KEY_Next | keysyms::KEY_KP_Next => "\x1b[6~",
-        _ => input.text(),
-    };
-
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.to_string())
-    }
-}
-
-/// xterm-style modified CSI sequence for Ctrl (optionally with Shift) held
-/// with a navigation key, e.g. Ctrl+Left -> `"\x1b[1;5D"` (readline
-/// word-jump, vim Ctrl+Home, etc.). Without this, `control_byte` doesn't
-/// cover these keysyms, so the caller would fall through to the plain,
-/// unmodified sequence and silently drop the Ctrl entirely. The modifier
-/// parameter follows the widely-honored `1 + shift(1) + ctrl(4)` xterm
-/// encoding; this codebase doesn't track Alt, so that term is omitted.
-fn modified_nav_sequence(input: &KeyInput) -> Option<String> {
-    let modifier = 1 + if input.shift() { 1 } else { 0 } + 4;
-    match input.sym_raw() {
-        keysyms::KEY_Up | keysyms::KEY_KP_Up => Some(format!("\x1b[1;{modifier}A")),
-        keysyms::KEY_Down | keysyms::KEY_KP_Down => Some(format!("\x1b[1;{modifier}B")),
-        keysyms::KEY_Left | keysyms::KEY_KP_Left => Some(format!("\x1b[1;{modifier}D")),
-        keysyms::KEY_Right | keysyms::KEY_KP_Right => Some(format!("\x1b[1;{modifier}C")),
-        keysyms::KEY_Home | keysyms::KEY_KP_Home => Some(format!("\x1b[1;{modifier}H")),
-        keysyms::KEY_End | keysyms::KEY_KP_End => Some(format!("\x1b[1;{modifier}F")),
-        keysyms::KEY_Prior | keysyms::KEY_KP_Prior => Some(format!("\x1b[5;{modifier}~")),
-        keysyms::KEY_Next | keysyms::KEY_KP_Next => Some(format!("\x1b[6;{modifier}~")),
-        _ => None,
-    }
-}
-
-fn control_byte(input: &KeyInput) -> Option<u8> {
-    let raw = input.sym_raw();
-    if (keysyms::KEY_a..=keysyms::KEY_z).contains(&raw) {
-        return Some((raw - keysyms::KEY_a + 1) as u8);
-    }
-    if (keysyms::KEY_A..=keysyms::KEY_Z).contains(&raw) {
-        return Some((raw - keysyms::KEY_A + 1) as u8);
-    }
-    // '[', '\', ']', '^', '_' sit at ASCII values whose low 5 bits are
-    // already the C0 control byte they map to (e.g. '[' is 0x5B, and
-    // 0x5B & 0x1F == 0x1B == Esc).
-    match raw {
-        keysyms::KEY_bracketleft
-        | keysyms::KEY_backslash
-        | keysyms::KEY_bracketright
-        | keysyms::KEY_asciicircum
-        | keysyms::KEY_underscore => Some((raw as u8) & 0x1F),
-        keysyms::KEY_space => Some(0x00),
-        _ => None,
-    }
-}
-
-const fn key_scroll(input: &KeyInput) -> Option<Scroll> {
-    // Ctrl+Shift+Home/End/Prior/Next is a modified nav sequence meant for the
-    // pty program (see `modified_nav_sequence`), not local scrollback.
-    if !input.shift() || input.ctrl() {
-        return None;
-    }
-
-    match input.sym_raw() {
-        keysyms::KEY_Home | keysyms::KEY_KP_Home => Some(Scroll::Top),
-        keysyms::KEY_Prior | keysyms::KEY_KP_Prior => Some(Scroll::PageUp),
-        keysyms::KEY_End | keysyms::KEY_KP_End => Some(Scroll::Bottom),
-        keysyms::KEY_Next | keysyms::KEY_KP_Next => Some(Scroll::PageDown),
-        _ => None,
-    }
-}

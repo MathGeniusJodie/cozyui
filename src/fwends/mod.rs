@@ -1,17 +1,12 @@
 use std::error::Error;
-use std::fmt::Write as _;
-use std::fs;
-use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
-use std::thread;
 
-use crate::openrouter;
 use crate::palette_color;
 use crate::text::{
     BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
 };
 use crate::{CursorKind, Framebuffer, Index, Palette, Rect, Sprite, Swap, TRANSPARENT};
-use serde_json::{Value, json};
+
+mod chat;
 
 const CONTENT_W: usize = 348;
 const W: usize = CONTENT_W + ERASER_W - ERASER_CONTENT_OVERLAP;
@@ -55,29 +50,6 @@ const SCROLL_STEP: usize = 24;
 const LINE_H: usize = 16;
 const MAX_INPUT_CHARS: usize = 96;
 const INPUT_MAX_LINES: usize = 5;
-const HISTORY_LIMIT: usize = 8;
-const SYSTEM_PROMPT_FILE: &str = "fwends_system_prompt.txt";
-
-/// Display name labelling the user's chat messages: `$COZYUI_USER_NAME`, else
-/// the login name with its first letter capitalized, else "Fwend".
-fn user_name() -> &'static str {
-    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    NAME.get_or_init(|| {
-        std::env::var("COZYUI_USER_NAME")
-            .or_else(|_| std::env::var("USER").map(capitalize_first))
-            .ok()
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| "Fwend".to_string())
-    })
-}
-
-fn capitalize_first(name: String) -> String {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => name,
-    }
-}
 const SMOL_ICON_SIZE: usize = 11;
 const SMOL_ICON_GAP: usize = 2;
 const SMOL_ICON_Y_OFFSET: usize = 3;
@@ -87,39 +59,8 @@ const LAMP_RIGHT_PAD: usize = 140;
 const LAMP_Y_OFFSET: usize = 60;
 const ERASER_RIGHT_PAD: usize = 0;
 
-const MODELS: [Model; 4] = [
-    Model {
-        id: "anthropic/claude-haiku-4.5",
-        thinking_id: "anthropic/claude-opus-4.5",
-        name: "Claude",
-        icon_index: 2,
-        avatar: crate::assets::claw,
-    },
-    Model {
-        id: "deepseek/deepseek-v4-flash",
-        thinking_id: "deepseek/deepseek-v4-pro",
-        name: "Deepseek",
-        icon_index: 1,
-        avatar: crate::assets::deep,
-    },
-    Model {
-        id: "qwen/qwen3.6-35b-a3b",
-        thinking_id: "qwen/qwen3.7-plus",
-        name: "Qwen",
-        icon_index: 0,
-        avatar: crate::assets::qwen,
-    },
-    Model {
-        id: "moonshotai/kimi-k2.6",
-        thinking_id: "moonshotai/kimi-k2.6",
-        name: "Kimi",
-        icon_index: 3,
-        avatar: crate::assets::kimi,
-    },
-];
-
 pub struct Fwends {
-    avatars: [Sprite; MODELS.len()],
+    avatars: [Sprite; chat::MODELS.len()],
     bubble: Sprite,
     user_sticky: Sprite,
     input_sticky: Sprite,
@@ -130,7 +71,7 @@ pub struct Fwends {
     lamp_off_image: Sprite,
     eraser: Sprite,
     font: BitmapFont,
-    messages: Vec<Message>,
+    messages: Vec<chat::Message>,
     input: TextField,
     selected_model: usize,
     lamp_on: bool,
@@ -139,7 +80,7 @@ pub struct Fwends {
     scroll_y: usize,
     model_slot_w: usize,
     model_slot_h: usize,
-    pending: Option<PendingReply>,
+    pending: Option<chat::PendingReply>,
     system_prompt: String,
     // message_layouts() wraps every message through the font engine, so the
     // result is cached here and refreshed via messages_changed() instead of
@@ -150,67 +91,12 @@ pub struct Fwends {
     // wrapping for messages that are new or have changed (e.g. a pending
     // reply's text being filled in) instead of re-wrapping the whole history
     // on every new message.
-    layout_cache: Vec<(Message, MessageLayout)>,
-}
-
-struct PendingReply {
-    rx: Receiver<Result<String, String>>,
-    author: &'static str,
-    // Pid of the in-flight curl request, so erase_chat_history/shutdown can
-    // cancel it instead of leaving it running for up to the request timeout
-    // after the reply is no longer wanted.
-    pid_slot: openrouter::PidSlot,
-    // Joined on cancellation so the request thread's `CurlBodyFile` (whose
-    // `Drop` deletes the 0600 temp file holding the request body) actually
-    // runs before we move on — a non-main thread's destructors don't run on
-    // process exit, so without this join, quitting while a reply is pending
-    // would leak both the temp file and the curl child past app shutdown.
-    handle: thread::JoinHandle<()>,
-}
-
-impl PendingReply {
-    /// Best-effort signal: SIGTERMs the in-flight curl, if its pid has been
-    /// recorded yet. Safe to call even if curl already exited between the
-    /// pid check and the kill.
-    fn signal_cancel(&self) {
-        if let Some(pid) = *self.pid_slot.lock().unwrap() {
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-        }
-    }
-
-    /// Cancels the in-flight curl (if any) without waiting for its request
-    /// thread to unwind: called from `erase_chat_history`, which runs on the
-    /// UI thread and must not freeze the whole overlay for up to the request
-    /// timeout if the pid hasn't been recorded yet. Dropping `self.handle`
-    /// here without joining it still lets the thread (and its `CurlBodyFile`
-    /// cleanup) run to completion detached, since the process keeps running
-    /// afterward — std detaches a `JoinHandle`'s thread on drop.
-    fn cancel(self) {
-        self.signal_cancel();
-    }
-
-    /// Cancels and waits, but only up to `timeout`: called from `shutdown`,
-    /// where joining unboundedly would risk hanging process exit for up to
-    /// the full request timeout if a SIGTERM lands in the brief window
-    /// before the request thread has recorded curl's pid (so `signal_cancel`
-    /// has nothing to kill yet). Bounding the wait keeps shutdown prompt even
-    /// then, at the cost of possibly not seeing the temp-file cleanup finish
-    /// in that rare case.
-    fn cancel_and_wait(self, timeout: std::time::Duration) {
-        self.signal_cancel();
-        let (done_tx, done_rx) = mpsc::channel::<()>();
-        let handle = self.handle;
-        thread::spawn(move || {
-            let _ = handle.join();
-            let _ = done_tx.send(());
-        });
-        let _ = done_rx.recv_timeout(timeout);
-    }
+    layout_cache: Vec<(chat::Message, MessageLayout)>,
 }
 
 impl Fwends {
     pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
-        let avatars = MODELS.map(|model| (model.avatar)());
+        let avatars = chat::MODELS.map(|model| (model.avatar)());
         let model_slot_w = avatars.iter().map(|avatar| avatar.width).max().unwrap_or(1);
         let model_slot_h = avatars
             .iter()
@@ -234,7 +120,7 @@ impl Fwends {
                 &pixel_fonts::COMICORO_SPEC,
                 &pixel_fonts::FUSION_PIXEL_10_SPEC,
             )?,
-            messages: vec![intro_message()],
+            messages: vec![chat::intro_message()],
             input: TextField::new(MAX_INPUT_CHARS, INPUT_MAX_LINES),
             selected_model,
             lamp_on: false,
@@ -244,7 +130,7 @@ impl Fwends {
             model_slot_w,
             model_slot_h,
             pending: None,
-            system_prompt: load_system_prompt(),
+            system_prompt: chat::load_system_prompt(),
             layouts: Vec::new(),
             layout_cache: Vec::new(),
         };
@@ -401,7 +287,7 @@ impl Fwends {
                 self.selected_model = self
                     .selected_model
                     .checked_sub(1)
-                    .unwrap_or(MODELS.len() - 1);
+                    .unwrap_or(chat::MODELS.len() - 1);
                 return None;
             }
             _ => {}
@@ -424,37 +310,29 @@ impl Fwends {
     }
 
     const fn select_next_model(&mut self) {
-        self.selected_model = (self.selected_model + 1) % MODELS.len();
+        self.selected_model = (self.selected_model + 1) % chat::MODELS.len();
     }
 
     pub(crate) fn drain_reply(&mut self) -> bool {
         let Some(pending) = &self.pending else {
             return false;
         };
-
-        let reply = match pending.rx.try_recv() {
-            Ok(reply) => reply,
-            Err(mpsc::TryRecvError::Empty) => return false,
-            // The worker thread died without sending (e.g. panicked); surface
-            // it instead of waiting forever with the input locked.
-            Err(mpsc::TryRecvError::Disconnected) => Err("reply thread died".to_string()),
+        let Some(reply) = pending.poll() else {
+            return false;
         };
 
-        let author = pending.author;
+        let author = pending.author();
         self.pending = None;
         let text = match reply {
-            Ok(text) => strip_self_prefix(&text, author),
+            Ok(text) => chat::strip_self_prefix(&text, author),
             Err(err) => format!("oops: {err}"),
         };
         if let Some(message) = self.messages.last_mut()
-            && message.kind == MessageKind::Pending
+            && message.kind() == chat::MessageKind::Pending
         {
-            message.text = text;
-            message.kind = MessageKind::Normal;
+            message.mark_resolved(text);
         } else {
-            let mut message = Message::assistant(text);
-            message.author = Some(author);
-            self.messages.push(message);
+            self.messages.push(chat::Message::assistant(text).with_author(author));
         }
         self.messages_changed();
         true
@@ -486,59 +364,38 @@ impl Fwends {
 
         self.input.clear();
         self.messages
-            .retain(|message| message.kind != MessageKind::Intro);
+            .retain(|message| message.kind() != chat::MessageKind::Intro);
         let thinking = self.lamp_on;
-        let model = MODELS[self.selected_model];
+        let model = chat::MODELS[self.selected_model];
 
         // Build the history before pushing the new message: both request
         // paths send the latest user message separately, so it must not also
         // appear at the end of the history.
-        let system_prompt = fwend_system_prompt(&self.system_prompt, model.name, user_name());
-        let history = request_history(&self.messages, model.name, user_name());
+        let system_prompt =
+            chat::fwend_system_prompt(&self.system_prompt, model.name, chat::user_name());
+        let history = chat::request_history(&self.messages, model.name, chat::user_name());
 
-        self.messages.push(Message::user(text.clone()));
-        self.messages.push(Message::pending(model.name));
+        self.messages.push(chat::Message::user(text.clone()));
+        self.messages.push(chat::Message::pending(model.name));
         self.messages_changed();
         // Sending your own message always jumps to it.
         self.scroll_to_bottom();
 
-        let text = format!("{}: {text}", user_name());
-        let (tx, rx) = mpsc::channel();
-        let pid_slot: openrouter::PidSlot = Arc::new(Mutex::new(None));
-        let thread_pid_slot = Arc::clone(&pid_slot);
-        let handle = thread::spawn(move || {
-            let pid_slot = thread_pid_slot;
-            // Lamp on: thinking mode — same single-model request, but using the
-            // fwend's beefier thinking model with reasoning turned on. Lamp off:
-            // the fast model with reasoning off.
-            let model_id = if thinking {
-                model.thinking_id
-            } else {
-                model.id
-            };
-            let result = send_openrouter_request(
-                model_id,
-                &system_prompt,
-                &history,
-                &text,
-                thinking,
-                &pid_slot,
-            );
-            let _ = tx.send(result);
-        });
-        self.pending = Some(PendingReply {
-            rx,
-            author: model.name,
-            pid_slot,
-            handle,
-        });
+        let text = format!("{}: {text}", chat::user_name());
+        self.pending = Some(chat::PendingReply::spawn(
+            model,
+            thinking,
+            system_prompt,
+            history,
+            text,
+        ));
     }
 
     fn erase_chat_history(&mut self) {
         if let Some(pending) = self.pending.take() {
             pending.cancel();
         }
-        self.messages = vec![intro_message()];
+        self.messages = vec![chat::intro_message()];
         self.messages_changed();
     }
 
@@ -660,8 +517,8 @@ impl Fwends {
 
     /// Wraps `message` through the font engine and lays it out at `y = 0`;
     /// the caller fills in the real cumulative `y`.
-    fn compute_message_layout(&self, message: &Message) -> MessageLayout {
-        let style = message.style();
+    fn compute_message_layout(&self, message: &chat::Message) -> MessageLayout {
+        let style = message_style(message.role());
         let max_text_w = BUBBLE_MAX_W - style.pad_left - style.pad_right;
         let layout = TextLayout::new(
             &self.font,
@@ -670,7 +527,7 @@ impl Fwends {
             max_text_w,
             LinePlacement::Uniform { line_h: LINE_H },
         );
-        let lines = layout.wrap(&message.text);
+        let lines = layout.wrap(message.text());
         let text_w = lines
             .iter()
             .map(|line| self.font.text_width(line))
@@ -687,7 +544,7 @@ impl Fwends {
         MessageLayout {
             style,
             lines,
-            author: message.author,
+            author: message.author(),
             x,
             y: 0,
             w,
@@ -1112,23 +969,6 @@ const YELLOW_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = {
     remap
 };
 
-#[derive(Clone, Copy)]
-struct Model {
-    id: &'static str,
-    thinking_id: &'static str,
-    name: &'static str,
-    avatar: fn() -> Sprite,
-    icon_index: usize,
-}
-
-#[derive(Clone, PartialEq)]
-struct Message {
-    role: Role,
-    text: String,
-    kind: MessageKind,
-    author: Option<&'static str>,
-}
-
 #[derive(Clone)]
 struct MessageLayout {
     style: MessageStyle,
@@ -1140,54 +980,11 @@ struct MessageLayout {
     h: usize,
 }
 
-impl Message {
-    const fn user(text: String) -> Self {
-        Self {
-            role: Role::User,
-            text,
-            kind: MessageKind::Normal,
-            author: None,
-        }
-    }
-
-    const fn assistant(text: String) -> Self {
-        Self {
-            role: Role::Assistant,
-            text,
-            kind: MessageKind::Normal,
-            author: None,
-        }
-    }
-
-    fn intro(text: String) -> Self {
-        Self {
-            kind: MessageKind::Intro,
-            ..Self::assistant(text)
-        }
-    }
-
-    fn pending(author: &'static str) -> Self {
-        Self {
-            kind: MessageKind::Pending,
-            author: Some(author),
-            ..Self::assistant("...".to_string())
-        }
-    }
-
-    const fn style(&self) -> MessageStyle {
-        match self.role {
-            Role::User => USER_MESSAGE_STYLE,
-            Role::Assistant => ASSISTANT_MESSAGE_STYLE,
-        }
-    }
-}
-
-fn intro_message() -> Message {
-    Message::intro("pick a fwend and say hi".to_string())
-}
-
 fn smol_icon_rect(name: &str) -> Option<Rect> {
-    let index = MODELS.iter().find(|model| model.name == name)?.icon_index;
+    let index = chat::MODELS
+        .iter()
+        .find(|model| model.name == name)?
+        .icon_index;
     Some(Rect::new(
         (index % 2) * SMOL_ICON_SIZE,
         (index / 2) * SMOL_ICON_SIZE,
@@ -1196,17 +993,11 @@ fn smol_icon_rect(name: &str) -> Option<Rect> {
     ))
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Role {
-    User,
-    Assistant,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MessageKind {
-    Normal,
-    Intro,
-    Pending,
+const fn message_style(role: chat::Role) -> MessageStyle {
+    match role {
+        chat::Role::User => USER_MESSAGE_STYLE,
+        chat::Role::Assistant => ASSISTANT_MESSAGE_STYLE,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1258,173 +1049,6 @@ const USER_MESSAGE_STYLE: MessageStyle = MessageStyle {
     align_right: true,
 };
 
-fn load_system_prompt() -> String {
-    let path = crate::paths::config_file(SYSTEM_PROMPT_FILE);
-    fs::read_to_string(&path).unwrap_or_else(|err| {
-        eprintln!("fwends: could not read system prompt at {path}, using default: {err}");
-        "You are a warm, concise chat companion. Answer directly and never reveal hidden reasoning."
-            .to_string()
-    })
-}
-
-fn request_history(messages: &[Message], current_name: &str, user_name: &str) -> Vec<Message> {
-    let recent: Vec<&Message> = messages
-        .iter()
-        .filter(|message| message.kind == MessageKind::Normal)
-        .collect();
-    let start = recent.len().saturating_sub(HISTORY_LIMIT);
-    recent[start..]
-        .iter()
-        .map(|message| match (message.role, message.author) {
-            (Role::User, _) => Message::user(format!("{user_name}: {}", message.text)),
-            (Role::Assistant, Some(author)) if author != current_name => {
-                Message::user(format!("{author}: {}", message.text))
-            }
-            (Role::Assistant, _) => (*message).clone(),
-        })
-        .collect()
-}
-
-fn strip_self_prefix(text: &str, name: &str) -> String {
-    let trimmed = text.trim_start();
-    if let Some(rest) = trimmed.strip_prefix(name)
-        && let Some(rest) = rest.trim_start().strip_prefix(':')
-    {
-        return rest.trim_start().to_string();
-    }
-    trimmed.to_string()
-}
-
-fn fwend_system_prompt(template: &str, name: &str, user_name: &str) -> String {
-    let mut prompt = template.replace("[[FREND_NAME]]", name);
-    let _ = write!(
-        prompt,
-        "\n\nThis is a group chat: messages from {user_name} and from other fwends arrive labeled like \"{user_name}: ...\" or \"Qwen: ...\". Your own earlier replies are unlabeled. Never start your reply with \"{name}:\" — just speak."
-    );
-    prompt
-}
-
-fn send_openrouter_request(
-    model: &str,
-    system_prompt: &str,
-    history: &[Message],
-    latest_text: &str,
-    thinking: bool,
-    pid_slot: &openrouter::PidSlot,
-) -> Result<String, String> {
-    let response = openrouter::post_cancelable(
-        &chat_body(model, system_prompt, history, latest_text, thinking),
-        if thinking {
-            openrouter::THINKING_TIMEOUT_SECS
-        } else {
-            openrouter::DEFAULT_TIMEOUT_SECS
-        },
-        Some(pid_slot),
-    )?;
-    extract_content(&response).map_err(|err| format!("{err}: {}", compact_error(&response)))
-}
-
-fn chat_body(
-    model: &str,
-    system_prompt: &str,
-    history: &[Message],
-    latest_text: &str,
-    thinking: bool,
-) -> Value {
-    let mut messages = vec![json!({
-        "role": "system",
-        "content": system_prompt.trim(),
-    })];
-    for message in history {
-        messages.push(json!({
-            "role": match message.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-            },
-            "content": message.text,
-        }));
-    }
-    messages.push(json!({
-        "role": "user",
-        "content": latest_text,
-    }));
-
-    // Thinking mode turns reasoning on (but still excludes the reasoning trace
-    // from the reply, which the UI never shows); regular mode disables it.
-    let reasoning = if thinking {
-        json!({"effort": "high", "exclude": true})
-    } else {
-        json!({"exclude": true})
-    };
-
-    // OpenRouter ignores "model" when a "models" routing list is present, so
-    // the requested model must lead the list with the preset as fallback.
-    json!({
-        "model": model,
-        "models": [model, openrouter::FALLBACK_MODEL],
-        "messages": messages,
-        "reasoning": reasoning,
-        "include_reasoning": false,
-    })
-}
-
-fn extract_content(response: &Value) -> Result<String, &'static str> {
-    let Some(content) = response
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-    else {
-        return Err("OpenRouter response did not include assistant content");
-    };
-
-    let text = openrouter::content_text(content);
-    if text.trim().is_empty() {
-        Err("OpenRouter assistant content was empty")
-    } else {
-        Ok(normalize_display_text(&text))
-    }
-}
-
-fn normalize_display_text(text: &str) -> String {
-    let text = crate::emojimap::replace_emoji(text);
-    let text = deunicode::deunicode(&text);
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '\n' | '\r' => out.push(' '),
-            ch if ch.is_ascii() && !ch.is_control() => out.push(ch),
-            '\t' => out.push(' '),
-            _ => {}
-        }
-    }
-    out
-}
-
-fn compact_error(response: &Value) -> String {
-    // Prefer the API's own error message; otherwise fall back to a truncated
-    // dump of the response. Truncate by chars: a byte split could panic.
-    if let Some(message) = response
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-    {
-        return message.chars().take(120).collect();
-    }
-    let text: String = response
-        .to_string()
-        .replace('\n', " ")
-        .chars()
-        .take(120)
-        .collect();
-    if text.is_empty() {
-        "empty OpenRouter response".to_string()
-    } else {
-        text
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1437,10 +1061,10 @@ mod tests {
         let palette = crate::assets::palette();
         let mut fwends = Fwends::load(&palette).unwrap();
         for i in 0..60 {
-            fwends.messages.push(Message::user(format!(
+            fwends.messages.push(chat::Message::user(format!(
                 "message number {i} with enough words to need wrapping across lines"
             )));
-            fwends.messages.push(Message::assistant(format!(
+            fwends.messages.push(chat::Message::assistant(format!(
                 "reply number {i}, also long enough that the wrapper has to break it up"
             )));
         }
@@ -1456,80 +1080,5 @@ mod tests {
             "fwends layout rebuild: {:?} ({iterations} iterations)",
             start.elapsed() / iterations
         );
-    }
-
-    #[test]
-    fn extracts_assistant_message_content() {
-        let json = r#"{"content":"wrong","choices":[{"message":{"role":"assistant","content":"hello\nthere"}}]}"#;
-        let response: Value = serde_json::from_str(json).unwrap();
-
-        assert_eq!(extract_content(&response).as_deref(), Ok("hello there"));
-    }
-
-    #[test]
-    fn chat_body_preserves_unicode_and_escapes_json() {
-        let parsed = chat_body("model", "system", &[], "hi \"there\" 🩷", false);
-
-        assert_eq!(parsed["model"], "model");
-        assert_eq!(parsed["models"][0], "model");
-        assert_eq!(parsed["models"][1], "@preset/free");
-        assert_eq!(parsed["messages"][1]["content"], "hi \"there\" 🩷");
-    }
-
-    #[test]
-    fn chat_body_excludes_reasoning_and_omits_tools() {
-        let parsed = chat_body("model", "system", &[], "hi", false);
-
-        assert_eq!(parsed["reasoning"]["exclude"], true);
-        assert!(parsed["reasoning"].get("effort").is_none());
-        assert!(parsed.get("tools").is_none());
-    }
-
-    #[test]
-    fn chat_body_thinking_enables_reasoning_but_excludes_trace() {
-        let parsed = chat_body("model", "system", &[], "hi", true);
-
-        assert_eq!(parsed["reasoning"]["effort"], "high");
-        assert_eq!(parsed["reasoning"]["exclude"], true);
-    }
-
-    #[test]
-    fn fwend_system_prompt_replaces_name_placeholder() {
-        let prompt = fwend_system_prompt("you are [[FREND_NAME]]!", "Qwen", "Jodie");
-
-        assert!(prompt.starts_with("you are Qwen!"));
-        assert!(prompt.contains("Never start your reply with \"Qwen:\""));
-    }
-
-    #[test]
-    fn request_history_tags_user_and_other_models() {
-        let mut claude_reply = Message::assistant("hi jodie".to_string());
-        claude_reply.author = Some("Claude");
-        let mut qwen_reply = Message::assistant("hello!".to_string());
-        qwen_reply.author = Some("Qwen");
-        let messages = vec![
-            intro_message(),
-            Message::user("hey".to_string()),
-            claude_reply,
-            qwen_reply,
-        ];
-
-        let history = request_history(&messages, "Qwen", "Jodie");
-
-        assert_eq!(history.len(), 3);
-        assert!(matches!(history[0].role, Role::User));
-        assert_eq!(history[0].text, "Jodie: hey");
-        assert!(matches!(history[1].role, Role::User));
-        assert_eq!(history[1].text, "Claude: hi jodie");
-        assert!(matches!(history[2].role, Role::Assistant));
-        assert_eq!(history[2].text, "hello!");
-    }
-
-    #[test]
-    fn strips_reflexive_name_prefix_from_reply() {
-        assert_eq!(strip_self_prefix("Qwen: hi there", "Qwen"), "hi there");
-        assert_eq!(strip_self_prefix("  Qwen : hi", "Qwen"), "hi");
-        assert_eq!(strip_self_prefix("Qwen is great", "Qwen"), "Qwen is great");
-        assert_eq!(strip_self_prefix("hi there", "Qwen"), "hi there");
     }
 }

@@ -21,6 +21,7 @@ mod fizzle;
 mod fwends;
 mod gauges;
 mod hunger;
+mod layout;
 mod localtime;
 mod openrouter;
 mod paths;
@@ -293,7 +294,7 @@ impl App {
     }
 
     fn height(&self) -> usize {
-        required_screen_height(&self.widget_heights(), self.desk.height, self.min_height)
+        layout::required_screen_height(&self.widget_heights(), self.desk.height, self.min_height)
     }
 
     /// Widget layout heights, indexed by `WidgetId::index()`. Fwends
@@ -371,7 +372,7 @@ impl App {
     fn render_rect(&mut self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
         self.render_background_rect(fb, palette, rect);
         for widget in WidgetId::visible() {
-            if rects_intersect(self.rect_for(widget), rect) {
+            if layout::rects_intersect(self.rect_for(widget), rect) {
                 self.render_widget(fb, palette, widget);
             }
         }
@@ -392,10 +393,11 @@ impl App {
         }
 
         let heights = self.widget_heights();
-        let screen_h = required_screen_height(&heights, self.desk.height, self.min_height);
-        let positions = widget_positions(&heights, screen_h);
+        let screen_h =
+            layout::required_screen_height(&heights, self.desk.height, self.min_height);
+        let positions = layout::widget_positions(&heights, screen_h);
         for (rect, (x, y)) in self.rects.iter_mut().zip(positions) {
-            changed |= move_rect(rect, x, y);
+            changed |= layout::move_rect(rect, x, y);
         }
         changed |= self.sync_fwends_height(screen_h, palette);
 
@@ -407,7 +409,7 @@ impl App {
         let fwends_rect = self.rects[WidgetId::Fwends.index()];
         // Fwends' top is pinned FWENDS_TOP below the window's top edge, so its
         // height must leave that much room or its rect overruns the screen.
-        if !fwends.set_height(screen_h.saturating_sub(FWENDS_TOP))
+        if !fwends.set_height(screen_h.saturating_sub(layout::FWENDS_TOP))
             && fwends_rect.h == fwends.height()
         {
             return false;
@@ -599,104 +601,12 @@ impl App {
     }
 }
 
-/// Where every widget sits. Tweak positions here.
-///
-/// `(x, y)`: x is pixels from the window's left edge to the widget's left
-/// edge; y is pixels from the BOTTOM of the window up to the widget's bottom
-/// edge (y = 0 puts the widget flush with the bottom; negative y hangs that
-/// many pixels of it below the bottom edge). Widgets keep their bottom-left
-/// corner pinned, so ones with dynamic sizes grow up/right from here.
-///
-/// Fwends is the one exception: it is pinned to the window's TOP edge and
-/// only its x is used.
-const fn widget_xy(widget: WidgetId) -> (usize, isize) {
-    match widget {
-        WidgetId::Puter => (463, 39),
-        WidgetId::Toodle => (322, 301),
-        WidgetId::Fwends => (713, -10),
-        WidgetId::Twirl => (587, 321),
-        WidgetId::Wavey => (113, 31),
-        WidgetId::Fizzle => (393, 31),
-        // 330 was Day's plain-view x before it grew a week-number column;
-        // shifting left by that column's width keeps the plain view's card
-        // pinned to the same on-screen position (see `day::PLAIN_CARD_X`).
-        WidgetId::Day => (330 - day::WEEK_COL_W, 197),
-        WidgetId::Budgit => (322, 752),
-        WidgetId::Stats => (322, 604),
-        WidgetId::Hunger => (463, 3),
-        WidgetId::Gauges => (335, 915),
-    }
-}
-
-/// The desk background's bottom edge, in the same bottom-up coordinate as
-/// `widget_xy` (negative = hangs below the window's bottom edge).
-const DESK_Y: isize = -39;
-
-/// Empty space kept above the tallest widget when the window height is
-/// content-driven rather than set by the window manager.
-const TOP_PADDING: usize = 25;
-
-/// How far below the window's top edge Fwends' top is pinned.
-const FWENDS_TOP: usize = 10;
-
-/// Widget (x, y) top-left positions, indexed by `WidgetId::index()`.
-/// Converts the bottom-anchored `widget_xy` table for a `screen_h`-tall
-/// window: top = screen_h - y - height.
-fn widget_positions(
-    heights: &[usize; WIDGET_COUNT],
-    screen_h: usize,
-) -> [(usize, usize); WIDGET_COUNT] {
-    let mut positions = [(0, 0); WIDGET_COUNT];
-    for widget in WidgetId::ALL {
-        let (x, y) = widget_xy(widget);
-        let h = heights[widget.index()] as isize;
-        let top = (screen_h as isize - y - h).max(0) as usize;
-        positions[widget.index()] = (x, top);
-    }
-    // Fwends stays pinned just below the window's top edge.
-    positions[WidgetId::Fwends.index()].1 = FWENDS_TOP;
-    positions
-}
-
-/// Window height needed to show every bottom-anchored widget and the desk,
-/// plus TOP_PADDING; the actual window height (`min_h`) wins if larger.
-/// Fwends contributes its `widget_heights` entry (its minimum height) at
-/// y = 0 like everything else, even though it ends up pinned to the top.
-fn required_screen_height(heights: &[usize; WIDGET_COUNT], desk_h: usize, min_h: usize) -> usize {
-    let mut needed = (desk_h as isize + DESK_Y).max(0) as usize;
-    for widget in WidgetId::ALL {
-        if !widget.is_visible() {
-            continue;
-        }
-        let (_, y) = widget_xy(widget);
-        let h = heights[widget.index()] as isize;
-        needed = needed.max((h + y).max(0) as usize);
-    }
-    (needed + TOP_PADDING).max(min_h)
-}
-
-const fn move_rect(rect: &mut Rect, x: usize, y: usize) -> bool {
-    if rect.x == x && rect.y == y {
-        return false;
-    }
-
-    rect.x = x;
-    rect.y = y;
-    true
-}
-
-const fn rects_intersect(a: Rect, b: Rect) -> bool {
-    a.x < b.x.saturating_add(b.w)
-        && b.x < a.x.saturating_add(a.w)
-        && a.y < b.y.saturating_add(b.h)
-        && b.y < a.y.saturating_add(a.h)
-}
-
 fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Palette, rect: Rect) {
     // The desk is bottom-anchored like the widgets: its bottom edge sits
     // DESK_Y above the window's bottom (below it when negative, cutting off
     // its lowest rows).
-    let desk_y = ((fb.height as isize - DESK_Y).max(0) as usize).saturating_sub(desk.height);
+    let desk_y =
+        ((fb.height as isize - layout::DESK_Y).max(0) as usize).saturating_sub(desk.height);
     let x0 = rect.x.min(fb.width);
     let x1 = rect.x.saturating_add(rect.w).min(fb.width);
     let y0 = rect.y.max(desk_y).min(fb.height);
@@ -711,7 +621,7 @@ fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Pal
     }
 
     let source_x: Vec<usize> = (x0..x1)
-        .map(|x| stretched_desk_source_x(x, fb.width, desk.width))
+        .map(|x| layout::stretched_desk_source_x(x, fb.width, desk.width))
         .collect();
     for y in y0..y1 {
         let source_y = y - desk_y;
@@ -721,25 +631,6 @@ fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Pal
                 fb.set_pixel(x, y, color);
             }
         }
-    }
-}
-
-fn stretched_desk_source_x(x: usize, target_w: usize, source_w: usize) -> usize {
-    if source_w <= 1 || target_w <= source_w {
-        return x.min(source_w.saturating_sub(1));
-    }
-
-    let middle = source_w / 2;
-    let left_w = middle;
-    let right_w = source_w - middle - 1;
-    let middle_w = target_w.saturating_sub(left_w + right_w).max(1);
-
-    if x < left_w {
-        x
-    } else if x < left_w + middle_w {
-        middle
-    } else {
-        middle + 1 + (x - left_w - middle_w).min(right_w.saturating_sub(1))
     }
 }
 
