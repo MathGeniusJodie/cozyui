@@ -88,24 +88,53 @@ pub(crate) fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
+/// A fixed-interval gate: `ready` reports whether `interval` has elapsed
+/// since the last time it returned `true`, at which point it resets its own
+/// clock. Several widgets poll some external state (clock, sysfs,
+/// filesystem) on every render tick but only want to actually re-read it
+/// once every so often; this factors out that "has it been long enough"
+/// check, shared by both `Refresh<T>` below and widgets whose reads are
+/// fallible or update more than one field at once (so they don't fit
+/// `Refresh`'s single-value replace-on-change shape).
+pub(crate) struct Throttle {
+    last_check: Instant,
+}
+
+impl Throttle {
+    /// Starts the clock at construction time, so the first `ready` call
+    /// waits a full `interval` before firing — matching the existing
+    /// widgets' first-tick behavior (they all seeded `last_check` with
+    /// `Instant::now()` at load time).
+    pub(crate) fn new() -> Self {
+        Self {
+            last_check: Instant::now(),
+        }
+    }
+
+    pub(crate) fn ready(&mut self, interval: Duration) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.last_check) < interval {
+            return false;
+        }
+        self.last_check = now;
+        true
+    }
+}
+
 /// A value that's recomputed on a fixed interval, only reporting a change
 /// when the recomputed value actually differs from the cached one. Several
 /// widgets poll some external state (clock, sysfs, filesystem) on every
 /// render tick but only want to redraw when the derived view changes; this
 /// factors out the common "elapsed check, recompute, compare, store" shape.
 pub(crate) struct Refresh<T> {
-    last_check: Instant,
+    throttle: Throttle,
     value: T,
 }
 
 impl<T: PartialEq> Refresh<T> {
-    /// Starts the throttle clock at construction time, so the first
-    /// `refresh` call waits a full `interval` before recomputing — matching
-    /// the existing widgets' first-tick behavior (they all seed `last_check`
-    /// with `Instant::now()` at load time).
     pub(crate) fn new(value: T) -> Self {
         Self {
-            last_check: Instant::now(),
+            throttle: Throttle::new(),
             value,
         }
     }
@@ -126,11 +155,9 @@ impl<T: PartialEq> Refresh<T> {
     /// the value changed; does nothing (and returns `false`) if `interval`
     /// hasn't elapsed yet.
     pub(crate) fn refresh(&mut self, interval: Duration, compute: impl FnOnce() -> T) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.last_check) < interval {
+        if !self.throttle.ready(interval) {
             return false;
         }
-        self.last_check = now;
         let value = compute();
         if value == self.value {
             return false;

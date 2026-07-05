@@ -6,7 +6,7 @@
 use std::error::Error;
 use std::f32::consts::PI;
 use std::fs;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::palette_color;
 use crate::text::BitmapFont;
@@ -46,7 +46,7 @@ pub struct Gauges {
     /// computed from the delta between consecutive samples.
     cpu_prev: (u64, u64),
     view: GaugeView,
-    last_check: Instant,
+    throttle: crate::util::Throttle,
     cpu_read_failing: crate::util::FailureLog,
     mem_read_failing: crate::util::FailureLog,
 }
@@ -65,7 +65,7 @@ impl Gauges {
             height,
             cpu_prev,
             view: GaugeView { cpu: 0, mem, swap },
-            last_check: Instant::now(),
+            throttle: crate::util::Throttle::new(),
             cpu_read_failing: crate::util::FailureLog::new(),
             mem_read_failing: crate::util::FailureLog::new(),
         })
@@ -87,11 +87,9 @@ impl Gauges {
 
     /// Re-sample /proc periodically; returns whether the view changed.
     pub(crate) fn update(&mut self) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.last_check) < REFRESH {
+        if !self.throttle.ready(REFRESH) {
             return false;
         }
-        self.last_check = now;
 
         let cpu = match read_cpu_times() {
             Some(sample) => {

@@ -255,7 +255,17 @@ const DISK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 impl Toodle {
     pub(crate) fn load(_palette: &Palette) -> Result<Self, Box<dyn Error>> {
         fs::create_dir_all(toodle_root())?;
-        recover_archive_transaction(&archive_transaction_path())?;
+        // A failure here (e.g. a marker truncated by a mid-write sync) must
+        // not take the whole app down: the marker file lives in the same
+        // sync-editable directory as the todo files themselves, so a
+        // corrupt copy is something an external tool can actually produce.
+        // Worst case, some already-staged archive writes are left as inert
+        // temp files instead of being recovered.
+        if let Err(err) = recover_archive_transaction(&archive_transaction_path()) {
+            eprintln!(
+                "toodle: failed to recover archive transaction, continuing without it: {err}"
+            );
+        }
 
         Ok(Self {
             pages: [
@@ -915,6 +925,16 @@ impl Toodle {
     }
 
     fn archive_completed_todos(&mut self) -> Result<(), Box<dyn Error>> {
+        // Finish off any transaction left half-committed by an earlier failed
+        // attempt in this same session (see the commit loop below) before
+        // starting a new one: otherwise the marker written below would
+        // overwrite the old one, silently orphaning whatever temp files it
+        // still referenced.
+        if let Err(err) = recover_archive_transaction(&archive_transaction_path()) {
+            eprintln!(
+                "toodle: failed to recover archive transaction, continuing without it: {err}"
+            );
+        }
         // The transaction below renames section files itself; it must not
         // interleave with the save worker's renames.
         self.wait_for_saves();
@@ -1032,8 +1052,23 @@ impl Toodle {
                 write.commit()?;
             }
             if let Some((text, write)) = section_write.take() {
-                let written = write.commit()?;
-                self.sections[section.index()].adopt(list, text, written);
+                // Once the done-file write above commits, the sweep is
+                // irreversible: fold the trimmed list into memory even if
+                // this section-file write fails, so a same-session retry
+                // never re-collects (and re-appends) the same items into the
+                // done file a second time. The stale on-disk section file is
+                // left for the marker-based recovery above (on the next
+                // retry or restart) or the ordinary dirty-save path to catch.
+                match write.commit() {
+                    Ok(fingerprint) => {
+                        self.sections[section.index()].adopt(list, text, fingerprint);
+                    }
+                    Err(err) => {
+                        *self.sections[section.index()].list_mut() = list;
+                        self.sections[section.index()].mark_dirty();
+                        return Err(err);
+                    }
+                }
             }
         }
         fs::remove_file(&marker_path)?;

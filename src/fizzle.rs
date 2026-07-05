@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::{Framebuffer, Index, Palette, Rect, Sprite, TRANSPARENT};
 
@@ -25,7 +25,7 @@ pub struct Fizzle {
     height: usize,
     charge: u8,
     discharging: bool,
-    last_check: Instant,
+    throttle: crate::util::Throttle,
     battery_read_failing: crate::util::FailureLog,
 }
 
@@ -56,7 +56,7 @@ impl Fizzle {
             height,
             charge,
             discharging,
-            last_check: Instant::now(),
+            throttle: crate::util::Throttle::new(),
             battery_read_failing: crate::util::FailureLog::new(),
         })
     }
@@ -75,11 +75,9 @@ impl Fizzle {
     }
 
     pub(crate) fn update(&mut self) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.last_check) < REFRESH {
+        if !self.throttle.ready(REFRESH) {
             return false;
         }
-        self.last_check = now;
 
         let Some((charge, discharging)) = read_battery() else {
             self.battery_read_failing.record_err(|| {

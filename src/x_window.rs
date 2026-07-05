@@ -451,7 +451,13 @@ impl XWindow {
         let reply = conn.shm_create_segment(seg, size as u32, false)?.reply()?;
         let fd: OwnedFd = reply.shm_fd;
         let file = File::from(fd);
-        let mmap = unsafe { MmapMut::map_mut(&file)? };
+        let mmap = match unsafe { MmapMut::map_mut(&file) } {
+            Ok(mmap) => mmap,
+            Err(err) => {
+                let _ = conn.shm_detach(seg);
+                return Err(err.into());
+            }
+        };
         if mmap.len() < size {
             let _ = conn.shm_detach(seg);
             return Err(format!(
@@ -1102,9 +1108,16 @@ impl XWindow {
                 property,
                 AtomEnum::ATOM,
                 0,
-                u32::MAX / 4,
+                // Same cap as the paste paths, in 32-bit units: without it a
+                // misbehaving (or malicious) requestor could force an
+                // arbitrarily large allocation via its own MULTIPLE property.
+                (MAX_PASTE_BYTES / 4) as u32,
             )?
             .reply()?;
+        if reply.bytes_after > 0 {
+            eprintln!("clipboard MULTIPLE request exceeded {MAX_PASTE_BYTES} bytes, ignoring");
+            return Ok(false);
+        }
         let Some(values) = reply.value32() else {
             return Ok(false);
         };

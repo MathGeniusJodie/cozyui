@@ -8,7 +8,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::localtime::{civil_from_days, days_from_civil};
 use crate::palette_color;
@@ -71,8 +71,45 @@ pub struct Stats {
     week: WeekCounts,
     /// Count cache, `files[day][priority]`, keyed by path + stat identity.
     files: [[DayFile; PRIORITY_COUNT]; DAYS],
-    last_check: Instant,
+    throttle: crate::util::Throttle,
     week_counts_read_failing: crate::util::FailureLog,
+}
+
+/// Per-priority segment heights for one day's bar: proportional to `count /
+/// max_total` scaled to `chart_h` (so the busiest day's bar fills the
+/// chart), with every nonzero count floored to `MIN_SEGMENT_H` so a single
+/// completed todo stays a visible sliver. The pixels added by that floor are
+/// taken back from the day's largest segment — rather than clamping
+/// whichever segment happens to be drawn last, which could zero it out —
+/// so the stack never exceeds `chart_h`.
+fn segment_heights(
+    day_counts: &[usize; PRIORITY_COUNT],
+    max_total: usize,
+    chart_h: usize,
+) -> [usize; PRIORITY_COUNT] {
+    let mut heights = [0; PRIORITY_COUNT];
+    if max_total == 0 {
+        return heights;
+    }
+
+    let mut floor_sum = 0;
+    let mut largest = 0;
+    for (priority, &count) in day_counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        heights[priority] = ((count * chart_h) / max_total).max(MIN_SEGMENT_H);
+        floor_sum += heights[priority];
+        if heights[priority] > heights[largest] {
+            largest = priority;
+        }
+    }
+
+    if let Some(overflow) = floor_sum.checked_sub(chart_h) {
+        heights[largest] = heights[largest].saturating_sub(overflow);
+    }
+
+    heights
 }
 
 impl Stats {
@@ -93,7 +130,7 @@ impl Stats {
                     count: 0,
                 })
             }),
-            last_check: Instant::now(),
+            throttle: crate::util::Throttle::new(),
             week_counts_read_failing: crate::util::FailureLog::new(),
         };
         stats.refresh_week_counts()?;
@@ -117,11 +154,9 @@ impl Stats {
 
     /// Re-read the done files periodically; returns whether the view changed.
     pub(crate) fn update(&mut self) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.last_check) < REFRESH {
+        if !self.throttle.ready(REFRESH) {
             return false;
         }
-        self.last_check = now;
         match self.refresh_week_counts() {
             Ok(changed) => {
                 self.week_counts_read_failing
@@ -213,20 +248,15 @@ impl Stats {
             // Stack priority segments from the bottom up, scaling the day's
             // total against the busiest day so the tallest bar fills the chart.
             let mut y = chart_bottom;
-            if max_total > 0 {
-                for (priority, &count) in day_counts.iter().enumerate() {
-                    if count == 0 {
-                        continue;
-                    }
-                    let seg_h = ((count * chart_h) / max_total)
-                        .max(MIN_SEGMENT_H)
-                        .min(y.saturating_sub(chart_top));
-                    if seg_h == 0 {
-                        continue;
-                    }
-                    y -= seg_h;
-                    fb.fill_rect(bar_x, y, bar_w, seg_h, PRIORITY_COLORS[priority]);
+            for (priority, &seg_h) in segment_heights(day_counts, max_total, chart_h)
+                .iter()
+                .enumerate()
+            {
+                if seg_h == 0 {
+                    continue;
                 }
+                y -= seg_h;
+                fb.fill_rect(bar_x, y, bar_w, seg_h, PRIORITY_COLORS[priority]);
             }
 
             // Total count, centered just above the top of the bar.
@@ -333,5 +363,26 @@ mod tests {
         assert_eq!(done_line_count(path.to_str().unwrap()).unwrap(), 3);
         assert_eq!(done_line_count("/no/such/stats/file").unwrap(), 0);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn segment_heights_never_exceeds_chart_h() {
+        // The busiest day (max_total == this day's total): one dominant
+        // priority plus several minor ones whose MIN_SEGMENT_H padding would,
+        // unclamped, push the stack past chart_h and zero out a segment.
+        let heights = segment_heights(&[80, 1, 1, 1], 83, 85);
+        assert_eq!(heights.iter().sum::<usize>(), 85);
+        assert!(heights.iter().all(|&h| h >= MIN_SEGMENT_H));
+    }
+
+    #[test]
+    fn segment_heights_floors_a_visible_sliver_for_every_nonzero_count() {
+        let heights = segment_heights(&[1, 1, 1, 1], 1000, 80);
+        assert_eq!(heights, [MIN_SEGMENT_H; PRIORITY_COUNT]);
+    }
+
+    #[test]
+    fn segment_heights_is_all_zero_when_nothing_completed() {
+        assert_eq!(segment_heights(&[0, 0, 0, 0], 0, 80), [0; PRIORITY_COUNT]);
     }
 }

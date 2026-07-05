@@ -186,6 +186,16 @@ impl Twirl {
         Ok(true)
     }
 
+    /// Whether `(x, y)` (already known to be inside the widget) falls within
+    /// the spinnable wheel's circle. Shared by `click` and `cursor_at` so the
+    /// clickable region and the hand cursor can never drift apart.
+    fn wheel_contains(&self, x: usize, y: usize) -> bool {
+        let (center_x, center_y) = self.wheel_center();
+        let dx = x as f32 + 0.5 - center_x;
+        let dy = y as f32 + 0.5 - center_y;
+        dx * dx + dy * dy <= center_x.min(center_y).powi(2)
+    }
+
     /// Hand inside the spinnable wheel, mirroring the `click` hit-test.
     pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
         if x < 0 || y < 0 {
@@ -193,16 +203,10 @@ impl Twirl {
         }
         let x = x as usize;
         let y = y as usize;
-        if x >= self.width() || y >= self.height() {
-            return CursorKind::Pointer;
-        }
-        let (center_x, center_y) = self.wheel_center();
-        let dx = x as f32 + 0.5 - center_x;
-        let dy = y as f32 + 0.5 - center_y;
-        if dx * dx + dy * dy <= center_x.min(center_y).powi(2) {
-            CursorKind::Hand
-        } else {
+        if x >= self.width() || y >= self.height() || !self.wheel_contains(x, y) {
             CursorKind::Pointer
+        } else {
+            CursorKind::Hand
         }
     }
 
@@ -212,14 +216,7 @@ impl Twirl {
         }
         let x = x as usize;
         let y = y as usize;
-        if x >= self.width() || y >= self.height() {
-            return;
-        }
-
-        let (center_x, center_y) = self.wheel_center();
-        let dx = x as f32 + 0.5 - center_x;
-        let dy = y as f32 + 0.5 - center_y;
-        if dx * dx + dy * dy > center_x.min(center_y).powi(2) {
+        if x >= self.width() || y >= self.height() || !self.wheel_contains(x, y) {
             return;
         }
 

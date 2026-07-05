@@ -285,7 +285,10 @@ impl Puter {
             return false;
         };
 
-        let Some(point) = self.terminal().and_then(|term| term.screen_point(x, y)) else {
+        // Clamped, not rejected: a selection drag can leave the grid before
+        // the button is released, and the selection should keep tracking the
+        // nearest cell instead of freezing until the pointer re-enters it.
+        let Some(point) = self.terminal().map(|term| term.clamped_screen_point(x, y)) else {
             return false;
         };
         if current == point {
@@ -894,8 +897,10 @@ impl Terminal {
         })
     }
 
-    fn screen_point(&self, x: i16, y: i16) -> Option<Point> {
-        screen_point(x, y, &self.window_size)
+    /// Like `screen_point`, but clamps out-of-grid coordinates instead of
+    /// rejecting them; see the free function of the same name for why.
+    fn clamped_screen_point(&self, x: i16, y: i16) -> Point {
+        clamped_screen_point(x, y, &self.window_size)
     }
 
     fn mouse_release(&self, x: i16, y: i16) {

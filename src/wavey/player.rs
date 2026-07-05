@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -327,21 +327,40 @@ fn player_fifo_path() -> PathBuf {
     runtime_dir().join("cozyui-mpv-wavey.cmd")
 }
 
-/// Session setup plus command hand-off, on a background thread: the `mkfifo`/
-/// `abduco` `.status()` calls block until those children exit, which must not
-/// stall the UI thread (`play_station` runs inside `click`). The ordering
-/// matters — the previous mpv must be dead before the FIFO and its reader
-/// loop exist (both would otherwise be racing over the same socket path), and
-/// the FIFO must exist before the command write, or the shell redirection
-/// would create a plain file — so all three steps share one thread.
+/// Session setup plus command hand-off, queued onto one persistent worker
+/// thread (spawned lazily on first use): the `mkfifo`/`abduco` `.status()`
+/// calls block until those children exit, which must not stall the UI thread
+/// (`play_station` runs inside `click`). The ordering matters — the previous
+/// mpv must be dead before the FIFO and its reader loop exist (both would
+/// otherwise be racing over the same socket path), and the FIFO must exist
+/// before the command write, or the shell redirection would create a plain
+/// file — and that ordering has to hold across overlapping calls too (e.g.
+/// clicking two different stations in quick succession), not just within
+/// one, since every call races the same fixed IPC socket, FIFO, and abduco
+/// session name. A single worker draining a channel gives both: one thread
+/// running the three steps, and calls processed strictly in the order they
+/// were queued, so the most recently requested station always wins.
 /// `play_station` also fires a non-blocking `stop_player` first for prompt UI
 /// state reset, but the authoritative, ordered kill happens here.
 pub(super) fn start_player(command_line: String) {
-    thread::spawn(move || {
-        kill_player_blocking();
-        ensure_player_session();
-        queue_player_command(&command_line);
-    });
+    if let Ok(tx) = player_command_tx().lock() {
+        let _ = tx.send(command_line);
+    }
+}
+
+fn player_command_tx() -> &'static Mutex<mpsc::Sender<String>> {
+    static TX: OnceLock<Mutex<mpsc::Sender<String>>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<String>();
+        thread::spawn(move || {
+            for command_line in rx {
+                kill_player_blocking();
+                ensure_player_session();
+                queue_player_command(&command_line);
+            }
+        });
+        Mutex::new(tx)
+    })
 }
 
 /// One persistent "wavey" abduco session running a shell loop that reads mpv

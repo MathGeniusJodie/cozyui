@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::app_color;
 use crate::localtime::{self, local_time};
@@ -112,7 +112,7 @@ pub struct Day {
     number_font: BitmapFont,
     calendar_font: BitmapFont,
     date: DateState,
-    last_check: Instant,
+    throttle: crate::util::Throttle,
     calendar_mode: bool,
 }
 
@@ -133,7 +133,7 @@ impl Day {
             // invalid placeholder (see `DateState::Unknown`) rather than a
             // plausible-looking wrong date.
             date: current_date_parts().map_or(DateState::Unknown, DateState::Known),
-            last_check: Instant::now(),
+            throttle: crate::util::Throttle::new(),
             calendar_mode: false,
         })
     }
@@ -296,12 +296,10 @@ impl Day {
     }
 
     pub(crate) fn update(&mut self) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.last_check) < DATE_REFRESH {
+        if !self.throttle.ready(DATE_REFRESH) {
             return false;
         }
 
-        self.last_check = now;
         // On failure, keep showing the previously displayed date rather than
         // overwrite it with a wrong one.
         let Some(date) = current_date_parts() else {
