@@ -27,7 +27,9 @@ pub(crate) enum ScrollDirection {
 
 /// Coordinates passed to the pointer methods are widget-local (the app shell
 /// subtracts the widget's rect); they can be negative when a drag leaves the
-/// widget.
+/// widget. `isize` throughout, matching `pixel_graphics`/`pixel_fonts` — the
+/// X11 event's native `i16` is cast to `isize` once, at the event boundary
+/// in `main.rs`.
 pub(crate) trait Widget {
     fn width(&self) -> usize;
     fn height(&self) -> usize;
@@ -44,7 +46,7 @@ pub(crate) trait Widget {
     fn update(&mut self) -> Result<bool, Box<dyn Error>> {
         Ok(false)
     }
-    fn click(&mut self, _x: i16, _y: i16, _state: u16) -> Result<ClickOutcome, Box<dyn Error>> {
+    fn click(&mut self, _x: isize, _y: isize, _state: u16) -> Result<ClickOutcome, Box<dyn Error>> {
         Ok(ClickOutcome::default())
     }
     /// Focus moved to another widget; drop any focus-only visuals (cursors,
@@ -52,7 +54,7 @@ pub(crate) trait Widget {
     fn blur(&mut self) {}
     /// Pointer moved while this widget has focus; returns whether a redraw is
     /// needed.
-    fn motion(&mut self, _x: i16, _y: i16) -> bool {
+    fn motion(&mut self, _x: isize, _y: isize) -> bool {
         false
     }
     /// Pointer-position report for hover effects, regardless of focus:
@@ -60,14 +62,14 @@ pub(crate) trait Widget {
     /// pointer, `(-1, -1)` otherwise (so a hover can clear when the pointer
     /// leaves or an overlapping widget is on top). Returns whether a redraw
     /// is needed.
-    fn hover(&mut self, _x: i16, _y: i16) -> bool {
+    fn hover(&mut self, _x: isize, _y: isize) -> bool {
         false
     }
     /// Wheel scroll over the widget; returns whether it was handled.
-    fn scroll(&mut self, _x: i16, _y: i16, _direction: ScrollDirection) -> bool {
+    fn scroll(&mut self, _x: isize, _y: isize, _direction: ScrollDirection) -> bool {
         false
     }
-    fn cursor_at(&self, _x: i16, _y: i16) -> CursorKind {
+    fn cursor_at(&self, _x: isize, _y: isize) -> CursorKind {
         CursorKind::Pointer
     }
     /// Returns text to copy to the clipboard, if the key asked for a copy.
@@ -83,7 +85,7 @@ pub(crate) trait Widget {
         false
     }
     /// Continue a text-selection drag; returns whether a redraw is needed.
-    fn drag_text(&mut self, _x: i16, _y: i16) -> bool {
+    fn drag_text(&mut self, _x: isize, _y: isize) -> bool {
         false
     }
     fn end_text_drag(&mut self) {}

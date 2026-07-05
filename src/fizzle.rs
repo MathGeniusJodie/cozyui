@@ -113,7 +113,7 @@ impl Fizzle {
             let src_y = row % self.middle.height;
             fb.draw_sprite_region(
                 &self.middle,
-                Rect::new(0, src_y, self.middle.width, 1),
+                Rect::new(0, src_y as isize, self.middle.width, 1),
                 0,
                 y,
                 palette,

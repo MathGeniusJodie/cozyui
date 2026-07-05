@@ -36,7 +36,7 @@ mod widget;
 mod x_window;
 
 pub(crate) use pixel_graphics::{
-    Framebuffer, Index, Paint, Palette, Rect, Rgb, Sprite, Swap, TRANSPARENT,
+    Caps, Framebuffer, Index, Paint, Palette, PaletteIndex, Rect, Rgb, Sprite, Swap, TRANSPARENT,
 };
 use widget::{ScrollDirection, Widget};
 use x_window::XWindow;
@@ -64,7 +64,7 @@ pub(crate) mod palette_color {
 
 pub(crate) mod app_color {
     use crate::palette_color;
-    use crate::{Index, Paint};
+    use crate::{Index, Paint, PaletteIndex};
 
     /// Solid under-paint color for the root/widget framebuffers; the desk
     /// background checker is drawn over it.
@@ -73,18 +73,25 @@ pub(crate) mod app_color {
     /// The background and its cast shadows are the only thing that paints with
     /// these checkers. Everything else uses literal palette colors. With
     /// `TRANSPARENT_BACKGROUND` the background collapses to `TRANSPARENT`
-    /// holes instead, which the X SHAPE mask then cuts out of the window.
+    /// holes instead (`Paint::Clear`), which the X SHAPE mask then cuts out
+    /// of the window.
     pub const BACKGROUND_PAINT: Paint = if crate::TRANSPARENT_BACKGROUND {
-        Paint::Solid(crate::TRANSPARENT)
+        Paint::Clear
     } else {
-        Paint::Checker(palette_color::LIME, palette_color::CYAN)
+        Paint::Checker(
+            PaletteIndex::new(palette_color::LIME),
+            PaletteIndex::new(palette_color::CYAN),
+        )
     };
     /// Shadows stay visible on a transparent background so widgets still cast
     /// onto the desktop below.
     pub const BACKGROUND_SHADOW_PAINT: Paint = if crate::TRANSPARENT_BACKGROUND {
-        Paint::Solid(palette_color::PINE)
+        Paint::Solid(PaletteIndex::new(palette_color::PINE))
     } else {
-        Paint::Checker(palette_color::BLUE, palette_color::GREEN)
+        Paint::Checker(
+            PaletteIndex::new(palette_color::BLUE),
+            PaletteIndex::new(palette_color::GREEN),
+        )
     };
 }
 
@@ -299,7 +306,8 @@ impl App {
         let mut width = self.desk.width;
         for widget in WidgetId::visible() {
             let rect = self.rect_for(widget);
-            width = width.max(rect.x.saturating_add(rect.w));
+            let right_edge = (rect.x + rect.w as isize).max(0) as usize;
+            width = width.max(right_edge);
         }
         width.max(self.min_width)
     }
@@ -467,7 +475,7 @@ impl App {
     }
 
     /// Returns text the clicked widget wants copied to the clipboard.
-    fn click(&mut self, x: i16, y: i16, state: u16) -> Result<Option<String>, Box<dyn Error>> {
+    fn click(&mut self, x: isize, y: isize, state: u16) -> Result<Option<String>, Box<dyn Error>> {
         self.pointer_action = PointerAction::None;
         let Some((widget, x, y)) = self.widget_at(x, y) else {
             return Ok(None);
@@ -496,7 +504,7 @@ impl App {
         self.blurred.take()
     }
 
-    fn release(&mut self, x: i16, y: i16) -> Option<WidgetId> {
+    fn release(&mut self, x: isize, y: isize) -> Option<WidgetId> {
         if let PointerAction::TextDrag(widget) = self.pointer_action {
             self.pointer_action = PointerAction::None;
             self.widgets.get_mut(widget).end_text_drag();
@@ -519,7 +527,7 @@ impl App {
         None
     }
 
-    fn motion(&mut self, x: i16, y: i16) -> Option<WidgetId> {
+    fn motion(&mut self, x: isize, y: isize) -> Option<WidgetId> {
         if let PointerAction::TextDrag(widget) = self.pointer_action {
             let (local_x, local_y) = self.rect_for(widget).local(x, y);
             return self
@@ -553,15 +561,15 @@ impl App {
         changed
     }
 
-    fn scroll_up(&mut self, x: i16, y: i16) -> Option<WidgetId> {
+    fn scroll_up(&mut self, x: isize, y: isize) -> Option<WidgetId> {
         self.scroll(x, y, ScrollDirection::Up)
     }
 
-    fn scroll_down(&mut self, x: i16, y: i16) -> Option<WidgetId> {
+    fn scroll_down(&mut self, x: isize, y: isize) -> Option<WidgetId> {
         self.scroll(x, y, ScrollDirection::Down)
     }
 
-    fn scroll(&mut self, x: i16, y: i16, direction: ScrollDirection) -> Option<WidgetId> {
+    fn scroll(&mut self, x: isize, y: isize, direction: ScrollDirection) -> Option<WidgetId> {
         let (widget, x, y) = self.widget_at(x, y)?;
         self.widgets
             .get_mut(widget)
@@ -570,7 +578,7 @@ impl App {
     }
 
     /// Which cursor shape fits whatever is under the pointer.
-    fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+    fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
         if matches!(self.pointer_action, PointerAction::TextDrag(_)) {
             return CursorKind::Text;
         }
@@ -582,7 +590,7 @@ impl App {
 
     /// The topmost visible widget under `(x, y)`: paint order reversed, so
     /// hit-testing always agrees with what is drawn on top.
-    fn widget_at(&self, x: i16, y: i16) -> Option<(WidgetId, i16, i16)> {
+    fn widget_at(&self, x: isize, y: isize) -> Option<(WidgetId, isize, isize)> {
         WidgetId::ALL
             .into_iter()
             .rev()
@@ -620,13 +628,11 @@ fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Pal
     // its lowest rows).
     let desk_y =
         ((fb.height as isize - layout::DESK_Y).max(0) as usize).saturating_sub(desk.height);
-    let x0 = rect.x.min(fb.width);
-    let x1 = rect.x.saturating_add(rect.w).min(fb.width);
-    let y0 = rect.y.max(desk_y).min(fb.height);
-    let y1 = rect
-        .y
-        .saturating_add(rect.h)
-        .min(desk_y.saturating_add(desk.height))
+    let x0 = (rect.x.max(0) as usize).min(fb.width);
+    let x1 = ((rect.x + rect.w as isize).max(0) as usize).min(fb.width);
+    let y0 = (rect.y.max(0) as usize).max(desk_y).min(fb.height);
+    let y1 = ((rect.y + rect.h as isize).max(0) as usize)
+        .min(desk_y + desk.height)
         .min(fb.height);
 
     if x0 >= x1 || y0 >= y1 || desk.width == 0 || desk.height == 0 {
@@ -638,8 +644,8 @@ fn draw_stretched_desk_region(fb: &mut Framebuffer, desk: &Sprite, palette: &Pal
         for x in x0..x1 {
             let source_x = layout::stretched_desk_source_x(x, fb.width, desk.width);
             let paint = desk_background_paint(desk.at(source_x, source_y));
-            if let Some(color) = palette.resolve_paint_index(paint, x, y) {
-                fb.set_pixel(x, y, color);
+            if let Some(color) = palette.resolve_paint_index(paint, x as isize, y as isize) {
+                fb.set_pixel(x as isize, y as isize, color);
             }
         }
     }
@@ -649,7 +655,8 @@ const fn desk_background_paint(index: Index) -> Paint {
     match index {
         palette_color::ROSE => app_color::BACKGROUND_PAINT,
         palette_color::CRIMSON => app_color::BACKGROUND_SHADOW_PAINT,
-        other => Paint::Solid(other),
+        TRANSPARENT => Paint::Clear,
+        other => Paint::Solid(PaletteIndex::new(other)),
     }
 }
 
@@ -687,9 +694,7 @@ pub(crate) fn draw_filled_ellipse(
         }
         for x in center_x - dx..=center_x + dx {
             let y = center_y + dy;
-            if x >= 0 && y >= 0 {
-                fb.set_pixel(x as usize, y as usize, color);
-            }
+            fb.set_pixel(x, y, color);
         }
     }
 }
@@ -788,13 +793,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 XEvent::ButtonPress(event) => match event.detail {
                     WHEEL_UP => {
-                        if let Some(widget) = app.scroll_up(event.event_x, event.event_y) {
+                        if let Some(widget) =
+                            app.scroll_up(event.event_x.into(), event.event_y.into())
+                        {
                             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
                             drew_frame = true;
                         }
                     }
                     WHEEL_DOWN => {
-                        if let Some(widget) = app.scroll_down(event.event_x, event.event_y) {
+                        if let Some(widget) =
+                            app.scroll_down(event.event_x.into(), event.event_y.into())
+                        {
                             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
                             drew_frame = true;
                         }
@@ -802,7 +811,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     detail if detail == u8::from(ButtonIndex::M1) => {
                         if let Some(copy_text) = log_widget_err(
                             || "click".to_string(),
-                            app.click(event.event_x, event.event_y, event.state.into()),
+                            app.click(
+                                event.event_x.into(),
+                                event.event_y.into(),
+                                event.state.into(),
+                            ),
                         ) {
                             xwin.set_clipboard_text(copy_text)?;
                         }
@@ -812,7 +825,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 },
                 XEvent::ButtonRelease(event) => {
                     if event.detail == u8::from(ButtonIndex::M1)
-                        && let Some(widget) = app.release(event.event_x, event.event_y)
+                        && let Some(widget) =
+                            app.release(event.event_x.into(), event.event_y.into())
                     {
                         pending_motion_widget =
                             pending_motion_widget.filter(|pending| *pending != widget);
@@ -821,8 +835,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 XEvent::MotionNotify(event) => {
-                    xwin.set_cursor(app.cursor_at(event.event_x, event.event_y))?;
-                    if let Some(widget) = app.motion(event.event_x, event.event_y) {
+                    xwin.set_cursor(app.cursor_at(event.event_x.into(), event.event_y.into()))?;
+                    if let Some(widget) = app.motion(event.event_x.into(), event.event_y.into()) {
                         pending_motion_widget = Some(widget);
                     }
                 }

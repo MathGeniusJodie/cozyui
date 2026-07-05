@@ -1,6 +1,7 @@
-//! Bakes all PNG art into palette-indexed binaries at build time, so the
-//! shipped binary needs no asset files on disk and no PNG decoding for its
-//! own art (pixel-fonts still decodes its font atlases at runtime).
+//! Bakes all PNG art into palette-indexed binaries at build time (decoding
+//! via ImageMagick, not a Rust PNG decoder — see
+//! `pixel_graphics::magick_decode_rgba`), so the shipped binary needs no
+//! asset files on disk and no image decoding at runtime.
 //!
 //! Outputs in OUT_DIR:
 //! - `palette.bin`: RGB triples of the na16 palette
@@ -11,7 +12,11 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use pixel_graphics::{Palette, Rgba, Sprite};
+use pixel_graphics::{Palette, Rgba, Sprite, magick_decode_rgba};
+
+/// Widest asset dimension worth keeping; these are known local assets, so
+/// this is just a sanity bound, not a hostile-input defense.
+const MAX_DIM: usize = 16_384;
 
 const PALETTE_PNG: &str = "assets/na16-1x.png";
 
@@ -28,8 +33,9 @@ fn main() {
     println!("cargo::rerun-if-changed={GLYPH_ATLAS_PNG}");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let palette = Palette::load(PALETTE_PNG)
-        .unwrap_or_else(|e| panic!("failed to load palette {PALETTE_PNG}: {e}"));
+    let (_, _, palette_pixels) = magick_decode_rgba(PALETTE_PNG, MAX_DIM)
+        .unwrap_or_else(|| panic!("failed to load palette {PALETTE_PNG}"));
+    let palette = Palette::from_rgba(&palette_pixels);
     let mut out = String::new();
 
     let palette_bytes: Vec<u8> = (0..palette.len())
@@ -68,8 +74,9 @@ fn bake_sprite(path: &Path, palette: &Palette, out_dir: &Path, out: &mut String)
     let path_str = path
         .to_str()
         .unwrap_or_else(|| panic!("non-UTF-8 sprite path {}", path.display()));
-    let sprite = Sprite::load_native(path_str, palette)
-        .unwrap_or_else(|e| panic!("failed to bake sprite {path_str}: {e}"));
+    let (width, height, pixels) = magick_decode_rgba(path_str, MAX_DIM)
+        .unwrap_or_else(|| panic!("failed to bake sprite {path_str}"));
+    let sprite = Sprite::native_from_rgba(width, height, &pixels, palette);
     let name: String = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -99,12 +106,14 @@ fn bake_sprite(path: &Path, palette: &Palette, out_dir: &Path, out: &mut String)
 /// needs the colors, only whether each pixel is ink). Mirrors the size checks
 /// and `is_glyph_ink` threshold previously done at runtime in puter.rs.
 fn bake_glyph_atlas(out_dir: &Path, out: &mut String) {
-    let (width, height, pixels) = pixel_graphics::decode_png_with_size(GLYPH_ATLAS_PNG).unwrap();
+    let (width, height, pixels) = magick_decode_rgba(GLYPH_ATLAS_PNG, MAX_DIM)
+        .unwrap_or_else(|| panic!("failed to load glyph atlas {GLYPH_ATLAS_PNG}"));
     assert!(
         width >= GLYPH_W,
         "glyph atlas {GLYPH_ATLAS_PNG} is too narrow for terminal glyphs"
     );
-    let rows = 128_usize.div_ceil(width / GLYPH_W);
+    let cols = width / GLYPH_W;
+    let rows = 128_usize.div_ceil(cols);
     assert!(
         height >= rows * GLYPH_H,
         "glyph atlas {GLYPH_ATLAS_PNG} is too small for 128 terminal glyphs"

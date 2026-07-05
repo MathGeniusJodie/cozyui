@@ -8,7 +8,9 @@ use crate::palette_color;
 use crate::text::{
     BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
 };
-use crate::{CursorKind, Framebuffer, Index, Paint, Palette, Rect, Sprite, Swap, TRANSPARENT};
+use crate::{
+    CursorKind, Framebuffer, Index, Paint, Palette, PaletteIndex, Rect, Sprite, Swap, TRANSPARENT,
+};
 
 mod store;
 
@@ -30,25 +32,25 @@ const TODO_LINE_PLACEMENT: LinePlacement = LinePlacement::Split {
 const CHECK_VARIANTS: usize = 4;
 
 const VISIBLE_PAGE_COUNT: usize = 3;
-const PAGE_OFFSET_X: usize = 14;
+const PAGE_OFFSET_X: isize = 14;
 /// Gap between the front page's right edge and the dice button.
-const DICE_GAP: usize = 8;
-const PAGE_STACK_OFFSET: usize = 4;
+const DICE_GAP: isize = 8;
+const PAGE_STACK_OFFSET: isize = 4;
 const SHADOW_X_OFFSET: isize = 1;
 const SHADOW_Y_OFFSET: isize = 4;
-const ERASER_X: usize = 0;
-const ERASER_Y: usize = 21;
-const PRIORITY_ICON_GAP: usize = 2;
-const PRIORITY_ICON_OFFSET_X: usize = 62;
-const PRIORITY_ICON_OFFSET_Y: usize = 4;
-const GOLDSTAR_Y: usize = 24;
-const LINE_Y: [usize; LINE_COUNT] = [73, 95, 117, 139, 161, 183];
-const TEXT_X: usize = 31;
-const TEXT_Y_OFFSET: usize = 2;
-const CHECK_X: usize = 10;
+const ERASER_X: isize = 0;
+const ERASER_Y: isize = 21;
+const PRIORITY_ICON_GAP: isize = 2;
+const PRIORITY_ICON_OFFSET_X: isize = 62;
+const PRIORITY_ICON_OFFSET_Y: isize = 4;
+const GOLDSTAR_Y: isize = 24;
+const LINE_Y: [isize; LINE_COUNT] = [73, 95, 117, 139, 161, 183];
+const TEXT_X: isize = 31;
+const TEXT_Y_OFFSET: isize = 2;
+const CHECK_X: isize = 10;
 /// Always `LINE_Y[i] - 2`; derived so the two arrays can't drift apart.
-const CHECK_Y: [usize; LINE_COUNT] = {
-    let mut check_y = [0usize; LINE_COUNT];
+const CHECK_Y: [isize; LINE_COUNT] = {
+    let mut check_y = [0isize; LINE_COUNT];
     let mut i = 0;
     while i < LINE_COUNT {
         check_y[i] = LINE_Y[i] - 2;
@@ -59,22 +61,22 @@ const CHECK_Y: [usize; LINE_COUNT] = {
 /// Half-height of the horizontal band used to isolate one line's checkbox box
 /// when blitting it from the combined checkboxes sprite. Half the line pitch so
 /// adjacent boxes fall outside the band.
-const CHECK_BAND_HALF: usize = 11;
-const CHECK_W: usize = 13;
-const CHECK_H: usize = 13;
+const CHECK_BAND_HALF: isize = 11;
+const CHECK_W: isize = 13;
+const CHECK_H: isize = 13;
 const CHECK_SPRITE_W: usize = 16;
 const CHECK_SPRITE_H: usize = 16;
-const PAGE_CURL_X: usize = 140;
-const PAGE_CURL_Y: usize = 168;
+const PAGE_CURL_X: isize = 140;
+const PAGE_CURL_Y: isize = 168;
 const MAX_TEXT_CHARS: usize = 22;
 const LAST_LINE_MAX_TEXT_CHARS: usize = 18;
 const WRAPPED_FIRST_LINE_OFFSET_Y: usize = 2;
 const WRAPPED_SECOND_LINE_OFFSET_Y: usize = 7;
 const PENULTIMATE_LINE_SHADOW_MAX_CHARS: usize = 17;
 const LAST_LINE_SHADOW_MAX_CHARS: usize = 14;
-const LINE_CLICK_OFFSET_Y: usize = 9;
-const PENCIL_TIP_X: usize = 0;
-const PENCIL_TIP_Y: usize = 24;
+const LINE_CLICK_OFFSET_Y: isize = 9;
+const PENCIL_TIP_X: isize = 0;
+const PENCIL_TIP_Y: isize = 24;
 const MAX_TEXT_WIDTH: usize = MAX_TEXT_CHARS * 6;
 const LAST_LINE_MAX_TEXT_WIDTH: usize = LAST_LINE_MAX_TEXT_CHARS * 6;
 
@@ -166,7 +168,7 @@ impl Focus {
         self.field_mut().handle_key(input, clipboard_text, layout)
     }
 
-    fn index_at(&self, layout: &TextLayout, x: usize, y: usize) -> usize {
+    fn index_at(&self, layout: &TextLayout, x: isize, y: isize) -> usize {
         self.field().index_at(layout, x, y)
     }
 
@@ -307,13 +309,14 @@ impl Toodle {
 
     pub(crate) fn width(&self) -> usize {
         let stack_right =
-            (PAGE_OFFSET_X + self.pages[0].width + self.stack_offset()) + SHADOW_X_OFFSET as usize;
-        let dice_right = PAGE_OFFSET_X + self.pages[0].width + DICE_GAP + self.dice.width;
-        stack_right.max(dice_right)
+            PAGE_OFFSET_X + self.pages[0].width as isize + self.stack_offset() + SHADOW_X_OFFSET;
+        let dice_right =
+            PAGE_OFFSET_X + self.pages[0].width as isize + DICE_GAP + self.dice.width as isize;
+        stack_right.max(dice_right).max(0) as usize
     }
 
     pub(crate) fn height(&self) -> usize {
-        (self.pages[0].height + self.stack_offset()) + SHADOW_Y_OFFSET as usize
+        (self.pages[0].height as isize + self.stack_offset() + SHADOW_Y_OFFSET).max(0) as usize
     }
 
     #[allow(clippy::unused_self)]
@@ -368,7 +371,7 @@ impl Toodle {
         for visual_page in (0..page_count).rev() {
             let logical_page = (self.page + visual_page) % page_count;
             let PageRef { section, .. } = self.page_ref(logical_page);
-            let page_offset = visual_page * PAGE_STACK_OFFSET;
+            let page_offset = visual_page as isize * PAGE_STACK_OFFSET;
             let page_x = PAGE_OFFSET_X + page_offset;
             let page_y = page_offset;
             let page_image = &self.pages[visual_page.min(self.pages.len() - 1)];
@@ -384,7 +387,7 @@ impl Toodle {
             // checkbox lines) in `draw_front_overlay`; here we only bake the
             // checkboxes of the partially-covered pages beneath it.
             if visual_page != 0 {
-                fb.draw_sprite(&self.checkboxes, page_x as isize, page_y as isize, palette);
+                fb.draw_sprite(&self.checkboxes, page_x, page_y, palette);
             }
         }
     }
@@ -463,9 +466,9 @@ impl Toodle {
             }
         }
 
-        fb.draw_sprite(&self.eraser, ERASER_X as isize, ERASER_Y as isize, palette);
+        fb.draw_sprite(&self.eraser, ERASER_X, ERASER_Y, palette);
         let (dice_x, dice_y) = self.dice_pos();
-        fb.draw_sprite(&self.dice, dice_x as isize, dice_y as isize, palette);
+        fb.draw_sprite(&self.dice, dice_x, dice_y, palette);
         self.draw_priority_icon(fb, palette);
         self.draw_goldstar(fb, palette);
         self.draw_focused_pencil(fb, palette);
@@ -473,19 +476,19 @@ impl Toodle {
 
     fn draw_page_shadow(&self, fb: &mut Framebuffer, palette: &Palette, visual_page: usize) {
         let page_image = &self.pages[visual_page.min(self.pages.len() - 1)];
-        let page_offset = visual_page * PAGE_STACK_OFFSET;
+        let page_offset = visual_page as isize * PAGE_STACK_OFFSET;
         let page_x = PAGE_OFFSET_X + page_offset;
         let page_y = page_offset;
         fb.draw_sprite_silhouette(
             page_image,
-            page_x as isize + SHADOW_X_OFFSET,
-            page_y as isize + SHADOW_Y_OFFSET,
+            page_x + SHADOW_X_OFFSET,
+            page_y + SHADOW_Y_OFFSET,
             palette,
             app_color::BACKGROUND_SHADOW_PAINT,
         );
     }
 
-    pub(crate) fn click(&mut self, x: i16, y: i16) -> Result<bool, Box<dyn Error>> {
+    pub(crate) fn click(&mut self, x: isize, y: isize) -> Result<bool, Box<dyn Error>> {
         self.focus.end_drag();
         if self.eraser_at(x, y) {
             self.archive_completed_todos()?;
@@ -499,8 +502,8 @@ impl Toodle {
             return Ok(false);
         }
 
-        let abs_x = x.max(0) as usize;
-        let abs_y = y.max(0) as usize;
+        let abs_x = x.max(0);
+        let abs_y = y.max(0);
         let Some(page_x) = abs_x.checked_sub(PAGE_OFFSET_X) else {
             self.focus = Focus::None;
             return Ok(false);
@@ -545,7 +548,7 @@ impl Toodle {
         Ok(false)
     }
 
-    pub(crate) fn drag_text(&mut self, x: i16, y: i16) -> bool {
+    pub(crate) fn drag_text(&mut self, x: isize, y: isize) -> bool {
         if !self.focus.is_dragging() {
             return false;
         }
@@ -553,8 +556,8 @@ impl Toodle {
         let Some(line) = self.focus.line() else {
             return false;
         };
-        let abs_x = x.max(0) as usize;
-        let abs_y = y.max(0) as usize;
+        let abs_x = x.max(0);
+        let abs_y = y.max(0);
         let cursor = self
             .focus
             .index_at(&Self::line_layout(&self.font, line), abs_x, abs_y);
@@ -570,12 +573,12 @@ impl Toodle {
     }
 
     /// Mirrors the hit-testing in `click`, without side effects.
-    pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+    pub(crate) fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
         if self.eraser_at(x, y) || self.dice_at(x, y) {
             return CursorKind::Hand;
         }
-        let abs_x = x.max(0) as usize;
-        let abs_y = y.max(0) as usize;
+        let abs_x = x.max(0);
+        let abs_y = y.max(0);
         let Some(page_x) = abs_x.checked_sub(PAGE_OFFSET_X) else {
             return CursorKind::Pointer;
         };
@@ -604,7 +607,7 @@ impl Toodle {
         item.is_checkbox() && (item.checked() || !item.text().is_empty())
     }
 
-    pub(crate) fn hover(&mut self, x: i16, y: i16) -> bool {
+    pub(crate) fn hover(&mut self, x: isize, y: isize) -> bool {
         let was_hovered = self.eraser_hovered;
         if x < 0 || y < 0 {
             self.eraser_hovered = false;
@@ -726,12 +729,17 @@ impl Toodle {
     /// band centered on the line so neighbouring boxes are untouched.
     fn draw_checkbox_box(&self, fb: &mut Framebuffer, palette: &Palette, line: usize) {
         let band_top = CHECK_Y[line].saturating_sub(CHECK_BAND_HALF);
-        let src = Rect::new(0, band_top, self.checkboxes.width, CHECK_BAND_HALF * 2);
+        let src = Rect::new(
+            0,
+            band_top,
+            self.checkboxes.width,
+            (CHECK_BAND_HALF * 2) as usize,
+        );
         fb.draw_sprite_full(
             &self.checkboxes,
             src,
-            PAGE_OFFSET_X as isize,
-            band_top as isize,
+            PAGE_OFFSET_X,
+            band_top,
             None,
             palette,
             None,
@@ -744,21 +752,21 @@ impl Toodle {
     /// (see `draw_front_overlay`'s doc comment), so there's no page-relative
     /// offset to apply here either.
     fn draw_check(&self, fb: &mut Framebuffer, palette: &Palette, section: Priority, line: usize) {
-        let src_x = (section.index() + line) % CHECK_VARIANTS * CHECK_SPRITE_W;
+        let src_x = ((section.index() + line) % CHECK_VARIANTS * CHECK_SPRITE_W) as isize;
         let dest_x = PAGE_OFFSET_X + CHECK_X - 1;
         let dest_y = CHECK_Y[line] - 4;
         let src = Rect::new(src_x, 0, CHECK_SPRITE_W, CHECK_SPRITE_H);
 
         let swap = if self.eraser_hovered {
-            Swap::uniform(Paint::Solid(palette_color::GUNMETAL))
+            Swap::uniform(Paint::Solid(PaletteIndex::new(palette_color::GUNMETAL)))
         } else {
             Swap::identity()
         };
         fb.draw_sprite_full(
             &self.checks,
             src,
-            dest_x as isize,
-            dest_y as isize,
+            dest_x,
+            dest_y,
             None,
             palette,
             Some(&swap),
@@ -1083,9 +1091,10 @@ impl Toodle {
         let Some(icon) = self.priority_icon() else {
             return;
         };
-        let icon_x = ERASER_X + self.eraser.width + PRIORITY_ICON_GAP + PRIORITY_ICON_OFFSET_X;
+        let icon_x =
+            ERASER_X + self.eraser.width as isize + PRIORITY_ICON_GAP + PRIORITY_ICON_OFFSET_X;
         let icon_y = ERASER_Y + PRIORITY_ICON_OFFSET_Y;
-        fb.draw_sprite(icon, icon_x as isize, icon_y as isize, palette);
+        fb.draw_sprite(icon, icon_x, icon_y, palette);
     }
 
     fn priority_icon(&self) -> Option<&Sprite> {
@@ -1104,8 +1113,8 @@ impl Toodle {
         )
     }
 
-    fn stack_offset(&self) -> usize {
-        self.logical_page_count().saturating_sub(1) * PAGE_STACK_OFFSET
+    fn stack_offset(&self) -> isize {
+        self.logical_page_count().saturating_sub(1) as isize * PAGE_STACK_OFFSET
     }
 
     fn logical_page_count(&self) -> usize {
@@ -1177,19 +1186,14 @@ impl Toodle {
     }
 
     fn draw_goldstar(&self, fb: &mut Framebuffer, palette: &Palette) {
-        let star_x = PAGE_OFFSET_X + self.pages[0].width - self.goldstar.width;
-        fb.draw_sprite(
-            &self.goldstar,
-            star_x as isize,
-            GOLDSTAR_Y as isize,
-            palette,
-        );
+        let star_x = PAGE_OFFSET_X + (self.pages[0].width - self.goldstar.width) as isize;
+        fb.draw_sprite(&self.goldstar, star_x, GOLDSTAR_Y, palette);
 
         let count = self.goldstar_count().to_string();
         let text_w = self.font.text_width(&count);
         let text_h = self.font.cell_h();
-        let text_x = star_x + self.goldstar.width.saturating_sub(text_w) / 2;
-        let text_y = GOLDSTAR_Y + self.goldstar.height.saturating_sub(text_h) / 2;
+        let text_x = star_x + (self.goldstar.width.saturating_sub(text_w) / 2) as isize;
+        let text_y = GOLDSTAR_Y + (self.goldstar.height.saturating_sub(text_h) / 2) as isize;
 
         self.font.draw_text_limited(
             fb,
@@ -1206,14 +1210,14 @@ impl Toodle {
         fb: &mut Framebuffer,
         palette: &Palette,
         line: usize,
-        x: usize,
-        y: usize,
+        x: isize,
+        y: isize,
         pencil_on_second_line: bool,
     ) {
         // `x`/`y` already include the page offset (they come from the absolute
         // text layout).
-        let dest_x = x.saturating_sub(PENCIL_TIP_X);
-        let dest_y = y.saturating_sub(PENCIL_TIP_Y);
+        let dest_x = x - PENCIL_TIP_X;
+        let dest_y = y - PENCIL_TIP_Y;
 
         if self.should_draw_pencil_shadow(line) {
             draw_pencil_shadow(
@@ -1228,13 +1232,13 @@ impl Toodle {
         }
     }
 
-    fn draw_pencil_cursor(&self, fb: &mut Framebuffer, palette: &Palette, x: usize, y: usize) {
+    fn draw_pencil_cursor(&self, fb: &mut Framebuffer, palette: &Palette, x: isize, y: isize) {
         // `x`/`y` already include the page offset (they come from the absolute
         // text layout).
-        let dest_x = x.saturating_sub(PENCIL_TIP_X);
-        let dest_y = y.saturating_sub(PENCIL_TIP_Y);
+        let dest_x = x - PENCIL_TIP_X;
+        let dest_y = y - PENCIL_TIP_Y;
 
-        fb.draw_sprite(&self.pencil, dest_x as isize, dest_y as isize, palette);
+        fb.draw_sprite(&self.pencil, dest_x, dest_y, palette);
     }
 
     fn draw_focused_pencil_shadow(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -1262,7 +1266,7 @@ impl Toodle {
         self.draw_pencil_cursor(fb, palette, cursor_x, cursor_y);
     }
 
-    fn focused_pencil_position(&self) -> Option<(usize, usize, usize, bool)> {
+    fn focused_pencil_position(&self) -> Option<(usize, isize, isize, bool)> {
         let line = self.focus.line()?;
         let PageRef { section, page } = self.current_page_ref();
         let todo = self.list(section).item(page, line);
@@ -1271,7 +1275,8 @@ impl Toodle {
         // A cursor sitting in overflow text (wrapped past the two drawn
         // lines) would place the pencil inside the todo below; pin it to the
         // second line's row instead.
-        let cursor_y = cursor_y.min(LINE_Y[line] - TEXT_Y_OFFSET + WRAPPED_SECOND_LINE_OFFSET_Y);
+        let cursor_y =
+            cursor_y.min(LINE_Y[line] - TEXT_Y_OFFSET + WRAPPED_SECOND_LINE_OFFSET_Y as isize);
         Some((line, cursor_x, cursor_y, layout.wrap(todo.text()).len() > 1))
     }
 
@@ -1287,14 +1292,14 @@ impl Toodle {
 
     /// Top-left corner of the dice button: just past the front page's right
     /// edge (clear of the page-curl hotspot), aligned to the page's bottom.
-    const fn dice_pos(&self) -> (usize, usize) {
+    const fn dice_pos(&self) -> (isize, isize) {
         let page = &self.pages[0];
-        let x = PAGE_OFFSET_X + page.width + DICE_GAP;
-        let y = page.height.saturating_sub(self.dice.height);
+        let x = PAGE_OFFSET_X + page.width as isize + DICE_GAP;
+        let y = page.height.saturating_sub(self.dice.height) as isize;
         (x, y)
     }
 
-    fn dice_at(&self, x: i16, y: i16) -> bool {
+    fn dice_at(&self, x: isize, y: isize) -> bool {
         let (dice_x, dice_y) = self.dice_pos();
         point_in_rect(x, y, dice_x, dice_y, self.dice.width, self.dice.height)
     }
@@ -1321,7 +1326,7 @@ impl Toodle {
             });
     }
 
-    fn eraser_at(&self, x: i16, y: i16) -> bool {
+    fn eraser_at(&self, x: isize, y: isize) -> bool {
         point_in_rect(
             x,
             y,
@@ -1352,8 +1357,8 @@ impl crate::widget::Widget for Toodle {
 
     fn click(
         &mut self,
-        x: i16,
-        y: i16,
+        x: isize,
+        y: isize,
         _state: u16,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         let spin_twirl = Self::click(self, x, y)?;
@@ -1368,11 +1373,11 @@ impl crate::widget::Widget for Toodle {
         self.focus = Focus::None;
     }
 
-    fn hover(&mut self, x: i16, y: i16) -> bool {
+    fn hover(&mut self, x: isize, y: isize) -> bool {
         Self::hover(self, x, y)
     }
 
-    fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+    fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
         self.cursor_at(x, y)
     }
 
@@ -1388,7 +1393,7 @@ impl crate::widget::Widget for Toodle {
         input.is_plain_paste_shortcut()
     }
 
-    fn drag_text(&mut self, x: i16, y: i16) -> bool {
+    fn drag_text(&mut self, x: isize, y: isize) -> bool {
         Self::drag_text(self, x, y)
     }
 
@@ -1412,31 +1417,25 @@ fn draw_page_image(
     image: &Sprite,
     page_color: PageColor,
     palette: &Palette,
-    x: usize,
-    y: usize,
+    x: isize,
+    y: isize,
 ) {
-    fb.draw_sprite_swapped(
-        image,
-        (x) as isize,
-        (y) as isize,
-        palette,
-        &page_swap(page_color, false),
-    );
+    fb.draw_sprite_swapped(image, x, y, palette, &page_swap(page_color, false));
 }
 
 fn draw_pencil_shadow(
     fb: &mut Framebuffer,
     image: &Sprite,
-    dest_x: usize,
-    dest_y: usize,
+    dest_x: isize,
+    dest_y: isize,
     page_color: PageColor,
     palette: &Palette,
     pencil_on_second_line: bool,
 ) {
     fb.draw_sprite_swapped(
         image,
-        dest_x as isize,
-        dest_y as isize,
+        dest_x,
+        dest_y,
         palette,
         &page_swap(page_color, pencil_on_second_line),
     );
@@ -1530,21 +1529,21 @@ const BLUE_PAGE_REMAP: [Index; 16] = {
 
 /// Whether `(x, y)` (negative values clamped to 0) falls inside the rectangle at
 /// `(left, top)` of the given size.
-fn point_in_rect(x: i16, y: i16, left: usize, top: usize, width: usize, height: usize) -> bool {
-    let x = x.max(0) as usize;
-    let y = y.max(0) as usize;
-    (left..left + width).contains(&x) && (top..top + height).contains(&y)
+fn point_in_rect(x: isize, y: isize, left: isize, top: isize, width: usize, height: usize) -> bool {
+    let x = x.max(0);
+    let y = y.max(0);
+    (left..left + width as isize).contains(&x) && (top..top + height as isize).contains(&y)
 }
 
-fn checkbox_at(x: usize, y: usize) -> Option<usize> {
+fn checkbox_at(x: isize, y: isize) -> Option<usize> {
     CHECK_Y.iter().position(|&check_y| {
         (CHECK_X..CHECK_X + CHECK_W).contains(&x) && (check_y..check_y + CHECK_H).contains(&y)
     })
 }
 
-fn line_at(y: usize) -> Option<usize> {
+fn line_at(y: isize) -> Option<usize> {
     LINE_Y.iter().position(|&line_y| {
-        let low = (line_y as isize - 17 + LINE_CLICK_OFFSET_Y as isize).max(0) as usize;
+        let low = (line_y - 17 + LINE_CLICK_OFFSET_Y).max(0);
         y >= low && y < line_y + 4 + LINE_CLICK_OFFSET_Y
     })
 }

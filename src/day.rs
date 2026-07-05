@@ -5,7 +5,7 @@ use crate::app_color;
 use crate::localtime::{self, local_time};
 use crate::palette_color;
 use crate::text::BitmapFont;
-use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT, draw_filled_circle};
+use crate::{Caps, Framebuffer, Index, Palette, Rect, Sprite, TRANSPARENT, draw_filled_circle};
 
 // The background art (`assets/days.png`) is natively `BASE_WIDTH` wide; the
 // calendar view needs one extra column to the left of the day grid for week
@@ -40,9 +40,9 @@ const TOP_GAP: usize = 10;
 const LABEL_GAP: usize = 26;
 const NUMBER_GAP: usize = 6;
 const MONTH_GAP: usize = 6;
-const CALENDAR_TITLE_Y: usize = 11;
-const CALENDAR_WEEKDAY_Y: usize = 34;
-const CALENDAR_GRID_Y: usize = 47;
+const CALENDAR_TITLE_Y: isize = 11;
+const CALENDAR_WEEKDAY_Y: isize = 34;
+const CALENDAR_GRID_Y: isize = 47;
 const CALENDAR_COL_W: usize = 13;
 const CALENDAR_ROW_H: usize = 12;
 const WEEK_NUM_LEFT: usize = 12;
@@ -171,30 +171,25 @@ impl Day {
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
         let (card_x, card_w) = self.card_geometry();
+        let card_x = card_x as isize;
+        let caps = Caps::new(BG_LEFT_CAP, BG_RIGHT_CAP, BG_TOP_CAP, BG_BOTTOM_CAP);
         fb.draw_resized_silhouette(
             &self.background,
+            Rect::new(
+                card_x + SHADOW_X_OFFSET as isize,
+                SHADOW_Y_OFFSET as isize,
+                card_w,
+                HEIGHT,
+            ),
+            caps,
             palette,
-            card_x + SHADOW_X_OFFSET,
-            SHADOW_Y_OFFSET,
-            card_w,
-            HEIGHT,
-            BG_LEFT_CAP,
-            BG_RIGHT_CAP,
-            BG_TOP_CAP,
-            BG_BOTTOM_CAP,
             app_color::BACKGROUND_SHADOW_PAINT,
         );
         fb.draw_resized(
             &self.background,
+            Rect::new(card_x, 0, card_w, HEIGHT),
+            caps,
             palette,
-            card_x,
-            0,
-            card_w,
-            HEIGHT,
-            BG_LEFT_CAP,
-            BG_RIGHT_CAP,
-            BG_TOP_CAP,
-            BG_BOTTOM_CAP,
         );
 
         match &self.date {
@@ -237,15 +232,15 @@ impl Day {
         let day_h = self.tight_height(&self.number_font, day);
         let mut y = TOP_GAP;
 
-        self.draw_centered_tight(fb, &self.label_font, year, y - 1, purple);
-        self.draw_centered_tight(fb, &self.label_font, year, y + 1, rose);
-        self.draw_centered_tight(fb, &self.label_font, year, y, cream);
+        self.draw_centered_tight(fb, &self.label_font, year, y as isize - 1, purple);
+        self.draw_centered_tight(fb, &self.label_font, year, y as isize + 1, rose);
+        self.draw_centered_tight(fb, &self.label_font, year, y as isize, cream);
         y += year_h + LABEL_GAP;
-        self.draw_centered_tight(fb, &self.label_font, weekday, y, black);
+        self.draw_centered_tight(fb, &self.label_font, weekday, y as isize, black);
         y += weekday_h + NUMBER_GAP;
-        self.draw_centered_tight(fb, &self.number_font, day, y, crimson);
+        self.draw_centered_tight(fb, &self.number_font, day, y as isize, crimson);
         y += day_h + MONTH_GAP;
-        self.draw_centered_tight(fb, &self.label_font, month, y, black);
+        self.draw_centered_tight(fb, &self.label_font, month, y as isize, black);
     }
 
     fn render_calendar(&self, fb: &mut Framebuffer, _palette: &Palette, date: &DateParts) {
@@ -268,7 +263,7 @@ impl Day {
             let index = first_weekday + day as usize - 1;
             let col = index % 7;
             let row = index / 7;
-            let y = CALENDAR_GRID_Y + row * CALENDAR_ROW_H;
+            let y = CALENDAR_GRID_Y + row as isize * CALENDAR_ROW_H as isize;
             let color = if day == date.day_num { cream } else { black };
             if day == date.day_num {
                 let (center_x, center_y) = self.calendar_cell_center(col, y);
@@ -289,7 +284,7 @@ impl Day {
         // mislabeled with the following month's week.
         for row in 0..MAX_CALENDAR_ROWS {
             if let Some(week) = calendar_row_week(first_day_epoch, days, row) {
-                let y = CALENDAR_GRID_Y + row * CALENDAR_ROW_H;
+                let y = CALENDAR_GRID_Y + row as isize * CALENDAR_ROW_H as isize;
                 self.draw_week_number(fb, week, y, crimson);
             }
         }
@@ -322,9 +317,9 @@ impl Day {
 
     /// Horizontal centering position for `text_width`-wide text within
     /// whichever card `card_geometry` says is actually on screen.
-    const fn centered_x(&self, text_width: usize) -> usize {
+    fn centered_x(&self, text_width: usize) -> isize {
         let (card_x, card_w) = self.card_geometry();
-        card_x + card_w.saturating_sub(text_width) / 2
+        (card_x + card_w.saturating_sub(text_width) / 2) as isize
     }
 
     /// Shared implementation for `draw_centered_tight`/`draw_centered`: center
@@ -336,7 +331,7 @@ impl Day {
         fb: &mut Framebuffer,
         font: &BitmapFont,
         text: &str,
-        y: usize,
+        y: isize,
         color: Index,
         tight: bool,
     ) {
@@ -344,10 +339,8 @@ impl Day {
             let Some(bounds) = font.text_ink_bounds(text) else {
                 return;
             };
-            let x = self
-                .centered_x(bounds.width())
-                .saturating_add_signed(-bounds.min_x);
-            let draw_y = y.saturating_sub(bounds.min_y);
+            let x = self.centered_x(bounds.width()) - bounds.min_x;
+            let draw_y = (y - bounds.min_y as isize).max(0);
             font.draw_text(fb, text, x, draw_y, color);
         } else {
             let x = self.centered_x(font.text_width(text));
@@ -360,7 +353,7 @@ impl Day {
         fb: &mut Framebuffer,
         font: &BitmapFont,
         text: &str,
-        y: usize,
+        y: isize,
         color: Index,
     ) {
         self.draw_centered_impl(fb, font, text, y, color, true);
@@ -371,7 +364,7 @@ impl Day {
         fb: &mut Framebuffer,
         font: &BitmapFont,
         text: &str,
-        y: usize,
+        y: isize,
         color: Index,
     ) {
         self.draw_centered_impl(fb, font, text, y, color, false);
@@ -382,35 +375,43 @@ impl Day {
         fb: &mut Framebuffer,
         text: &str,
         col: usize,
-        y: usize,
+        y: isize,
         color: Index,
     ) {
-        let cell_x = CALENDAR_LEFT + col * CALENDAR_COL_W;
+        let cell_x = (CALENDAR_LEFT + col * CALENDAR_COL_W) as isize;
         self.draw_cell_text(fb, text, cell_x, CALENDAR_COL_W, y, color);
     }
 
-    fn draw_week_number(&self, fb: &mut Framebuffer, week: i32, y: usize, color: Index) {
-        self.draw_cell_text(fb, &format!("w{week}"), WEEK_NUM_LEFT, WEEK_COL_W, y, color);
+    fn draw_week_number(&self, fb: &mut Framebuffer, week: i32, y: isize, color: Index) {
+        self.draw_cell_text(
+            fb,
+            &format!("w{week}"),
+            WEEK_NUM_LEFT as isize,
+            WEEK_COL_W,
+            y,
+            color,
+        );
     }
 
     fn draw_cell_text(
         &self,
         fb: &mut Framebuffer,
         text: &str,
-        cell_x: usize,
+        cell_x: isize,
         col_w: usize,
-        y: usize,
+        y: isize,
         color: Index,
     ) {
-        let text_x = cell_x + col_w.saturating_sub(self.calendar_font.text_width(text)) / 2;
+        let text_x =
+            cell_x + (col_w.saturating_sub(self.calendar_font.text_width(text)) / 2) as isize;
         self.calendar_font.draw_text(fb, text, text_x, y, color);
     }
 
-    const fn calendar_cell_center(&self, col: usize, y: usize) -> (isize, isize) {
+    fn calendar_cell_center(&self, col: usize, y: isize) -> (isize, isize) {
         (
             (CALENDAR_LEFT + col * CALENDAR_COL_W + CALENDAR_COL_W / 2) as isize
                 + TODAY_CIRCLE_X_OFFSET,
-            (y + self.calendar_font.cell_h() / 2) as isize + TODAY_CIRCLE_Y_OFFSET,
+            y + self.calendar_font.cell_h() as isize / 2 + TODAY_CIRCLE_Y_OFFSET,
         )
     }
 }
@@ -517,8 +518,8 @@ impl crate::widget::Widget for Day {
 
     fn click(
         &mut self,
-        _x: i16,
-        _y: i16,
+        _x: isize,
+        _y: isize,
         _state: u16,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         self.toggle_mode();
@@ -526,7 +527,7 @@ impl crate::widget::Widget for Day {
     }
 
     // Clicking anywhere toggles the mode.
-    fn cursor_at(&self, _x: i16, _y: i16) -> crate::CursorKind {
+    fn cursor_at(&self, _x: isize, _y: isize) -> crate::CursorKind {
         crate::CursorKind::Hand
     }
 }

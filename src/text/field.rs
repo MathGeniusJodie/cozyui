@@ -102,11 +102,11 @@ impl TextField {
         self.edit.is_dragging()
     }
 
-    pub(crate) fn index_at(&self, layout: &TextLayout, x: usize, y: usize) -> usize {
+    pub(crate) fn index_at(&self, layout: &TextLayout, x: isize, y: isize) -> usize {
         layout.index_at(&self.text, x, y)
     }
 
-    pub(crate) fn cursor_position(&self, layout: &TextLayout) -> (usize, usize) {
+    pub(crate) fn cursor_position(&self, layout: &TextLayout) -> (isize, isize) {
         layout.cursor_position(&self.text, self.edit.cursor())
     }
 

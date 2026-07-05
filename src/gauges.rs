@@ -144,15 +144,20 @@ impl Gauges {
             let readout = format!("{pct}%");
             let readout_x = left + (GAUGE_D.saturating_sub(self.font.text_width(&readout))) / 2;
             let readout_y = GAUGE_D.saturating_sub(self.font.cell_h() + 4);
-            self.font
-                .draw_text(fb, &readout, readout_x, readout_y, palette_color::BLACK);
+            self.font.draw_text(
+                fb,
+                &readout,
+                readout_x as isize,
+                readout_y as isize,
+                palette_color::BLACK,
+            );
 
             let label_x = left + (GAUGE_D.saturating_sub(self.font.text_width(label))) / 2;
             self.font.draw_text(
                 fb,
                 label,
-                label_x,
-                GAUGE_D + LABEL_GAP,
+                label_x as isize,
+                (GAUGE_D + LABEL_GAP) as isize,
                 palette_color::CREAM,
             );
         }
@@ -203,10 +208,7 @@ fn draw_needle(fb: &mut Framebuffer, cx: f32, cy: f32, pct: u8) {
 }
 
 fn set_px(fb: &mut Framebuffer, x: f32, y: f32, color: Index) {
-    let (x, y) = (x.round() as isize, y.round() as isize);
-    if x >= 0 && y >= 0 && (x as usize) < fb.width && (y as usize) < fb.height {
-        fb.set_pixel(x as usize, y as usize, color);
-    }
+    fb.set_pixel(x.round() as isize, y.round() as isize, color);
 }
 
 /// (total, idle) jiffies from the aggregate first line of /proc/stat. Idle

@@ -197,8 +197,8 @@ impl Hunger {
         } else {
             palette_color::CREAM
         };
-        let text_x = self.width.saturating_sub(self.font.text_width(&view.label)) / 2;
-        let text_y = self.apple_100.height + BAR_TEXT_GAP;
+        let text_x = (self.width.saturating_sub(self.font.text_width(&view.label)) / 2) as isize;
+        let text_y = (self.apple_100.height + BAR_TEXT_GAP) as isize;
         self.font.draw_text(fb, &view.label, text_x, text_y, color);
     }
 }
@@ -371,8 +371,8 @@ impl crate::widget::Widget for Hunger {
 
     fn click(
         &mut self,
-        _x: i16,
-        _y: i16,
+        _x: isize,
+        _y: isize,
         _state: u16,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         Self::click(self);
@@ -380,7 +380,7 @@ impl crate::widget::Widget for Hunger {
     }
 
     // Clicking anywhere logs a meal.
-    fn cursor_at(&self, _x: i16, _y: i16) -> crate::CursorKind {
+    fn cursor_at(&self, _x: isize, _y: isize) -> crate::CursorKind {
         crate::CursorKind::Hand
     }
 }

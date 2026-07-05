@@ -179,7 +179,7 @@ impl Terminal {
     /// mouse-down escape to the pty's SGR mouse mode. The two are mutually
     /// exclusive: a forwarded mouse-down never starts a selection.
     #[allow(clippy::significant_drop_tightening)]
-    pub(super) fn mouse_press(&self, x: i16, y: i16, state: u16) -> PressState {
+    pub(super) fn mouse_press(&self, x: isize, y: isize, state: u16) -> PressState {
         let Some(point) = screen_point(x, y, &self.window_size) else {
             return PressState::None;
         };
@@ -206,11 +206,11 @@ impl Terminal {
 
     /// Like `screen_point`, but clamps out-of-grid coordinates instead of
     /// rejecting them; see the free function of the same name for why.
-    pub(super) fn clamped_screen_point(&self, x: i16, y: i16) -> Point {
+    pub(super) fn clamped_screen_point(&self, x: isize, y: isize) -> Point {
         clamped_screen_point(x, y, &self.window_size)
     }
 
-    pub(super) fn mouse_release(&self, x: i16, y: i16) {
+    pub(super) fn mouse_release(&self, x: isize, y: isize) {
         // Clamped, not rejected: the caller only forwards a release here to
         // balance a mouse-down it already forwarded, so this must always
         // send the matching mouse-up even if the drag ended outside the grid.
@@ -260,7 +260,7 @@ impl Terminal {
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn screen_point(x: i16, y: i16, size: &WindowSize) -> Option<Point> {
+fn screen_point(x: isize, y: isize, size: &WindowSize) -> Option<Point> {
     if x < 0 || y < 0 {
         return None;
     }
@@ -283,7 +283,7 @@ fn screen_point(x: i16, y: i16, size: &WindowSize) -> Option<Point> {
 /// app thinking the button is still held, since the matching mouse-up escape
 /// never arrives.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn clamped_screen_point(x: i16, y: i16, size: &WindowSize) -> Point {
+fn clamped_screen_point(x: isize, y: isize, size: &WindowSize) -> Point {
     let screen_x = art_x(SCREEN_SOURCE_X);
     let screen_y = art_y(SCREEN_SOURCE_Y);
     let x = (x.max(0) as usize).clamp(screen_x, screen_x + SCREEN_W - 1);

@@ -547,7 +547,7 @@ impl Budgit {
         color: Index,
     ) {
         let x = WIDTH.saturating_sub(font.text_width(text)) / 2;
-        font.draw_text(fb, text, x, y, color);
+        font.draw_text(fb, text, x as isize, y as isize, color);
     }
 
     /// Centers using the glyph ink bounds and draws so that `y` is the top of
@@ -566,16 +566,16 @@ impl Budgit {
         };
         let x = (WIDTH.saturating_sub(bounds.width()) / 2).saturating_add_signed(-bounds.min_x);
         let draw_y = y.saturating_sub(bounds.min_y);
-        font.draw_text(fb, text, x, draw_y, color);
+        font.draw_text(fb, text, x as isize, draw_y as isize, color);
     }
 
     fn draw_row(&self, fb: &mut Framebuffer, label: &str, value: &str, y: usize) {
         const PAD: usize = 14;
         self.label_font
-            .draw_text(fb, label, PAD, y, palette_color::CREAM);
+            .draw_text(fb, label, PAD as isize, y as isize, palette_color::CREAM);
         let x = WIDTH.saturating_sub(PAD + self.stat_font.text_width(value));
         self.stat_font
-            .draw_text(fb, value, x, y, palette_color::CREAM);
+            .draw_text(fb, value, x as isize, y as isize, palette_color::CREAM);
     }
 }
 

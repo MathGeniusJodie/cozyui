@@ -15,7 +15,7 @@ use crate::{Rect, WIDGET_COUNT, WidgetId};
 ///
 /// Fwends is the one exception: it is pinned to the window's TOP edge and
 /// only its x is used.
-const fn widget_xy(widget: WidgetId) -> (usize, isize) {
+const fn widget_xy(widget: WidgetId) -> (isize, isize) {
     match widget {
         WidgetId::Puter => (463, 39),
         WidgetId::Toodle => (322, 301),
@@ -26,7 +26,7 @@ const fn widget_xy(widget: WidgetId) -> (usize, isize) {
         // 330 was Day's plain-view x before it grew a week-number column;
         // shifting left by that column's width keeps the plain view's card
         // pinned to the same on-screen position (see `day::PLAIN_CARD_X`).
-        WidgetId::Day => (330 - crate::day::WEEK_COL_W, 197),
+        WidgetId::Day => (330 - crate::day::WEEK_COL_W as isize, 197),
         WidgetId::Budgit => (322, 752),
         WidgetId::Stats => (322, 604),
         WidgetId::Hunger => (463, 3),
@@ -51,16 +51,16 @@ pub(super) const FWENDS_TOP: usize = 10;
 pub(super) fn widget_positions(
     heights: &[usize; WIDGET_COUNT],
     screen_h: usize,
-) -> [(usize, usize); WIDGET_COUNT] {
+) -> [(isize, isize); WIDGET_COUNT] {
     let mut positions = [(0, 0); WIDGET_COUNT];
     for widget in WidgetId::ALL {
         let (x, y) = widget_xy(widget);
         let h = heights[widget.index()] as isize;
-        let top = (screen_h as isize - y - h).max(0) as usize;
+        let top = (screen_h as isize - y - h).max(0);
         positions[widget.index()] = (x, top);
     }
     // Fwends stays pinned just below the window's top edge.
-    positions[WidgetId::Fwends.index()].1 = FWENDS_TOP;
+    positions[WidgetId::Fwends.index()].1 = FWENDS_TOP as isize;
     positions
 }
 
@@ -85,7 +85,7 @@ pub(super) fn required_screen_height(
     (needed + TOP_PADDING).max(min_h)
 }
 
-pub(super) const fn move_rect(rect: &mut Rect, x: usize, y: usize) -> bool {
+pub(super) const fn move_rect(rect: &mut Rect, x: isize, y: isize) -> bool {
     if rect.x == x && rect.y == y {
         return false;
     }
@@ -96,10 +96,10 @@ pub(super) const fn move_rect(rect: &mut Rect, x: usize, y: usize) -> bool {
 }
 
 pub(super) const fn rects_intersect(a: Rect, b: Rect) -> bool {
-    a.x < b.x.saturating_add(b.w)
-        && b.x < a.x.saturating_add(a.w)
-        && a.y < b.y.saturating_add(b.h)
-        && b.y < a.y.saturating_add(a.h)
+    a.x < b.x + b.w as isize
+        && b.x < a.x + a.w as isize
+        && a.y < b.y + b.h as isize
+        && b.y < a.y + a.h as isize
 }
 
 pub(super) fn stretched_desk_source_x(x: usize, target_w: usize, source_w: usize) -> usize {
@@ -175,7 +175,7 @@ mod tests {
 
         for screen_h in [0, 100, 2000] {
             let positions = widget_positions(&heights, screen_h);
-            assert_eq!(positions[WidgetId::Fwends.index()].1, FWENDS_TOP);
+            assert_eq!(positions[WidgetId::Fwends.index()].1, FWENDS_TOP as isize);
         }
     }
 

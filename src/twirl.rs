@@ -143,8 +143,8 @@ impl Twirl {
                     TRANSPARENT => continue,
                     other => other,
                 };
-                if let Some(color) = palette.resolve_index(index, x, y) {
-                    fb.set_pixel(x, y, color);
+                if let Some(color) = palette.resolve_index(index, x as isize, y as isize) {
+                    fb.set_pixel(x as isize, y as isize, color);
                 }
             }
         }
@@ -197,7 +197,7 @@ impl Twirl {
     }
 
     /// Hand inside the spinnable wheel, mirroring the `click` hit-test.
-    pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+    pub(crate) fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
         if x < 0 || y < 0 {
             return CursorKind::Pointer;
         }
@@ -210,7 +210,7 @@ impl Twirl {
         }
     }
 
-    pub(crate) fn click(&mut self, x: i16, y: i16) {
+    pub(crate) fn click(&mut self, x: isize, y: isize) {
         if x < 0 || y < 0 {
             return;
         }
@@ -259,7 +259,7 @@ impl Twirl {
             let x = angle.cos().mul_add(NUMBER_RADIUS, center_x) - text_w as f32 / 2.0;
             let y = angle.sin().mul_add(NUMBER_RADIUS, center_y) - text_h as f32 / 2.0;
             self.font
-                .draw_text(fb, &number, x.max(0.0) as usize, y.max(0.0) as usize, color);
+                .draw_text(fb, &number, x as isize, y as isize, color);
         }
     }
 
@@ -268,7 +268,8 @@ impl Twirl {
         let text_w = self.font.text_width(&total);
         let x = (self.wheel.width.saturating_sub(text_w) / 2).saturating_sub(5);
         let y = self.wheel.width + TOTAL_GAP + 2;
-        self.font.draw_text(fb, &total, x, y, palette_color::CREAM);
+        self.font
+            .draw_text(fb, &total, x as isize, y as isize, palette_color::CREAM);
     }
 
     fn add_landed_value(&mut self) -> Result<(), Box<dyn Error>> {
@@ -478,15 +479,15 @@ impl crate::widget::Widget for Twirl {
 
     fn click(
         &mut self,
-        x: i16,
-        y: i16,
+        x: isize,
+        y: isize,
         _state: u16,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         Self::click(self, x, y);
         Ok(crate::widget::ClickOutcome::default())
     }
 
-    fn cursor_at(&self, x: i16, y: i16) -> crate::CursorKind {
+    fn cursor_at(&self, x: isize, y: isize) -> crate::CursorKind {
         self.cursor_at(x, y)
     }
 }

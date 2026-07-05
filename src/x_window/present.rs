@@ -165,7 +165,7 @@ impl XWindow {
         };
         let mut changed = full;
         for y in y0..y1 {
-            row_runs_into(fb.row(y), &mut self.row_scratch);
+            row_runs_into(fb.row(y as isize), &mut self.row_scratch);
             if self.row_scratch != self.shape_rows[y] {
                 std::mem::swap(&mut self.row_scratch, &mut self.shape_rows[y]);
                 changed = true;
@@ -339,7 +339,8 @@ impl XWindow {
         if rect.x == 0 && rect.y == 0 && rect.w == fb.width && rect.h == fb.height {
             return self.draw(fb);
         }
-        self.update_shape_rows(fb, rect.y, rect.y.saturating_add(rect.h))?;
+        let y0 = rect.y as usize;
+        self.update_shape_rows(fb, y0, y0 + rect.h)?;
         self.blit_rect(fb, clipped)
     }
 
@@ -487,13 +488,19 @@ mod clipped_rect {
         }
     }
 
-    /// Intersect `rect` with the framebuffer bounds; `None` if nothing remains.
+    /// Intersect `rect` with the framebuffer bounds; `None` if nothing remains
+    /// (including when `rect`'s origin is negative — mid-relayout widget
+    /// rects can momentarily disagree with the framebuffer size).
     pub(super) fn clip_to_fb(rect: Rect, fb: &Framebuffer) -> Option<ClippedRect> {
-        if rect.x >= fb.width || rect.y >= fb.height {
+        if rect.x < 0 || rect.y < 0 {
             return None;
         }
-        let w = rect.w.min(fb.width - rect.x);
-        let h = rect.h.min(fb.height - rect.y);
+        let (x, y) = (rect.x as usize, rect.y as usize);
+        if x >= fb.width || y >= fb.height {
+            return None;
+        }
+        let w = rect.w.min(fb.width - x);
+        let h = rect.h.min(fb.height - y);
         if w == 0 || h == 0 {
             return None;
         }

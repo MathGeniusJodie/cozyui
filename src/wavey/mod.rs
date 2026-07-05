@@ -259,7 +259,7 @@ impl Wavey {
     }
 
     /// Returns text to copy to the clipboard when the click asks for it.
-    pub(crate) fn click(&mut self, x: i16, y: i16) -> Option<String> {
+    pub(crate) fn click(&mut self, x: isize, y: isize) -> Option<String> {
         if x < 0 || y < 0 {
             return None;
         }
@@ -298,7 +298,7 @@ impl Wavey {
 
     /// Hand over everything clickable: media buttons, clock, volume knob,
     /// tuner, and the copyable title.
-    pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+    pub(crate) fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
         if x < 0 || y < 0 {
             return CursorKind::Pointer;
         }
@@ -342,7 +342,7 @@ impl Wavey {
         was_dragging
     }
 
-    pub(crate) fn motion(&mut self, x: i16, y: i16) -> bool {
+    pub(crate) fn motion(&mut self, x: isize, y: isize) -> bool {
         if !self.dragging_knob || x < 0 || y < 0 {
             return false;
         }
@@ -351,11 +351,11 @@ impl Wavey {
         true
     }
 
-    pub(crate) fn scroll_up(&mut self, x: i16, y: i16) -> bool {
+    pub(crate) fn scroll_up(&mut self, x: isize, y: isize) -> bool {
         self.scroll_volume(x, y, 5)
     }
 
-    pub(crate) fn scroll_down(&mut self, x: i16, y: i16) -> bool {
+    pub(crate) fn scroll_down(&mut self, x: isize, y: isize) -> bool {
         self.scroll_volume(x, y, -5)
     }
 
@@ -414,7 +414,7 @@ impl Wavey {
         self.set_volume(volume);
     }
 
-    fn scroll_volume(&mut self, x: i16, y: i16, delta: i16) -> bool {
+    fn scroll_volume(&mut self, x: isize, y: isize, delta: i16) -> bool {
         if x < 0 || y < 0 || !self.knob_contains(x as usize, y as usize) {
             return false;
         }
@@ -556,7 +556,7 @@ impl Wavey {
                 LABEL_BELOW_Y
             };
             self.font
-                .draw_text(fb, &station.label, label_x, label_y, text);
+                .draw_text(fb, &station.label, label_x as isize, label_y as isize, text);
         }
 
         let marker_x = if self.playback.is_playing() {
@@ -565,8 +565,8 @@ impl Wavey {
             TUNER_X.saturating_sub(TUNER_MARK_SIZE + 2)
         };
         fb.fill_rect(
-            marker_x.saturating_sub(TUNER_MARK_SIZE / 2),
-            TUNER_MARK_Y,
+            marker_x.saturating_sub(TUNER_MARK_SIZE / 2) as isize,
+            TUNER_MARK_Y as isize,
             TUNER_MARK_SIZE,
             TUNER_MARK_SIZE,
             palette_color::ROSE,
@@ -586,8 +586,8 @@ impl Wavey {
 
         let y = TITLE_Y;
         fb.fill_rect(
-            TITLE_X.saturating_sub(TITLE_BOX_PAD),
-            y.saturating_sub(TITLE_BOX_PAD),
+            TITLE_X.saturating_sub(TITLE_BOX_PAD) as isize,
+            y.saturating_sub(TITLE_BOX_PAD) as isize,
             TITLE_W + TITLE_BOX_PAD * 2,
             self.font.cell_h() + TITLE_BOX_PAD * 2,
             palette_color::BLACK,
@@ -597,7 +597,8 @@ impl Wavey {
         let text_w = self.font.text_width(title);
         if text_w <= TITLE_W {
             let x = TITLE_X + (TITLE_W - text_w) / 2;
-            self.font.draw_text(fb, title, x, y, cream);
+            self.font
+                .draw_text(fb, title, x as isize, y as isize, cream);
             return;
         }
 
@@ -608,9 +609,9 @@ impl Wavey {
             fb,
             &looped,
             TITLE_X as isize - self.marquee_offset as isize,
-            y,
+            y as isize,
             cream,
-            TITLE_X,
+            TITLE_X as isize,
             TITLE_W,
         );
     }
@@ -639,8 +640,8 @@ impl crate::widget::Widget for Wavey {
 
     fn click(
         &mut self,
-        x: i16,
-        y: i16,
+        x: isize,
+        y: isize,
         _state: u16,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         Ok(crate::widget::ClickOutcome {
@@ -649,18 +650,18 @@ impl crate::widget::Widget for Wavey {
         })
     }
 
-    fn motion(&mut self, x: i16, y: i16) -> bool {
+    fn motion(&mut self, x: isize, y: isize) -> bool {
         Self::motion(self, x, y)
     }
 
-    fn scroll(&mut self, x: i16, y: i16, direction: crate::widget::ScrollDirection) -> bool {
+    fn scroll(&mut self, x: isize, y: isize, direction: crate::widget::ScrollDirection) -> bool {
         match direction {
             crate::widget::ScrollDirection::Up => self.scroll_up(x, y),
             crate::widget::ScrollDirection::Down => self.scroll_down(x, y),
         }
     }
 
-    fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+    fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
         self.cursor_at(x, y)
     }
 }
@@ -700,7 +701,13 @@ fn volume_angle(volume: u8) -> f32 {
 
 fn clear_clock_art(fb: &mut Framebuffer, _palette: &Palette) {
     let black = palette_color::BLACK;
-    fb.fill_rect(DISPLAY_X, DISPLAY_Y, CLOCK_CLEAR_W, CLOCK_CLEAR_H, black);
+    fb.fill_rect(
+        DISPLAY_X as isize,
+        DISPLAY_Y as isize,
+        CLOCK_CLEAR_W,
+        CLOCK_CLEAR_H,
+        black,
+    );
 }
 
 fn copy_clock_digit(
@@ -770,8 +777,8 @@ fn copy_clock_pixels(
             if !matches!(index, palette_color::CRIMSON | palette_color::ROSE) {
                 continue;
             }
-            let px = dest_x + src.x + x - anchor.0;
-            let py = dest_y + src.y + y - anchor.1;
+            let px = (dest_x + src.x + x - anchor.0) as isize;
+            let py = (dest_y + src.y + y - anchor.1) as isize;
             if let Some(color) = palette.resolve_index(index, px, py) {
                 fb.set_pixel(px, py, color);
             }
@@ -860,9 +867,10 @@ fn clear_knob_marker(image: &Sprite, fb: &mut Framebuffer, palette: &Palette) {
     for y in KNOB_MARKER_SRC_Y..KNOB_MARKER_SRC_Y + KNOB_MARKER_SRC_H {
         for x in KNOB_MARKER_SRC_X..KNOB_MARKER_SRC_X + KNOB_MARKER_SRC_W {
             if image.at(x, y) == palette_color::LAVENDER
-                && let Some(color) = palette.resolve_index(palette_color::PLUM, x, y)
+                && let Some(color) =
+                    palette.resolve_index(palette_color::PLUM, x as isize, y as isize)
             {
-                fb.set_pixel(x, y, color);
+                fb.set_pixel(x as isize, y as isize, color);
             }
         }
     }
@@ -893,9 +901,9 @@ fn copy_moved_knob_marker(
             let dest_y = dest_top + (y - KNOB_MARKER_SRC_Y) as isize;
             if dest_x >= 0
                 && dest_y >= 0
-                && let Some(color) = palette.resolve_index(index, dest_x as usize, dest_y as usize)
+                && let Some(color) = palette.resolve_index(index, dest_x, dest_y)
             {
-                fb.set_pixel(dest_x as usize, dest_y as usize, color);
+                fb.set_pixel(dest_x, dest_y, color);
             }
         }
     }

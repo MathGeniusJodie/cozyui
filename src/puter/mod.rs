@@ -116,7 +116,7 @@ impl Puter {
         TRANSPARENT
     }
 
-    pub(crate) fn press_button(&mut self, x: i16, y: i16, state: u16) {
+    pub(crate) fn press_button(&mut self, x: isize, y: isize, state: u16) {
         self.press_state = match button_at(x, y) {
             Some(index) => PressState::Chrome(index),
             None => self
@@ -126,7 +126,7 @@ impl Puter {
     }
 
     /// Returns true when the power button was clicked and the app should quit.
-    pub(crate) fn release_button(&mut self, x: i16, y: i16) -> bool {
+    pub(crate) fn release_button(&mut self, x: isize, y: isize) -> bool {
         let mut quit = false;
         let released_button = button_at(x, y);
         if let (PressState::Chrome(pressed), Some(released)) = (self.press_state, released_button)
@@ -163,7 +163,7 @@ impl Puter {
     }
 
     /// Hand over the front-panel buttons, text over the terminal screen.
-    pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+    pub(crate) fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
         if button_at(x, y).is_some() {
             return CursorKind::Hand;
         }
@@ -180,7 +180,7 @@ impl Puter {
         CursorKind::Pointer
     }
 
-    pub(crate) fn motion(&mut self, x: i16, y: i16) -> bool {
+    pub(crate) fn motion(&mut self, x: isize, y: isize) -> bool {
         let PressState::Selection(current) = self.press_state else {
             return false;
         };
@@ -267,19 +267,19 @@ impl crate::widget::Widget for Puter {
 
     fn click(
         &mut self,
-        x: i16,
-        y: i16,
+        x: isize,
+        y: isize,
         state: u16,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         self.press_button(x, y, state);
         Ok(crate::widget::ClickOutcome::default())
     }
 
-    fn motion(&mut self, x: i16, y: i16) -> bool {
+    fn motion(&mut self, x: isize, y: isize) -> bool {
         Self::motion(self, x, y)
     }
 
-    fn scroll(&mut self, _x: i16, _y: i16, direction: crate::widget::ScrollDirection) -> bool {
+    fn scroll(&mut self, _x: isize, _y: isize, direction: crate::widget::ScrollDirection) -> bool {
         match direction {
             crate::widget::ScrollDirection::Up => self.scroll_up(),
             crate::widget::ScrollDirection::Down => self.scroll_down(),
@@ -287,7 +287,7 @@ impl crate::widget::Widget for Puter {
         true
     }
 
-    fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+    fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
         self.cursor_at(x, y)
     }
 

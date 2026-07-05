@@ -219,8 +219,13 @@ impl Stats {
     pub(crate) fn render(&self, fb: &mut Framebuffer, _palette: &Palette) {
         let title = "DONE THIS WEEK";
         let title_x = WIDTH.saturating_sub(self.font.text_width(title)) / 2;
-        self.font
-            .draw_text(fb, title, title_x, TOP_GAP, palette_color::CREAM);
+        self.font.draw_text(
+            fb,
+            title,
+            title_x as isize,
+            TOP_GAP as isize,
+            palette_color::CREAM,
+        );
 
         // Reserve a row above the bars for the count numbers so the tallest
         // bar's total isn't clipped by the title.
@@ -256,7 +261,13 @@ impl Stats {
                     continue;
                 }
                 y -= seg_h;
-                fb.fill_rect(bar_x, y, bar_w, seg_h, PRIORITY_COLORS[priority]);
+                fb.fill_rect(
+                    bar_x as isize,
+                    y as isize,
+                    bar_w,
+                    seg_h,
+                    PRIORITY_COLORS[priority],
+                );
             }
 
             // Total count, centered just above the top of the bar.
@@ -264,8 +275,13 @@ impl Stats {
                 let count_text = total.to_string();
                 let count_x = bar_x + bar_w.saturating_sub(self.font.text_width(&count_text)) / 2;
                 let count_y = y.saturating_sub(self.font.cell_h() + COUNT_GAP);
-                self.font
-                    .draw_text(fb, &count_text, count_x, count_y, palette_color::CREAM);
+                self.font.draw_text(
+                    fb,
+                    &count_text,
+                    count_x as isize,
+                    count_y as isize,
+                    palette_color::CREAM,
+                );
             }
 
             let label = WEEKDAY_INITIALS[col % 7];
@@ -273,8 +289,8 @@ impl Stats {
             self.font.draw_text(
                 fb,
                 label,
-                label_x,
-                chart_bottom + LABEL_GAP,
+                label_x as isize,
+                (chart_bottom + LABEL_GAP) as isize,
                 palette_color::CREAM,
             );
         }

@@ -358,7 +358,7 @@ fn draw_mode_buttons(fb: &mut Framebuffer, button_sprites: &Sprite, palette: &Pa
         fb.draw_sprite_region(
             button_sprites,
             Rect::new(
-                BUTTON_SPRITE_OFFSET_X + sprite_index * BUTTON_SPRITE_STRIDE,
+                (BUTTON_SPRITE_OFFSET_X + sprite_index * BUTTON_SPRITE_STRIDE) as isize,
                 0,
                 BUTTON_W,
                 BUTTON_H,
@@ -395,9 +395,10 @@ fn draw_light(fb: &mut Framebuffer, light: Light, state: LightState) {
         ),
     };
 
-    fb.fill_rect(light.x, light.y, LIGHT_W, LIGHT_H, shell);
-    fb.fill_rect(light.x, light.y, LIGHT_W, 1, top);
-    fb.fill_rect(light.x + 1, light.y + 2, LIGHT_W - 2, LIGHT_H - 3, core);
+    let (x, y) = (light.x as isize, light.y as isize);
+    fb.fill_rect(x, y, LIGHT_W, LIGHT_H, shell);
+    fb.fill_rect(x, y, LIGHT_W, 1, top);
+    fb.fill_rect(x + 1, y + 2, LIGHT_W - 2, LIGHT_H - 3, core);
 }
 
 /// `NamedColor`'s first 16 discriminants (Black..=BrightWhite) line up
@@ -598,8 +599,8 @@ fn draw_glyph(
     fb: &mut Framebuffer,
     atlas: &GlyphAtlas,
     ch: char,
-    x: usize,
-    y: usize,
+    x: isize,
+    y: isize,
     color: Index,
 ) {
     for gy in 0..GLYPH_H {
@@ -607,12 +608,12 @@ fn draw_glyph(
             if !atlas.is_on(ch, gx, gy) {
                 continue;
             }
-            fb.set_pixel(x + gx, y + gy, color);
+            fb.set_pixel(x + gx as isize, y + gy as isize, color);
         }
     }
 }
 
-pub(super) fn button_at(x: i16, y: i16) -> Option<usize> {
+pub(super) fn button_at(x: isize, y: isize) -> Option<usize> {
     let x = x.max(0) as usize;
     let y = y.max(0) as usize;
     BUTTON_TARGETS.iter().position(|button| {
@@ -650,8 +651,8 @@ impl super::Puter {
             {
                 continue;
             }
-            let x = art_x(SCREEN_SOURCE_X) + point.column.0 * cell_w;
-            let y = art_y(SCREEN_SOURCE_Y) + point.line * cell_h;
+            let x = (art_x(SCREEN_SOURCE_X) + point.column.0 * cell_w) as isize;
+            let y = (art_y(SCREEN_SOURCE_Y) + point.line * cell_h) as isize;
             let selected = content
                 .selection
                 .as_ref()
@@ -667,8 +668,8 @@ impl super::Puter {
             content.display_offset,
             content.cursor.point,
         ) {
-            let cursor_x = art_x(SCREEN_SOURCE_X) + cursor_point.column.0 * cell_w;
-            let cursor_y = art_y(SCREEN_SOURCE_Y) + cursor_point.line * cell_h;
+            let cursor_x = (art_x(SCREEN_SOURCE_X) + cursor_point.column.0 * cell_w) as isize;
+            let cursor_y = (art_y(SCREEN_SOURCE_Y) + cursor_point.line * cell_h) as isize;
             fb.fill_rect(cursor_x, cursor_y, cell_w, cell_h, COLOR_CURSOR);
         }
 
@@ -678,7 +679,7 @@ impl super::Puter {
                 fb.draw_sprite_region(
                     &self.button_pressed_sprites,
                     Rect::new(
-                        BUTTON_SPRITE_OFFSET_X + sprite_index * BUTTON_SPRITE_STRIDE,
+                        (BUTTON_SPRITE_OFFSET_X + sprite_index * BUTTON_SPRITE_STRIDE) as isize,
                         0,
                         BUTTON_W,
                         BUTTON_H,
@@ -717,8 +718,8 @@ impl super::Puter {
     fn render_chrome(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.fill_from_sprite(self.mode_images.for_settings(self.settings), palette);
         fb.fill_rect(
-            art_x(CONTROL_CLEAR_X),
-            art_y(CONTROL_CLEAR_Y),
+            art_x(CONTROL_CLEAR_X) as isize,
+            art_y(CONTROL_CLEAR_Y) as isize,
             CONTROL_CLEAR_W,
             CONTROL_CLEAR_H,
             palette_color::CREAM,
@@ -782,7 +783,7 @@ impl super::Puter {
     /// Paint one cell at framebuffer position (x, y): background, glow halo,
     /// glyph, and the bold/underline/strikeout decorations.
     #[allow(clippy::needless_pass_by_value)]
-    fn draw_cell(&self, fb: &mut Framebuffer, cell: &Cell, style: CellStyle, x: usize, y: usize) {
+    fn draw_cell(&self, fb: &mut Framebuffer, cell: &Cell, style: CellStyle, x: isize, y: isize) {
         let cell_w = GLYPH_W;
         let cell_h = GLYPH_H;
         if let Some(bg) = style.bg {
@@ -805,13 +806,13 @@ impl super::Puter {
             draw_glyph(fb, &self.atlas, cell.c, x + 1, y, fg);
         }
         if cell.flags.intersects(Flags::ALL_UNDERLINES) {
-            fb.fill_rect(x, y + cell_h - 1, cell_w, 1, fg);
+            fb.fill_rect(x, y + cell_h as isize - 1, cell_w, 1, fg);
             if cell.flags.contains(Flags::DOUBLE_UNDERLINE) && cell_h > 2 {
-                fb.fill_rect(x, y + cell_h - 3, cell_w, 1, fg);
+                fb.fill_rect(x, y + cell_h as isize - 3, cell_w, 1, fg);
             }
         }
         if cell.flags.contains(Flags::STRIKEOUT) {
-            fb.fill_rect(x, y + cell_h / 2, cell_w, 1, fg);
+            fb.fill_rect(x, y + cell_h as isize / 2, cell_w, 1, fg);
         }
     }
 

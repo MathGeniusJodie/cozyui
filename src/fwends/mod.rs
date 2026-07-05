@@ -4,9 +4,18 @@ use crate::palette_color;
 use crate::text::{
     BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
 };
-use crate::{CursorKind, Framebuffer, Index, Palette, Rect, Sprite, Swap, TRANSPARENT};
+use crate::{Caps, CursorKind, Framebuffer, Index, Palette, Rect, Sprite, Swap, TRANSPARENT};
 
 mod chat;
+
+/// `isize::max` isn't usable in `const fn` (`Ord` isn't a stable const trait
+/// yet), so the few const layout getters below that need a clamped-at-zero
+/// *signed* subtraction use this instead. Most layout math here is plain
+/// `usize` (widths/heights/paddings can't be negative), so this is only
+/// needed where a position (not a size) is computed from other positions.
+const fn max_isize(a: isize, b: isize) -> isize {
+    if a > b { a } else { b }
+}
 
 const CONTENT_W: usize = 348;
 const W: usize = CONTENT_W + ERASER_W - ERASER_CONTENT_OVERLAP;
@@ -15,18 +24,18 @@ const ERASER_W: usize = 45;
 const ERASER_CONTENT_OVERLAP: usize = 30;
 const CONTENT_X_OFFSET: usize = 80;
 const PAD: usize = 8;
-const CHAT_Y: usize = 8;
-const CHAT_INPUT_GAP: usize = 6;
+const CHAT_Y: isize = 8;
+const CHAT_INPUT_GAP: isize = 6;
 const INPUT_X: usize = 24;
 const INPUT_BOTTOM_PAD: usize = 122;
-const INPUT_TEXT_Y: usize = 24;
+const INPUT_TEXT_Y: isize = 24;
 const TEXT_PAD: usize = 7;
 const INPUT_BOX_Y_OFFSET: isize = -13;
 const INPUT_BOX_RIGHT_PAD: usize = 11;
 const INPUT_EXTRA_W: usize = 40;
 const INPUT_EXTRA_H: usize = 4;
 const SELECTED_FWEND_GAP: usize = 4;
-const SELECTED_FWEND_Y_OFFSET: usize = 10;
+const SELECTED_FWEND_Y_OFFSET: isize = 10;
 const BUBBLE_PAD_X: usize = 14;
 const BUBBLE_PAD_TOP: usize = 8;
 const BUBBLE_PAD_BOTTOM: usize = 11;
@@ -182,15 +191,13 @@ impl Fwends {
         self.draw_eraser(fb, palette);
     }
 
-    pub(crate) fn click(&mut self, x: i16, y: i16) {
+    pub(crate) fn click(&mut self, x: isize, y: isize) {
         self.focused = false;
         self.input.end_drag();
         if x < 0 || y < 0 {
             return;
         }
 
-        let x = x as usize;
-        let y = y as usize;
         if self.eraser_contains(x, y) {
             self.erase_chat_history();
             return;
@@ -212,9 +219,9 @@ impl Fwends {
         let input_x = self.input_sticky_x();
         if !self.state.is_awaiting()
             && x >= input_x
-            && x < input_x + self.input_sticky_w()
+            && x < input_x + self.input_sticky_w() as isize
             && y >= self.input_y()
-            && y < self.input_y() + self.input_sticky_h()
+            && y < self.input_y() + self.input_sticky_h() as isize
         {
             self.focused = true;
             let cursor = self.input.index_at(&self.input_layout(&self.font), x, y);
@@ -223,12 +230,10 @@ impl Fwends {
     }
 
     /// Mirrors the hit-testing in `click`, without side effects.
-    pub(crate) fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+    pub(crate) fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
         if x < 0 || y < 0 {
             return CursorKind::Pointer;
         }
-        let x = x as usize;
-        let y = y as usize;
         if self.eraser_contains(x, y)
             || self.lamp_contains(x, y)
             || self.selected_fwend_rect().contains_point(x, y)
@@ -238,21 +243,21 @@ impl Fwends {
         let input_x = self.input_sticky_x();
         if !self.state.is_awaiting()
             && x >= input_x
-            && x < input_x + self.input_sticky_w()
+            && x < input_x + self.input_sticky_w() as isize
             && y >= self.input_y()
-            && y < self.input_y() + self.input_sticky_h()
+            && y < self.input_y() + self.input_sticky_h() as isize
         {
             return CursorKind::Text;
         }
         CursorKind::Pointer
     }
 
-    pub(crate) fn drag_text(&mut self, x: i16, y: i16) -> bool {
+    pub(crate) fn drag_text(&mut self, x: isize, y: isize) -> bool {
         if !self.input.is_dragging() {
             return false;
         }
-        let x = x.max(0) as usize;
-        let y = y.max(0) as usize;
+        let x = x.max(0);
+        let y = y.max(0);
         let cursor = self.input.index_at(&self.input_layout(&self.font), x, y);
         self.input.drag_to(cursor)
     }
@@ -343,14 +348,14 @@ impl Fwends {
         true
     }
 
-    pub(crate) fn scroll_up(&mut self, x: i16, y: i16) {
+    pub(crate) fn scroll_up(&mut self, x: isize, y: isize) {
         if !self.chat_contains(x, y) {
             return;
         }
         self.scroll_y = self.scroll_y.saturating_sub(SCROLL_STEP);
     }
 
-    pub(crate) fn scroll_down(&mut self, x: i16, y: i16) {
+    pub(crate) fn scroll_down(&mut self, x: isize, y: isize) {
         if !self.chat_contains(x, y) {
             return;
         }
@@ -432,39 +437,37 @@ impl Fwends {
 
     fn draw_messages(&self, fb: &mut Framebuffer, palette: &Palette) {
         let viewport_top = CHAT_Y;
-        let viewport_bottom = CHAT_Y + self.chat_h();
+        let viewport_bottom = CHAT_Y + self.chat_h() as isize;
         let bottom_offset = self.chat_h().saturating_sub(self.content_height());
 
         for layout in &self.layouts {
-            let y = CHAT_Y as isize + bottom_offset as isize + layout.y as isize
-                - self.scroll_y as isize;
-            if y >= viewport_bottom as isize || y + layout.h as isize <= viewport_top as isize {
+            let y = CHAT_Y + bottom_offset as isize + layout.y as isize - self.scroll_y as isize;
+            if y >= viewport_bottom || y + layout.h as isize <= viewport_top {
                 continue;
             }
 
             self.draw_bubble(fb, palette, layout.x, y, layout.w, layout.h, layout.style);
             if let Some(src) = layout.author.and_then(smol_icon_rect) {
                 let clip = Rect::new(0, viewport_top, self.width(), self.chat_h());
-                let icon_x = layout.x + layout.w + SMOL_ICON_GAP;
+                let icon_x = layout.x + (layout.w + SMOL_ICON_GAP) as isize;
                 let icon_y = y + layout.h as isize - (SMOL_ICON_SIZE + SMOL_ICON_Y_OFFSET) as isize;
                 fb.draw_sprite_full(
                     &self.smol_icons,
                     src,
-                    icon_x as isize,
+                    icon_x,
                     icon_y,
                     Some(clip),
                     palette,
                     None,
                 );
             }
-            let text_x = layout.x + layout.style.pad_left;
+            let text_x = layout.x + layout.style.pad_left as isize;
             let mut text_y = y + layout.style.pad_top as isize;
             for line in &layout.lines {
-                if text_y >= viewport_top as isize
-                    && text_y + self.font.cell_h() as isize <= viewport_bottom as isize
+                if text_y >= viewport_top && text_y + self.font.cell_h() as isize <= viewport_bottom
                 {
                     self.font
-                        .draw_text(fb, line, text_x, text_y as usize, palette_color::BLACK);
+                        .draw_text(fb, line, text_x, text_y, palette_color::BLACK);
                 }
                 text_y += LINE_H as isize;
             }
@@ -476,14 +479,14 @@ impl Fwends {
         &self,
         fb: &mut Framebuffer,
         palette: &Palette,
-        x: usize,
+        x: isize,
         y: isize,
         w: usize,
         h: usize,
         style: MessageStyle,
     ) {
         let clip_top = CHAT_Y;
-        let clip_bottom = CHAT_Y + self.chat_h();
+        let clip_bottom = CHAT_Y + self.chat_h() as isize;
         let image = match style.skin {
             MessageSkin::Bubble => &self.bubble,
             MessageSkin::Sticky => &self.user_sticky,
@@ -491,7 +494,7 @@ impl Fwends {
 
         for dy in 0..h {
             let py = y + dy as isize;
-            if py < clip_top as isize || py >= clip_bottom as isize {
+            if py < clip_top || py >= clip_bottom {
                 continue;
             }
             let sy = pixel_graphics::stretch_source_coord(
@@ -509,11 +512,11 @@ impl Fwends {
                     style.left_cap,
                     style.right_cap,
                 );
-                let px = x + dx;
-                let Some(color) = palette.resolve_index(image.at(sx, sy), px, py as usize) else {
+                let px = x + dx as isize;
+                let Some(color) = palette.resolve_index(image.at(sx, sy), px, py) else {
                     continue;
                 };
-                fb.set_pixel(px, py as usize, color);
+                fb.set_pixel(px, py, color);
             }
         }
     }
@@ -540,7 +543,7 @@ impl Fwends {
         let h = (lines.len() * LINE_H + style.pad_top + style.pad_bottom)
             .max(style.top_cap + style.bottom_cap + 1);
         let x = if style.align_right {
-            CONTENT_W - PAD - w
+            (CONTENT_W - PAD - w) as isize
         } else {
             self.assistant_bubble_x()
         };
@@ -601,7 +604,7 @@ impl Fwends {
         layouts
     }
 
-    const fn assistant_bubble_x(&self) -> usize {
+    const fn assistant_bubble_x(&self) -> isize {
         self.input_sticky_x()
     }
 
@@ -620,47 +623,48 @@ impl Fwends {
     fn draw_lamp(&self, fb: &mut Framebuffer, palette: &Palette) {
         let image = self.lamp_image();
         let (x, y) = self.lamp_position();
-        fb.draw_sprite(image, x as isize, y as isize, palette);
+        fb.draw_sprite(image, x, y, palette);
     }
 
     fn draw_eraser(&self, fb: &mut Framebuffer, palette: &Palette) {
         let (x, y) = self.eraser_position();
-        fb.draw_sprite(&self.eraser, x as isize, y as isize, palette);
+        fb.draw_sprite(&self.eraser, x, y, palette);
     }
 
-    fn eraser_contains(&self, x: usize, y: usize) -> bool {
+    fn eraser_contains(&self, x: isize, y: isize) -> bool {
         let (eraser_x, eraser_y) = self.eraser_position();
         if x < eraser_x
             || y < eraser_y
-            || x >= eraser_x + self.eraser.width
-            || y >= eraser_y + self.eraser.height
+            || x >= eraser_x + self.eraser.width as isize
+            || y >= eraser_y + self.eraser.height as isize
         {
             return false;
         }
 
-        self.eraser.is_opaque(x - eraser_x, y - eraser_y)
+        self.eraser
+            .is_opaque((x - eraser_x) as usize, (y - eraser_y) as usize)
     }
 
-    const fn eraser_position(&self) -> (usize, usize) {
+    const fn eraser_position(&self) -> (isize, isize) {
         (
-            W.saturating_sub(self.eraser.width + ERASER_RIGHT_PAD),
-            self.height.saturating_sub(self.eraser.height),
+            W.saturating_sub(self.eraser.width + ERASER_RIGHT_PAD) as isize,
+            self.height.saturating_sub(self.eraser.height) as isize,
         )
     }
 
-    fn lamp_contains(&self, x: usize, y: usize) -> bool {
+    fn lamp_contains(&self, x: isize, y: isize) -> bool {
         let image = self.lamp_image();
         let (lamp_x, lamp_y) = self.lamp_position();
         if x < lamp_x
             || y < lamp_y
-            || x >= lamp_x + image.width
-            || y >= lamp_y + image.height
+            || x >= lamp_x + image.width as isize
+            || y >= lamp_y + image.height as isize
             || y >= self.input_y()
         {
             return false;
         }
 
-        image.is_opaque(x - lamp_x, y - lamp_y)
+        image.is_opaque((x - lamp_x) as usize, (y - lamp_y) as usize)
     }
 
     const fn lamp_image(&self) -> &Sprite {
@@ -671,26 +675,30 @@ impl Fwends {
         }
     }
 
-    const fn lamp_position(&self) -> (usize, usize) {
+    const fn lamp_position(&self) -> (isize, isize) {
         let image = self.lamp_image();
         (
-            CONTENT_W.saturating_sub(image.width + LAMP_RIGHT_PAD),
-            self.height.saturating_sub(image.height + LAMP_Y_OFFSET),
+            CONTENT_W.saturating_sub(image.width + LAMP_RIGHT_PAD) as isize,
+            self.height.saturating_sub(image.height + LAMP_Y_OFFSET) as isize,
         )
     }
 
     fn draw_input(&self, fb: &mut Framebuffer, palette: &Palette) {
         fb.draw_resized(
             &self.input_sticky,
+            Rect::new(
+                self.input_sticky_x(),
+                self.input_y(),
+                self.input_sticky_w(),
+                self.input_sticky_h(),
+            ),
+            Caps::new(
+                STICKY_LEFT_CAP,
+                STICKY_RIGHT_CAP,
+                STICKY_TOP_CAP,
+                STICKY_BOTTOM_CAP,
+            ),
             palette,
-            self.input_sticky_x(),
-            self.input_y(),
-            self.input_sticky_w(),
-            self.input_sticky_h(),
-            STICKY_LEFT_CAP,
-            STICKY_RIGHT_CAP,
-            STICKY_TOP_CAP,
-            STICKY_BOTTOM_CAP,
         );
 
         let layout = self.input_layout(&self.font);
@@ -706,26 +714,26 @@ impl Fwends {
     fn draw_selected_fwend(&self, fb: &mut Framebuffer, palette: &Palette) {
         let avatar = &self.avatars[self.selected_model];
         let rect = self.selected_fwend_rect();
-        let avatar_x = rect.x + rect.w.saturating_sub(avatar.width) / 2;
-        let avatar_y = rect.y + rect.h.saturating_sub(avatar.height);
+        let avatar_x = rect.x + (rect.w.saturating_sub(avatar.width) / 2) as isize;
+        let avatar_y = rect.y + rect.h.saturating_sub(avatar.height) as isize;
         let (lamp_x, lamp_y) = self.lamp_position();
         draw_lamp_masked_ellipse(
             fb,
-            (avatar_x + avatar.width / 2) as isize,
-            (avatar_y + avatar.height / 2) as isize,
-            avatar.width + 10,
-            avatar.height.max(1) + 8,
+            avatar_x + (avatar.width / 2) as isize,
+            avatar_y + (avatar.height / 2) as isize,
+            (avatar.width + 10) as isize,
+            (avatar.height.max(1) + 8) as isize,
             palette,
             self.lamp_image(),
             lamp_x,
             lamp_y,
         );
-        fb.draw_sprite(avatar, avatar_x as isize, avatar_y as isize, palette);
+        fb.draw_sprite(avatar, avatar_x, avatar_y, palette);
     }
 
     const fn selected_fwend_rect(&self) -> FwendRect {
         FwendRect {
-            x: CONTENT_X_OFFSET + INPUT_X,
+            x: (CONTENT_X_OFFSET + INPUT_X) as isize,
             y: self.input_y() + SELECTED_FWEND_Y_OFFSET,
             w: self.model_slot_w,
             h: self.model_slot_h,
@@ -738,16 +746,10 @@ impl Fwends {
         }
 
         let (cursor_x, cursor_y) = self.input.cursor_position(&self.input_layout(&self.font));
-        let dest_x = cursor_x.saturating_sub(PENCIL_TIP_X);
-        let dest_y = cursor_y.saturating_sub(PENCIL_TIP_Y);
-        draw_yellow_pencil_shadow(
-            fb,
-            &self.pencil_shadow,
-            dest_x as isize,
-            dest_y as isize,
-            palette,
-        );
-        fb.draw_sprite(&self.pencil, dest_x as isize, dest_y as isize, palette);
+        let dest_x = (cursor_x - PENCIL_TIP_X as isize).max(0);
+        let dest_y = (cursor_y - PENCIL_TIP_Y as isize).max(0);
+        draw_yellow_pencil_shadow(fb, &self.pencil_shadow, dest_x, dest_y, palette);
+        fb.draw_sprite(&self.pencil, dest_x, dest_y, palette);
     }
 
     /// The text layout for the single-line-stacked input sticky.
@@ -761,22 +763,23 @@ impl Fwends {
         )
     }
 
-    const fn input_text_x(&self) -> usize {
-        self.input_sticky_x() + TEXT_PAD
+    const fn input_text_x(&self) -> isize {
+        self.input_sticky_x() + TEXT_PAD as isize
     }
 
-    const fn input_text_y(&self) -> usize {
-        (self.input_y() + INPUT_TEXT_Y).saturating_add_signed(INPUT_BOX_Y_OFFSET)
+    const fn input_text_y(&self) -> isize {
+        max_isize(self.input_y() + INPUT_TEXT_Y + INPUT_BOX_Y_OFFSET, 0)
     }
 
     const fn input_text_width(&self) -> usize {
-        let right_edge =
-            self.input_sticky_x() + self.input_sticky_w() - TEXT_PAD - INPUT_BOX_RIGHT_PAD;
-        right_edge.saturating_sub(self.input_text_x())
+        let right_edge = self.input_sticky_x() + self.input_sticky_w() as isize
+            - TEXT_PAD as isize
+            - INPUT_BOX_RIGHT_PAD as isize;
+        max_isize(right_edge - self.input_text_x(), 0) as usize
     }
 
-    const fn input_sticky_x(&self) -> usize {
-        CONTENT_X_OFFSET + INPUT_X + self.model_slot_w + SELECTED_FWEND_GAP
+    const fn input_sticky_x(&self) -> isize {
+        (CONTENT_X_OFFSET + INPUT_X + self.model_slot_w + SELECTED_FWEND_GAP) as isize
     }
 
     const fn input_sticky_w(&self) -> usize {
@@ -787,21 +790,17 @@ impl Fwends {
         self.input_sticky.height + INPUT_EXTRA_H
     }
 
-    const fn input_y(&self) -> usize {
-        self.height.saturating_sub(INPUT_BOTTOM_PAD + INPUT_EXTRA_H)
+    const fn input_y(&self) -> isize {
+        self.height.saturating_sub(INPUT_BOTTOM_PAD + INPUT_EXTRA_H) as isize
     }
 
     const fn chat_h(&self) -> usize {
-        self.input_y().saturating_sub(CHAT_Y + CHAT_INPUT_GAP)
+        max_isize(self.input_y() - (CHAT_Y + CHAT_INPUT_GAP), 0) as usize
     }
 
-    fn chat_contains(&self, x: i16, y: i16) -> bool {
-        if x < 0 || y < 0 {
-            return false;
-        }
-        let x = x as usize;
-        let y = y as usize;
-        (PAD..CONTENT_W - PAD).contains(&x) && (CHAT_Y..CHAT_Y + self.chat_h()).contains(&y)
+    fn chat_contains(&self, x: isize, y: isize) -> bool {
+        ((PAD as isize)..(CONTENT_W as isize - PAD as isize)).contains(&x)
+            && (CHAT_Y..CHAT_Y + self.chat_h() as isize).contains(&y)
     }
 }
 
@@ -828,8 +827,8 @@ impl crate::widget::Widget for Fwends {
 
     fn click(
         &mut self,
-        x: i16,
-        y: i16,
+        x: isize,
+        y: isize,
         _state: u16,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         Self::click(self, x, y);
@@ -844,7 +843,7 @@ impl crate::widget::Widget for Fwends {
         self.input.end_drag();
     }
 
-    fn scroll(&mut self, x: i16, y: i16, direction: crate::widget::ScrollDirection) -> bool {
+    fn scroll(&mut self, x: isize, y: isize, direction: crate::widget::ScrollDirection) -> bool {
         match direction {
             crate::widget::ScrollDirection::Up => self.scroll_up(x, y),
             crate::widget::ScrollDirection::Down => self.scroll_down(x, y),
@@ -852,7 +851,7 @@ impl crate::widget::Widget for Fwends {
         true
     }
 
-    fn cursor_at(&self, x: i16, y: i16) -> CursorKind {
+    fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
         self.cursor_at(x, y)
     }
 
@@ -868,7 +867,7 @@ impl crate::widget::Widget for Fwends {
         input.is_plain_paste_shortcut()
     }
 
-    fn drag_text(&mut self, x: i16, y: i16) -> bool {
+    fn drag_text(&mut self, x: isize, y: isize) -> bool {
         Self::drag_text(self, x, y)
     }
 
@@ -879,15 +878,15 @@ impl crate::widget::Widget for Fwends {
 
 #[derive(Clone, Copy)]
 struct FwendRect {
-    x: usize,
-    y: usize,
+    x: isize,
+    y: isize,
     w: usize,
     h: usize,
 }
 
 impl FwendRect {
-    const fn contains_point(self, x: usize, y: usize) -> bool {
-        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    const fn contains_point(self, x: isize, y: isize) -> bool {
+        x >= self.x && x < self.x + self.w as isize && y >= self.y && y < self.y + self.h as isize
     }
 }
 
@@ -896,15 +895,15 @@ fn draw_lamp_masked_ellipse(
     fb: &mut Framebuffer,
     center_x: isize,
     center_y: isize,
-    diameter_w: usize,
-    diameter_h: usize,
+    diameter_w: isize,
+    diameter_h: isize,
     palette: &Palette,
     lamp: &Sprite,
-    lamp_x: usize,
-    lamp_y: usize,
+    lamp_x: isize,
+    lamp_y: isize,
 ) {
-    let radius_x = diameter_w.div_ceil(2).max(1) as isize;
-    let radius_y = diameter_h.div_ceil(2).max(1) as isize;
+    let radius_x = ((diameter_w + 1) / 2).max(1);
+    let radius_y = ((diameter_h + 1) / 2).max(1);
 
     let rx2 = radius_x * radius_x;
     let ry2 = radius_y * radius_y;
@@ -916,11 +915,6 @@ fn draw_lamp_masked_ellipse(
             if dx * dx * ry2 + dy * dy * rx2 > threshold {
                 continue;
             }
-            if x < 0 || y < 0 {
-                continue;
-            }
-            let x = x as usize;
-            let y = y as usize;
             let Some(color) = lamp_shadow_color(lamp, lamp_x, lamp_y, x, y, palette) else {
                 continue;
             };
@@ -931,19 +925,23 @@ fn draw_lamp_masked_ellipse(
 
 fn lamp_shadow_color(
     lamp: &Sprite,
-    lamp_x: usize,
-    lamp_y: usize,
-    x: usize,
-    y: usize,
+    lamp_x: isize,
+    lamp_y: isize,
+    x: isize,
+    y: isize,
     palette: &Palette,
 ) -> Option<Index> {
-    let local_x = x.checked_sub(lamp_x)?;
-    let local_y = y.checked_sub(lamp_y)?;
-    if local_x >= lamp.width || local_y >= lamp.height {
+    let local_x = x - lamp_x;
+    let local_y = y - lamp_y;
+    if local_x < 0
+        || local_y < 0
+        || local_x >= lamp.width as isize
+        || local_y >= lamp.height as isize
+    {
         return None;
     }
 
-    let mapped = match lamp.at(local_x, local_y) {
+    let mapped = match lamp.at(local_x as usize, local_y as usize) {
         TRANSPARENT => return None,
         palette_color::ROSE => palette_color::CRIMSON,
         #[allow(clippy::match_same_arms)]
@@ -990,7 +988,7 @@ struct MessageLayout {
     style: MessageStyle,
     lines: Vec<String>,
     author: Option<&'static str>,
-    x: usize,
+    x: isize,
     y: usize,
     w: usize,
     h: usize,
@@ -1002,8 +1000,8 @@ fn smol_icon_rect(name: &str) -> Option<Rect> {
         .find(|model| model.name == name)?
         .icon_index;
     Some(Rect::new(
-        (index % 2) * SMOL_ICON_SIZE,
-        (index / 2) * SMOL_ICON_SIZE,
+        (index % 2) as isize * SMOL_ICON_SIZE as isize,
+        (index / 2) as isize * SMOL_ICON_SIZE as isize,
         SMOL_ICON_SIZE,
         SMOL_ICON_SIZE,
     ))
