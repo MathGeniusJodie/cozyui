@@ -130,11 +130,7 @@ mod tests {
         ];
         for ((y, m, d), expected) in cases {
             let epoch_day = days_from_civil(y, m, d);
-            assert_eq!(
-                iso_week_number(epoch_day),
-                expected,
-                "{y}-{m:02}-{d:02}"
-            );
+            assert_eq!(iso_week_number(epoch_day), expected, "{y}-{m:02}-{d:02}");
         }
     }
 }
