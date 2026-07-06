@@ -103,19 +103,6 @@ impl Puter {
         })
     }
 
-    pub(crate) const fn width(&self) -> usize {
-        self.mode_images.green_low_contrast.width
-    }
-
-    pub(crate) const fn height(&self) -> usize {
-        self.mode_images.green_low_contrast.height
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        TRANSPARENT
-    }
-
     pub(crate) fn press_button(&mut self, x: isize, y: isize, state: u16) {
         self.press_state = match button_at(x, y) {
             Some(index) => PressState::Chrome(index),
@@ -160,43 +147,6 @@ impl Puter {
         }
         self.press_state = PressState::None;
         quit
-    }
-
-    /// Hand over the front-panel buttons, text over the terminal screen.
-    pub(crate) fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
-        if button_at(x, y).is_some() {
-            return CursorKind::Hand;
-        }
-        if x >= 0 && y >= 0 {
-            let x = x as usize;
-            let y = y as usize;
-            let screen_x = art_x(SCREEN_SOURCE_X);
-            let screen_y = art_y(SCREEN_SOURCE_Y);
-            if x >= screen_x && x < screen_x + SCREEN_W && y >= screen_y && y < screen_y + SCREEN_H
-            {
-                return CursorKind::Text;
-            }
-        }
-        CursorKind::Pointer
-    }
-
-    pub(crate) fn motion(&mut self, x: isize, y: isize) -> bool {
-        let PressState::Selection(current) = self.press_state else {
-            return false;
-        };
-
-        // Clamped, not rejected: a selection drag can leave the grid before
-        // the button is released, and the selection should keep tracking the
-        // nearest cell instead of freezing until the pointer re-enters it.
-        let Some(point) = self.terminal().map(|term| term.clamped_screen_point(x, y)) else {
-            return false;
-        };
-        if current == point {
-            return false;
-        }
-
-        self.press_state = PressState::Selection(point);
-        self.terminal().is_some_and(|term| term.mouse_motion(point))
     }
 
     pub(crate) fn start_terminal(&mut self, window_id: u64) -> Result<(), Box<dyn Error>> {
@@ -250,15 +200,15 @@ impl Puter {
 
 impl crate::widget::Widget for Puter {
     fn width(&self) -> usize {
-        self.width()
+        self.mode_images.green_low_contrast.width
     }
 
     fn height(&self) -> usize {
-        self.height()
+        self.mode_images.green_low_contrast.height
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
@@ -276,7 +226,22 @@ impl crate::widget::Widget for Puter {
     }
 
     fn motion(&mut self, x: isize, y: isize) -> bool {
-        Self::motion(self, x, y)
+        let PressState::Selection(current) = self.press_state else {
+            return false;
+        };
+
+        // Clamped, not rejected: a selection drag can leave the grid before
+        // the button is released, and the selection should keep tracking the
+        // nearest cell instead of freezing until the pointer re-enters it.
+        let Some(point) = self.terminal().map(|term| term.clamped_screen_point(x, y)) else {
+            return false;
+        };
+        if current == point {
+            return false;
+        }
+
+        self.press_state = PressState::Selection(point);
+        self.terminal().is_some_and(|term| term.mouse_motion(point))
     }
 
     fn scroll(&mut self, _x: isize, _y: isize, direction: crate::widget::ScrollDirection) -> bool {
@@ -287,8 +252,22 @@ impl crate::widget::Widget for Puter {
         true
     }
 
+    /// Hand over the front-panel buttons, text over the terminal screen.
     fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
-        self.cursor_at(x, y)
+        if button_at(x, y).is_some() {
+            return CursorKind::Hand;
+        }
+        if x >= 0 && y >= 0 {
+            let x = x as usize;
+            let y = y as usize;
+            let screen_x = art_x(SCREEN_SOURCE_X);
+            let screen_y = art_y(SCREEN_SOURCE_Y);
+            if x >= screen_x && x < screen_x + SCREEN_W && y >= screen_y && y < screen_y + SCREEN_H
+            {
+                return CursorKind::Text;
+            }
+        }
+        CursorKind::Pointer
     }
 
     fn handle_key_press(

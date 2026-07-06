@@ -2,11 +2,6 @@
 //!
 //! Uses `phf` for a compile-time perfect hash map — zero runtime init cost,
 //! no allocation, lookups are a couple of comparisons.
-//!
-//! Add to Cargo.toml:
-//! ```toml
-//! phf = { version = "0.11", features = ["macros"] }
-//! ```
 
 use phf::phf_map;
 

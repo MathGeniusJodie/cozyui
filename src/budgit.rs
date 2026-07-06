@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::localtime::days_from_civil;
 use crate::palette_color;
-use crate::text::BitmapFont;
+use crate::text::{BitmapFont, draw_text_centered, draw_text_centered_tight};
 use crate::{Framebuffer, Index, Palette};
 
 const WIDTH: usize = 210;
@@ -26,6 +26,11 @@ const CONFIG_FILE: &str = "budgit.conf";
 const LEDGER_FILE: &str = "budgit.csv";
 
 const REFRESH: Duration = Duration::from_secs(1);
+
+/// How often `Budgit::update` re-checks `budgit.conf`/`budgit.csv` for
+/// on-disk edits. Separate from (and slower than) `REFRESH`, which only
+/// recomputes the already-loaded numbers against the current time.
+const DISK_POLL: Duration = Duration::from_secs(2);
 
 /// How long the background SVG counter waits between scans (measured from the
 /// end of the previous scan, so a slow scan never overlaps the next).
@@ -236,22 +241,31 @@ fn strip_comment(raw: &str) -> &str {
     raw
 }
 
-/// Sums the ledger CSV in `budgit.csv` into the starting balance. Income is
+/// Sums the ledger CSV at `path` into the starting balance. Income is
 /// positive, expenses negative. Columns are `title,amount,date`; the header
 /// row, blank lines, and `#` comments are skipped, and the date is optional
-/// (only the amount is used). A missing file means a zero balance.
-fn load_ledger_balance() -> Result<f64, Box<dyn Error>> {
-    match fs::read_to_string(crate::paths::config_file(LEDGER_FILE)) {
+/// (only the amount is used). A missing file means a zero balance, and any
+/// other read error (permissions, a remounted config dir, ...) degrades to a
+/// zero starting balance rather than aborting the whole widget — matching
+/// the config-loading policy just above this call in `Budgit::load`. Shared
+/// by `load` and `Budgit::poll_disk`, so both call sites agree on how a bad
+/// read degrades.
+fn load_ledger_balance(path: &str) -> f64 {
+    match fs::read_to_string(path) {
         Ok(text) => sum_ledger(&text),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0.0),
-        Err(err) => Err(err.into()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0.0,
+        Err(err) => {
+            eprintln!("budgit.csv: skipping unreadable ledger: {err}");
+            0.0
+        }
     }
 }
 
 /// Sums the amount column of ledger CSV text. See [`load_ledger_balance`].
 /// A malformed line is skipped (with a warning naming the line number) rather
-/// than aborting the whole widget.
-fn sum_ledger(text: &str) -> Result<f64, Box<dyn Error>> {
+/// than aborting the whole widget. Always succeeds since bad lines are just
+/// skipped, so this returns the sum directly rather than a `Result`.
+fn sum_ledger(text: &str) -> f64 {
     let mut balance = 0.0;
     for (i, raw) in text.lines().enumerate() {
         let line = strip_comment(raw).trim();
@@ -290,7 +304,7 @@ fn sum_ledger(text: &str) -> Result<f64, Box<dyn Error>> {
             }
         }
     }
-    Ok(balance)
+    balance
 }
 
 /// Parses a `YYYY-MM-DD` date into its components.
@@ -303,26 +317,10 @@ fn parse_date(value: &str) -> Result<(i32, i32, i32), Box<dyn Error>> {
             .ok_or_else(|| format!("budgit.conf: bad date: {value}").into())
     };
     let (y, m, d) = (next()?, next()?, next()?);
-    if !(1..=12).contains(&m) || !(1..=days_in_month(y, m)).contains(&d) {
+    if !(1..=12).contains(&m) || !(1..=crate::localtime::days_in_month(y, m)).contains(&d) {
         return Err(format!("budgit.conf: bad date: {value}").into());
     }
     Ok((y, m, d))
-}
-
-/// Number of days in `month` (1-based) of `year`, with the Gregorian
-/// leap-year rule.
-fn days_in_month(year: i32, month: i32) -> i32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        _ => 28,
-    }
-}
-
-/// Whether `year` is a Gregorian leap year.
-fn is_leap_year(year: i32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 /// Vertical layout for the widget's sections, shared by [`Budgit::load`]
@@ -366,6 +364,18 @@ struct BudgetView {
     svgs_completed: String,
 }
 
+/// Cached identity of one polled on-disk file: its resolved path plus its
+/// fingerprint as of the last check. `path` is tracked alongside the
+/// fingerprint (not just the fingerprint alone) because `paths::config_file`
+/// can itself resolve to a different path over time — e.g. a first-ever
+/// write to the XDG config dir supersedes the dev-checkout fallback — and
+/// that switch must count as a change even if the two files happen to share
+/// a fingerprint.
+struct FileSnapshot {
+    path: String,
+    fingerprint: Option<crate::util::Fingerprint>,
+}
+
 pub struct Budgit {
     label_font: BitmapFont,
     balance_font: BitmapFont,
@@ -375,6 +385,12 @@ pub struct Budgit {
     periods: Vec<Period>,
     /// Dollars credited per completed SVG (from `budgit.conf`).
     dollars_per_svg: f64,
+    /// Folder whose finished SVGs set the paths-per-SVG baseline (from
+    /// `budgit.conf`); kept so `poll_disk` can tell whether an edited config
+    /// actually needs the background counter respawned.
+    done_dir: String,
+    /// Folder of in-progress SVG templates (from `budgit.conf`); see `done_dir`.
+    templates_dir: String,
     /// Latest completed-SVG estimate received from the background counter.
     svgs_completed: f64,
     /// Receives fresh estimates from the off-thread ripgrep scanner.
@@ -383,6 +399,14 @@ pub struct Budgit {
     /// Widget height, computed from the fonts so it ends exactly at the last
     /// stat row (mirrors the layout math in `render`).
     height: usize,
+    config_snapshot: FileSnapshot,
+    ledger_snapshot: FileSnapshot,
+    /// Gates `poll_disk` to `DISK_POLL`, independent of `view`'s own `REFRESH`
+    /// throttle.
+    disk_poll: crate::util::Throttle,
+    /// So a transient stat/read failure on either file logs once per episode
+    /// rather than once per poll tick.
+    disk_read_failing: crate::util::FailureLog,
 }
 
 impl Budgit {
@@ -397,7 +421,8 @@ impl Budgit {
             &pixel_fonts::FUSION_PIXEL_8_SPEC,
         )?;
 
-        let config = match fs::read_to_string(crate::paths::config_file(CONFIG_FILE)) {
+        let config_path = crate::paths::config_file(CONFIG_FILE);
+        let config = match fs::read_to_string(&config_path) {
             Ok(text) => match Config::parse(&text) {
                 Ok(config) => config,
                 Err(err) => {
@@ -416,7 +441,15 @@ impl Budgit {
                 Config::default()
             }
         };
-        let start_balance = load_ledger_balance()?;
+        // Best-effort: a stat failure here just means the first `poll_disk`
+        // tick will see a mismatch against `None` and treat it as a change,
+        // which only costs one extra (harmless) re-read.
+        let config_fingerprint = crate::util::fingerprint(&config_path).ok().flatten();
+
+        let ledger_path = crate::paths::config_file(LEDGER_FILE);
+        let start_balance = load_ledger_balance(&ledger_path);
+        let ledger_fingerprint = crate::util::fingerprint(&ledger_path).ok().flatten();
+
         // The estimate starts at zero and is filled in by the background
         // counter once its first off-thread scan completes.
         let svgs_completed = 0.0;
@@ -445,25 +478,23 @@ impl Budgit {
             start_balance,
             periods: config.periods,
             dollars_per_svg: config.dollars_per_svg,
+            done_dir: config.done_dir,
+            templates_dir: config.templates_dir,
             svgs_completed,
             svg_rx,
             view: crate::util::Refresh::new(view),
             height,
+            config_snapshot: FileSnapshot {
+                path: config_path,
+                fingerprint: config_fingerprint,
+            },
+            ledger_snapshot: FileSnapshot {
+                path: ledger_path,
+                fingerprint: ledger_fingerprint,
+            },
+            disk_poll: crate::util::Throttle::new(),
+            disk_read_failing: crate::util::FailureLog::new(),
         })
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn width(&self) -> usize {
-        WIDTH
-    }
-
-    pub(crate) const fn height(&self) -> usize {
-        self.height
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        palette_color::BLACK
     }
 
     pub(crate) fn update(&mut self) -> bool {
@@ -471,6 +502,12 @@ impl Budgit {
         // most recent. This never blocks the render thread.
         while let Ok(completed) = self.svg_rx.try_recv() {
             self.svgs_completed = completed;
+        }
+        // An on-disk edit takes priority over the plain time-based refresh
+        // below: it already forces its own fresh view, so there's nothing
+        // left for the throttled refresh to do this tick.
+        if self.poll_disk() {
+            return true;
         }
         let (start_balance, svgs_completed, dollars_per_svg) = (
             self.start_balance,
@@ -489,6 +526,118 @@ impl Budgit {
         })
     }
 
+    /// Re-checks `budgit.conf` and `budgit.csv` for on-disk edits, throttled
+    /// to `DISK_POLL`. Returns whether anything changed, in which case the
+    /// view has already been force-recomputed with a fresh timestamp (rather
+    /// than waiting out `REFRESH`, which could show stale numbers for up to a
+    /// second after a save).
+    fn poll_disk(&mut self) -> bool {
+        if !self.disk_poll.ready(DISK_POLL) {
+            return false;
+        }
+
+        let mut changed = false;
+
+        let config_path = crate::paths::config_file(CONFIG_FILE);
+        match crate::util::fingerprint(&config_path) {
+            Ok(fingerprint) => {
+                self.disk_read_failing
+                    .record_ok(|| "budgit.conf: reads recovered".to_string());
+                if config_path != self.config_snapshot.path
+                    || fingerprint != self.config_snapshot.fingerprint
+                {
+                    self.config_snapshot = FileSnapshot {
+                        path: config_path.clone(),
+                        fingerprint,
+                    };
+                    // A vanished file (fingerprint None) is left as-is rather
+                    // than re-read as empty: the running config stays the
+                    // known-good one until something real replaces it.
+                    if fingerprint.is_some() {
+                        changed |= self.reload_config(&config_path);
+                    }
+                }
+            }
+            Err(err) => self.disk_read_failing.record_err(|| {
+                format!("budgit.conf: failed to stat config (suppressing repeats): {err}")
+            }),
+        }
+
+        let ledger_path = crate::paths::config_file(LEDGER_FILE);
+        match crate::util::fingerprint(&ledger_path) {
+            Ok(fingerprint) => {
+                self.disk_read_failing
+                    .record_ok(|| "budgit.csv: reads recovered".to_string());
+                if ledger_path != self.ledger_snapshot.path
+                    || fingerprint != self.ledger_snapshot.fingerprint
+                {
+                    self.ledger_snapshot = FileSnapshot {
+                        path: ledger_path.clone(),
+                        fingerprint,
+                    };
+                    self.start_balance = load_ledger_balance(&ledger_path);
+                    changed = true;
+                }
+            }
+            Err(err) => self.disk_read_failing.record_err(|| {
+                format!("budgit.csv: failed to stat ledger (suppressing repeats): {err}")
+            }),
+        }
+
+        if changed {
+            self.view.set(compute_view(
+                self.start_balance,
+                &self.periods,
+                crate::util::now_secs(),
+                self.svgs_completed,
+                self.dollars_per_svg,
+            ));
+        }
+        changed
+    }
+
+    /// Re-reads and re-parses `budgit.conf` at `path`, applying the new
+    /// periods, dollars-per-svg rate, and SVG scan folders. Returns whether
+    /// anything actually changed.
+    ///
+    /// Unlike `load`, a read or parse failure here keeps the current config
+    /// running (logged, not silently swallowed) rather than falling back to
+    /// `Config::default`: at startup there's no running config yet, so
+    /// defaults are the least-bad option, but at runtime there is a
+    /// known-good config already active, and trading it for defaults over
+    /// what's often just a transient bad save (an editor's write-then-rename
+    /// caught mid-flight) would make things worse, not safer.
+    fn reload_config(&mut self, path: &str) -> bool {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => {
+                eprintln!("budgit.conf: keeping current config, now unreadable: {err}");
+                return false;
+            }
+        };
+        let config = match Config::parse(&text) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("budgit.conf: keeping current config, edit was malformed: {err}");
+                return false;
+            }
+        };
+        self.periods = config.periods;
+        self.dollars_per_svg = config.dollars_per_svg;
+        // Respawning drops the old Receiver, which eventually kills the old
+        // poller thread (its next send fails) rather than leaking it — see
+        // `spawn_poller`'s doc — but it also restarts the SVG estimate from
+        // scratch. Only pay that cost when the folders it scans actually
+        // changed, so an edit to an unrelated setting (e.g. a new expense
+        // period) doesn't reset a perfectly good in-flight estimate.
+        if config.done_dir != self.done_dir || config.templates_dir != self.templates_dir {
+            self.svg_rx = spawn_svg_counter(config.done_dir.clone(), config.templates_dir.clone());
+        }
+        self.done_dir = config.done_dir;
+        self.templates_dir = config.templates_dir;
+        true
+    }
+
     pub(crate) fn render(&self, fb: &mut Framebuffer, _palette: &Palette) {
         let view = self.view.get();
         let muted = palette_color::CREAM;
@@ -503,23 +652,35 @@ impl Budgit {
         let layout = compute_layout(&self.label_font, &self.stat_font, balance_h);
 
         // "MONEY LEFT" label.
-        self.draw_centered(fb, &self.label_font, "MONEY LEFT", layout.label_y, muted);
+        draw_text_centered(
+            fb,
+            &self.label_font,
+            "MONEY LEFT",
+            0,
+            WIDTH,
+            layout.label_y as isize,
+            muted,
+        );
 
         // Big balance (dollars) in the calendar's big font.
-        self.draw_centered_tight(
+        draw_text_centered_tight(
             fb,
             &self.balance_font,
             &view.dollars,
-            layout.balance_y,
+            0,
+            WIDTH,
+            layout.balance_y as isize,
             view.color,
         );
 
         // Fractional cents underneath, bold and in the balance color.
-        self.draw_centered(
+        draw_text_centered(
             fb,
             &self.label_font,
             &view.fraction,
-            layout.fraction_y,
+            0,
+            WIDTH,
+            layout.fraction_y as isize,
             view.color,
         );
 
@@ -535,38 +696,6 @@ impl Budgit {
             self.draw_row(fb, label, value, y);
             y += STAT_ROW_H;
         }
-    }
-
-    #[allow(clippy::unused_self)]
-    fn draw_centered(
-        &self,
-        fb: &mut Framebuffer,
-        font: &BitmapFont,
-        text: &str,
-        y: usize,
-        color: Index,
-    ) {
-        let x = WIDTH.saturating_sub(font.text_width(text)) / 2;
-        font.draw_text(fb, text, x as isize, y as isize, color);
-    }
-
-    /// Centers using the glyph ink bounds and draws so that `y` is the top of
-    /// the ink, not the (much taller) cell box.
-    #[allow(clippy::unused_self)]
-    fn draw_centered_tight(
-        &self,
-        fb: &mut Framebuffer,
-        font: &BitmapFont,
-        text: &str,
-        y: usize,
-        color: Index,
-    ) {
-        let Some(bounds) = font.text_ink_bounds(text) else {
-            return;
-        };
-        let x = (WIDTH.saturating_sub(bounds.width()) / 2).saturating_add_signed(-bounds.min_x);
-        let draw_y = y.saturating_sub(bounds.min_y);
-        font.draw_text(fb, text, x as isize, draw_y as isize, color);
     }
 
     fn draw_row(&self, fb: &mut Framebuffer, label: &str, value: &str, y: usize) {
@@ -630,8 +759,8 @@ fn compute_view(
         dollars,
         fraction,
         color,
-        monthly: format!("{}/mo", fmt_money(burn, 2)),
-        daily: format!("{}/day", fmt_money(per_day, 2)),
+        monthly: format!("{}/mo", fmt_money(burn)),
+        daily: format!("{}/day", fmt_money(per_day)),
         days_left,
         svgs_completed: format!("{svgs_completed:.1}"),
     }
@@ -680,10 +809,15 @@ fn svg_dir_stamp(dir: &str) -> Option<(u64, SystemTime)> {
 /// Counts `<path` occurrences across the `.svg` files in `dir`, returning
 /// `(total_paths, file_count)`. `recurse` controls descent into
 /// subdirectories. Shells out to ripgrep; any failure yields `(0, 0)`.
+///
+/// Passes `--include-zero` so ripgrep still reports (and this counts toward
+/// the file total) SVGs with no `<path` at all -- without it, ripgrep omits
+/// zero-match files entirely, which would bias `avg_paths_per_svg` high.
 fn count_svg_paths(dir: &str, recurse: bool) -> (u64, u64) {
     let dir = crate::paths::expand_tilde(dir);
     let mut cmd = Command::new("rg");
     cmd.arg("--count-matches")
+        .arg("--include-zero")
         .arg("--no-messages")
         .arg("--glob")
         .arg("*.svg");
@@ -745,21 +879,13 @@ fn split_money(value: f64) -> (String, String) {
     )
 }
 
-fn fmt_money(value: f64, decimals: usize) -> String {
-    let scale = 10f64.powi(decimals as i32) as i64;
+fn fmt_money(value: f64) -> String {
+    let scale = 100i64;
     let scaled = (value * scale as f64).round() as i64;
     let sign = if scaled < 0 { "-" } else { "" };
     let scaled = scaled.abs();
     let whole = scaled / scale;
-    if decimals == 0 {
-        return format!("{sign}${}", group_digits(whole));
-    }
-    format!(
-        "{sign}${}.{:0width$}",
-        group_digits(whole),
-        scaled % scale,
-        width = decimals
-    )
+    format!("{sign}${}.{:02}", group_digits(whole), scaled % scale)
 }
 
 fn group_digits(value: i64) -> String {
@@ -777,15 +903,15 @@ fn group_digits(value: i64) -> String {
 
 impl crate::widget::Widget for Budgit {
     fn width(&self) -> usize {
-        self.width()
+        WIDTH
     }
 
     fn height(&self) -> usize {
-        self.height()
+        self.height
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        palette_color::BLACK
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
@@ -892,19 +1018,19 @@ mod tests {
             Paycheck,2000,2026-01-15\n\
             Rent,-700,\n\
             Coffee,-4.5\n";
-        assert!((sum_ledger(csv).unwrap() - 1295.5).abs() < 1e-9);
+        assert!((sum_ledger(csv) - 1295.5).abs() < 1e-9);
     }
 
     #[test]
     fn ledger_allows_hash_inside_title() {
         let csv = "Repair (unit #4),-50,2026-01-15\n";
-        assert!((sum_ledger(csv).unwrap() - (-50.0)).abs() < 1e-9);
+        assert!((sum_ledger(csv) - (-50.0)).abs() < 1e-9);
     }
 
     #[test]
     fn ledger_empty_is_zero_and_bad_amount_is_skipped() {
-        assert_eq!(sum_ledger("title,amount,date\n").unwrap(), 0.0);
-        assert_eq!(sum_ledger("Rent,oops\n").unwrap(), 0.0);
+        assert_eq!(sum_ledger("title,amount,date\n"), 0.0);
+        assert_eq!(sum_ledger("Rent,oops\n"), 0.0);
     }
 
     #[test]

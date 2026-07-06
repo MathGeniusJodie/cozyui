@@ -38,3 +38,21 @@ pub fn expand_tilde(path: &str) -> String {
         _ => path.to_owned(),
     }
 }
+
+/// Read `conf_name` (via [`config_file`]) and return its first non-blank,
+/// non-comment line trimmed of whitespace, tilde-expanded; falls back to
+/// `default` (also tilde-expanded) when the file is missing or has no such
+/// line. Callers typically cache the result themselves in a `OnceLock` since
+/// this hits the filesystem on every call.
+pub fn config_first_line(conf_name: &str, default: &str) -> String {
+    let configured = std::fs::read_to_string(config_file(conf_name))
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| default.to_owned());
+    expand_tilde(&configured)
+}

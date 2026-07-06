@@ -39,6 +39,8 @@ pub(crate) trait Widget {
         self.height()
     }
     fn fill_color(&self, palette: &Palette) -> Index;
+    /// `fb` arrives already cleared to `fill_color`; render only needs to
+    /// paint over it, not clear it itself.
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette);
     /// Periodic tick; returns whether a redraw is needed. Widgets driven by
     /// their own channels in the main loop (puter, fwends, toodle) keep the

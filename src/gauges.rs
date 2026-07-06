@@ -9,7 +9,7 @@ use std::fs;
 use std::time::Duration;
 
 use crate::palette_color;
-use crate::text::BitmapFont;
+use crate::text::{BitmapFont, draw_text_centered};
 use crate::{Framebuffer, Index, Palette, TRANSPARENT};
 
 const GAUGE_D: usize = 56;
@@ -71,20 +71,6 @@ impl Gauges {
         })
     }
 
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn width(&self) -> usize {
-        GAUGE_COUNT * GAUGE_D + (GAUGE_COUNT - 1) * GAUGE_GAP
-    }
-
-    pub(crate) const fn height(&self) -> usize {
-        self.height
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        TRANSPARENT
-    }
-
     /// Re-sample /proc periodically; returns whether the view changed.
     pub(crate) fn update(&mut self) -> bool {
         if !self.throttle.ready(REFRESH) {
@@ -142,21 +128,23 @@ impl Gauges {
             // Percent readout inside the face, centered in the bottom dead
             // zone under the needle hub.
             let readout = format!("{pct}%");
-            let readout_x = left + (GAUGE_D.saturating_sub(self.font.text_width(&readout))) / 2;
             let readout_y = GAUGE_D.saturating_sub(self.font.cell_h() + 4);
-            self.font.draw_text(
+            draw_text_centered(
                 fb,
+                &self.font,
                 &readout,
-                readout_x as isize,
+                left as isize,
+                GAUGE_D,
                 readout_y as isize,
                 palette_color::BLACK,
             );
 
-            let label_x = left + (GAUGE_D.saturating_sub(self.font.text_width(label))) / 2;
-            self.font.draw_text(
+            draw_text_centered(
                 fb,
+                &self.font,
                 label,
-                label_x as isize,
+                left as isize,
+                GAUGE_D,
                 (GAUGE_D + LABEL_GAP) as isize,
                 palette_color::CREAM,
             );
@@ -269,15 +257,15 @@ fn meminfo_kb(text: &str, key: &str) -> Option<u64> {
 
 impl crate::widget::Widget for Gauges {
     fn width(&self) -> usize {
-        self.width()
+        GAUGE_COUNT * GAUGE_D + (GAUGE_COUNT - 1) * GAUGE_GAP
     }
 
     fn height(&self) -> usize {
-        self.height()
+        self.height
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {

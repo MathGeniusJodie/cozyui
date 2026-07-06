@@ -28,6 +28,10 @@ pub struct TextField {
 }
 
 impl TextField {
+    /// Sentinel for `max_chars` meaning "no limit", for callers that only
+    /// want to cap line count.
+    pub(crate) const NO_CHAR_LIMIT: usize = usize::MAX;
+
     pub(crate) fn new(max_chars: usize, max_lines: usize) -> Self {
         Self {
             text: String::new(),

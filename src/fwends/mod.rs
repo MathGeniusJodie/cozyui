@@ -4,6 +4,7 @@ use crate::palette_color;
 use crate::text::{
     BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
 };
+use crate::widget::Widget;
 use crate::{Caps, CursorKind, Framebuffer, Index, Palette, Rect, Sprite, Swap, TRANSPARENT};
 
 mod chat;
@@ -152,15 +153,6 @@ impl Fwends {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) const fn width(&self) -> usize {
-        W
-    }
-
-    pub(crate) const fn height(&self) -> usize {
-        self.height
-    }
-
-    #[allow(clippy::unused_self)]
     pub(crate) const fn min_height(&self) -> usize {
         H
     }
@@ -176,14 +168,7 @@ impl Fwends {
         true
     }
 
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        TRANSPARENT
-    }
-
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
-        fb.clear(self.fill_color(palette));
-
         self.draw_lamp(fb, palette);
         self.draw_messages(fb, palette);
         self.draw_input(fb, palette);
@@ -229,43 +214,6 @@ impl Fwends {
         }
     }
 
-    /// Mirrors the hit-testing in `click`, without side effects.
-    pub(crate) fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
-        if x < 0 || y < 0 {
-            return CursorKind::Pointer;
-        }
-        if self.eraser_contains(x, y)
-            || self.lamp_contains(x, y)
-            || self.selected_fwend_rect().contains_point(x, y)
-        {
-            return CursorKind::Hand;
-        }
-        let input_x = self.input_sticky_x();
-        if !self.state.is_awaiting()
-            && x >= input_x
-            && x < input_x + self.input_sticky_w() as isize
-            && y >= self.input_y()
-            && y < self.input_y() + self.input_sticky_h() as isize
-        {
-            return CursorKind::Text;
-        }
-        CursorKind::Pointer
-    }
-
-    pub(crate) fn drag_text(&mut self, x: isize, y: isize) -> bool {
-        if !self.input.is_dragging() {
-            return false;
-        }
-        let x = x.max(0);
-        let y = y.max(0);
-        let cursor = self.input.index_at(&self.input_layout(&self.font), x, y);
-        self.input.drag_to(cursor)
-    }
-
-    pub(crate) const fn end_text_drag(&mut self) {
-        self.input.end_drag();
-    }
-
     pub(crate) const fn text_dragging(&self) -> bool {
         self.input.is_dragging()
     }
@@ -277,22 +225,25 @@ impl Fwends {
     ) -> Option<String> {
         let key = edit_key(input);
 
-        // Tab/Left/Right intentionally switch models even mid-edit, mirroring
-        // a click on the fwend avatar, rather than moving the text cursor or
-        // doing focus navigation — so this must run before the input gets a
-        // chance to consume Left/Right for cursor movement below. Shift+Left
-        // /Right is excluded so text selection in the input still works;
-        // `edit_key` doesn't distinguish shift on its own.
+        // Tab always switches models, mirroring a click on the fwend avatar,
+        // regardless of focus. Plain Left/Right do the same *only* when the
+        // input isn't in a state to consume them for cursor movement: unfocused,
+        // or read-only while awaiting a reply. Otherwise they fall through to
+        // the input's own handling below so the cursor moves / selection
+        // collapses like any normal text field. Shift+Left/Right always fall
+        // through so text selection in the input still works; `edit_key`
+        // doesn't distinguish shift on its own.
+        let input_editable = self.focused && !self.state.is_awaiting();
         match key {
             EditKey::Tab => {
                 self.select_next_model();
                 return None;
             }
-            EditKey::Right if !input.shift() => {
+            EditKey::Right if !input.shift() && !input_editable => {
                 self.select_next_model();
                 return None;
             }
-            EditKey::Left if !input.shift() => {
+            EditKey::Left if !input.shift() && !input_editable => {
                 self.selected_model = self
                     .selected_model
                     .checked_sub(1)
@@ -302,7 +253,7 @@ impl Fwends {
             _ => {}
         }
 
-        if self.focused && !self.state.is_awaiting() {
+        if input_editable {
             let layout = self.input_layout(&self.font);
             let outcome = self.input.handle_key(input, clipboard_text, &layout);
             if let TextEditOutcome::Handled { changed: _, copy } = outcome {
@@ -348,18 +299,24 @@ impl Fwends {
         true
     }
 
-    pub(crate) fn scroll_up(&mut self, x: isize, y: isize) {
+    pub(crate) fn scroll_up(&mut self, x: isize, y: isize) -> bool {
         if !self.chat_contains(x, y) {
-            return;
+            return false;
         }
-        self.scroll_y = self.scroll_y.saturating_sub(SCROLL_STEP);
+        let new_scroll_y = self.scroll_y.saturating_sub(SCROLL_STEP);
+        let changed = new_scroll_y != self.scroll_y;
+        self.scroll_y = new_scroll_y;
+        changed
     }
 
-    pub(crate) fn scroll_down(&mut self, x: isize, y: isize) {
+    pub(crate) fn scroll_down(&mut self, x: isize, y: isize) -> bool {
         if !self.chat_contains(x, y) {
-            return;
+            return false;
         }
-        self.scroll_y = (self.scroll_y + SCROLL_STEP).min(self.max_scroll());
+        let new_scroll_y = (self.scroll_y + SCROLL_STEP).min(self.max_scroll());
+        let changed = new_scroll_y != self.scroll_y;
+        self.scroll_y = new_scroll_y;
+        changed
     }
 
     fn send(&mut self) {
@@ -806,19 +763,19 @@ impl Fwends {
 
 impl crate::widget::Widget for Fwends {
     fn width(&self) -> usize {
-        self.width()
+        W
     }
 
     fn height(&self) -> usize {
-        self.height()
+        self.height
     }
 
     fn layout_height(&self) -> usize {
         self.min_height()
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
@@ -848,11 +805,29 @@ impl crate::widget::Widget for Fwends {
             crate::widget::ScrollDirection::Up => self.scroll_up(x, y),
             crate::widget::ScrollDirection::Down => self.scroll_down(x, y),
         }
-        true
     }
 
+    /// Mirrors the hit-testing in `click`, without side effects.
     fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
-        self.cursor_at(x, y)
+        if x < 0 || y < 0 {
+            return CursorKind::Pointer;
+        }
+        if self.eraser_contains(x, y)
+            || self.lamp_contains(x, y)
+            || self.selected_fwend_rect().contains_point(x, y)
+        {
+            return CursorKind::Hand;
+        }
+        let input_x = self.input_sticky_x();
+        if !self.state.is_awaiting()
+            && x >= input_x
+            && x < input_x + self.input_sticky_w() as isize
+            && y >= self.input_y()
+            && y < self.input_y() + self.input_sticky_h() as isize
+        {
+            return CursorKind::Text;
+        }
+        CursorKind::Pointer
     }
 
     fn handle_key_press(
@@ -868,11 +843,17 @@ impl crate::widget::Widget for Fwends {
     }
 
     fn drag_text(&mut self, x: isize, y: isize) -> bool {
-        Self::drag_text(self, x, y)
+        if !self.input.is_dragging() {
+            return false;
+        }
+        let x = x.max(0);
+        let y = y.max(0);
+        let cursor = self.input.index_at(&self.input_layout(&self.font), x, y);
+        self.input.drag_to(cursor)
     }
 
     fn end_text_drag(&mut self) {
-        Self::end_text_drag(self);
+        self.input.end_drag();
     }
 }
 
@@ -965,13 +946,13 @@ fn draw_yellow_pencil_shadow(
         dest_x,
         dest_y,
         palette,
-        &Swap::from_indices(&YELLOW_PAGE_REMAP),
+        &Swap::from_indices(&PENCIL_SHADOW_REMAP),
     );
 }
 
 const PALETTE_COLOR_COUNT: usize = 16;
 
-const YELLOW_PAGE_REMAP: [Index; PALETTE_COLOR_COUNT] = {
+const PENCIL_SHADOW_REMAP: [Index; PALETTE_COLOR_COUNT] = {
     let mut remap = [0; PALETTE_COLOR_COUNT];
     let mut i = 0;
     while i < PALETTE_COLOR_COUNT {

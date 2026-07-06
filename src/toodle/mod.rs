@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::fs;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::app_color;
@@ -8,6 +7,7 @@ use crate::palette_color;
 use crate::text::{
     BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
 };
+use crate::widget::Widget;
 use crate::{
     CursorKind, Framebuffer, Index, Paint, Palette, PaletteIndex, Rect, Sprite, Swap, TRANSPARENT,
 };
@@ -16,10 +16,10 @@ mod store;
 
 use store::{
     AtomicWrite, DoneCounts, LINE_COUNT, Priority, SECTION_COUNT, SaveWorker, SectionStore,
-    TodoList, archive_transaction_path, daily_done_path, done_dir, recover_archive_transaction,
-    todo_file, toodle_root, write_archive_transaction_marker,
+    TodoList, archive_transaction_path, daily_done_path, done_dir, read_or_empty,
+    recover_archive_transaction, todo_file, toodle_root, write_archive_transaction_marker,
 };
-pub(crate) use store::{PRIORITY_TAGS, done_file_path};
+pub(crate) use store::{PRIORITY_TAGS, count_done_lines, done_file_path};
 
 /// toodle's two-line todo layout: a lone line sits on the baseline; once the
 /// text wraps, the first line lifts and the second drops.
@@ -72,6 +72,10 @@ const MAX_TEXT_CHARS: usize = 22;
 const LAST_LINE_MAX_TEXT_CHARS: usize = 18;
 const WRAPPED_FIRST_LINE_OFFSET_Y: usize = 2;
 const WRAPPED_SECOND_LINE_OFFSET_Y: usize = 7;
+/// A todo's edit buffer wraps to at most two lines, matching the
+/// `WRAPPED_FIRST_LINE_OFFSET_Y`/`WRAPPED_SECOND_LINE_OFFSET_Y` two-line
+/// layout above.
+const TODO_MAX_LINES: usize = 2;
 const PENULTIMATE_LINE_SHADOW_MAX_CHARS: usize = 17;
 const LAST_LINE_SHADOW_MAX_CHARS: usize = 14;
 const LINE_CLICK_OFFSET_Y: isize = 9;
@@ -96,7 +100,9 @@ enum PageColor {
 /// without the other. Merging them means a line can't be focused without its
 /// text being loaded, and the field can't be inspected without a line being
 /// focused — see `Toodle::focus_line`, the only way to move focus onto a
-/// line.
+/// line. `line_and_field`/`line_and_field_mut` are the only way to reach the
+/// field, so an unfocused caller gets `None` instead of a chance to misuse a
+/// stale reference.
 enum Focus {
     None,
     Line { line: usize, field: TextField },
@@ -119,77 +125,30 @@ impl Focus {
         }
     }
 
-    /// The focused line's edit buffer. Every call site here is only reached
-    /// after confirming (via `line()` or right after `Toodle::focus_line`)
-    /// that a line is focused, so `Focus::None` reaching this is a bug.
-    fn field(&self) -> &TextField {
-        match self {
-            Self::None => unreachable!("Focus::field called with nothing focused"),
-            Self::Line { field, .. } => field,
-        }
-    }
-
-    fn field_mut(&mut self) -> &mut TextField {
-        match self {
-            Self::None => unreachable!("Focus::field_mut called with nothing focused"),
-            Self::Line { field, .. } => field,
-        }
-    }
-
-    fn text(&self) -> &str {
-        self.field().text()
-    }
-
-    fn cursor(&self) -> usize {
-        self.field().cursor()
-    }
-
-    fn set_cursor(&mut self, cursor: usize) {
-        self.field_mut().set_cursor(cursor);
-    }
-
-    fn set_cursor_end(&mut self) {
-        self.field_mut().set_cursor_end();
-    }
-
-    fn selection_range(&self) -> Option<(usize, usize)> {
+    /// The focused line paired with its edit buffer, or `None` if nothing is
+    /// focused.
+    fn line_and_field(&self) -> Option<(usize, &TextField)> {
         match self {
             Self::None => None,
-            Self::Line { field, .. } => field.selection_range(),
+            Self::Line { line, field } => Some((*line, field)),
         }
     }
 
-    fn handle_key(
-        &mut self,
-        input: &KeyInput,
-        clipboard_text: Option<&str>,
-        layout: &TextLayout,
-    ) -> TextEditOutcome {
-        self.field_mut().handle_key(input, clipboard_text, layout)
-    }
-
-    fn index_at(&self, layout: &TextLayout, x: isize, y: isize) -> usize {
-        self.field().index_at(layout, x, y)
-    }
-
-    fn begin_drag(&mut self, cursor: usize) {
-        if let Self::Line { field, .. } = self {
-            field.begin_drag(cursor);
+    fn line_and_field_mut(&mut self) -> Option<(usize, &mut TextField)> {
+        match self {
+            Self::None => None,
+            Self::Line { line, field } => Some((*line, field)),
         }
     }
 
-    fn drag_to(&mut self, index: usize) -> bool {
-        self.field_mut().drag_to(index)
+    /// The focused line's edit buffer, or `None` if nothing is focused. Same
+    /// invariant as `line_and_field`: a field only exists paired with its line.
+    fn field(&self) -> Option<&TextField> {
+        self.line_and_field().map(|(_, field)| field)
     }
 
-    fn end_drag(&mut self) {
-        if let Self::Line { field, .. } = self {
-            field.end_drag();
-        }
-    }
-
-    fn is_dragging(&self) -> bool {
-        matches!(self, Self::Line { field, .. } if field.is_dragging())
+    fn field_mut(&mut self) -> Option<&mut TextField> {
+        self.line_and_field_mut().map(|(_, field)| field)
     }
 }
 
@@ -307,23 +266,6 @@ impl Toodle {
         })
     }
 
-    pub(crate) fn width(&self) -> usize {
-        let stack_right =
-            PAGE_OFFSET_X + self.pages[0].width as isize + self.stack_offset() + SHADOW_X_OFFSET;
-        let dice_right =
-            PAGE_OFFSET_X + self.pages[0].width as isize + DICE_GAP + self.dice.width as isize;
-        stack_right.max(dice_right).max(0) as usize
-    }
-
-    pub(crate) fn height(&self) -> usize {
-        (self.pages[0].height as isize + self.stack_offset() + SHADOW_Y_OFFSET).max(0) as usize
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        TRANSPARENT
-    }
-
     fn list(&self, section: Priority) -> &TodoList {
         self.sections[section.index()].list()
     }
@@ -335,28 +277,6 @@ impl Toodle {
             *count = section.list().page_count();
         }
         (self.page, counts)
-    }
-
-    pub(crate) fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
-        let (w, h) = (self.width(), self.height());
-        let key = self.page_art_key();
-        let stale = self
-            .page_art
-            .as_ref()
-            .is_none_or(|(art, art_key)| *art_key != key || art.width != w || art.height != h);
-        if stale {
-            let mut art = match self.page_art.take() {
-                Some((art, _)) if art.width == w && art.height == h => art,
-                _ => Framebuffer::new(w, h, self.fill_color(palette)),
-            };
-            self.build_page_art(&mut art, palette);
-            self.page_art = Some((art, key));
-        }
-
-        if let Some((art, _)) = &self.page_art {
-            fb.blit_from(art, 0, 0);
-        }
-        self.draw_front_overlay(fb, palette);
     }
 
     /// The expensive, rarely-changing layer: the stacked page shadows, page
@@ -441,7 +361,7 @@ impl Toodle {
                 layout.draw_selection_lines(
                     fb,
                     &lines,
-                    self.focus.selection_range(),
+                    self.focus.field().and_then(TextField::selection_range),
                     palette_color::LAVENDER,
                 );
             }
@@ -489,7 +409,9 @@ impl Toodle {
     }
 
     pub(crate) fn click(&mut self, x: isize, y: isize) -> Result<bool, Box<dyn Error>> {
-        self.focus.end_drag();
+        if let Some(field) = self.focus.field_mut() {
+            field.end_drag();
+        }
         if self.eraser_at(x, y) {
             self.archive_completed_todos()?;
             self.focus = Focus::None;
@@ -504,10 +426,12 @@ impl Toodle {
 
         let abs_x = x.max(0);
         let abs_y = y.max(0);
-        let Some(page_x) = abs_x.checked_sub(PAGE_OFFSET_X) else {
+        // Clicks left of the page area unfocus.
+        let page_x = abs_x - PAGE_OFFSET_X;
+        if page_x < 0 {
             self.focus = Focus::None;
             return Ok(false);
-        };
+        }
 
         if page_x >= PAGE_CURL_X && abs_y >= PAGE_CURL_Y {
             self.page = (self.page + 1) % self.logical_page_count();
@@ -538,63 +462,19 @@ impl Toodle {
         match line_at(abs_y) {
             Some(line) => {
                 self.focus_line(line);
-                let cursor =
-                    self.focus
-                        .index_at(&Self::line_layout(&self.font, line), abs_x, abs_y);
-                self.focus.begin_drag(cursor);
+                let layout = Self::line_layout(&self.font, line);
+                if let Some(field) = self.focus.field_mut() {
+                    let cursor = field.index_at(&layout, abs_x, abs_y);
+                    field.begin_drag(cursor);
+                }
             }
             None => self.focus = Focus::None,
         }
         Ok(false)
     }
 
-    pub(crate) fn drag_text(&mut self, x: isize, y: isize) -> bool {
-        if !self.focus.is_dragging() {
-            return false;
-        }
-
-        let Some(line) = self.focus.line() else {
-            return false;
-        };
-        let abs_x = x.max(0);
-        let abs_y = y.max(0);
-        let cursor = self
-            .focus
-            .index_at(&Self::line_layout(&self.font, line), abs_x, abs_y);
-        self.focus.drag_to(cursor)
-    }
-
-    pub(crate) fn end_text_drag(&mut self) {
-        self.focus.end_drag();
-    }
-
     pub(crate) fn text_dragging(&self) -> bool {
-        self.focus.is_dragging()
-    }
-
-    /// Mirrors the hit-testing in `click`, without side effects.
-    pub(crate) fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
-        if self.eraser_at(x, y) || self.dice_at(x, y) {
-            return CursorKind::Hand;
-        }
-        let abs_x = x.max(0);
-        let abs_y = y.max(0);
-        let Some(page_x) = abs_x.checked_sub(PAGE_OFFSET_X) else {
-            return CursorKind::Pointer;
-        };
-        if page_x >= PAGE_CURL_X && abs_y >= PAGE_CURL_Y {
-            return CursorKind::Hand;
-        }
-        if let Some(line) = checkbox_at(page_x, abs_y)
-            && self.checkbox_clickable(line)
-        {
-            return CursorKind::Hand;
-        }
-        if line_at(abs_y).is_some() {
-            CursorKind::Text
-        } else {
-            CursorKind::Pointer
-        }
+        self.focus.field().is_some_and(TextField::is_dragging)
     }
 
     /// Whether `line` on the front page has a clickable checkbox. Requiring
@@ -605,88 +485,6 @@ impl Toodle {
         let PageRef { section, page } = self.current_page_ref();
         let item = self.list(section).item(page, line);
         item.is_checkbox() && (item.checked() || !item.text().is_empty())
-    }
-
-    pub(crate) fn hover(&mut self, x: isize, y: isize) -> bool {
-        let was_hovered = self.eraser_hovered;
-        if x < 0 || y < 0 {
-            self.eraser_hovered = false;
-            return was_hovered;
-        }
-        self.eraser_hovered = self.eraser_at(x, y);
-        was_hovered != self.eraser_hovered
-    }
-
-    pub(crate) fn handle_key_press(
-        &mut self,
-        input: &KeyInput,
-        clipboard_text: Option<&str>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
-        let Some(line) = self.focus.line() else {
-            return Ok(None);
-        };
-
-        let PageRef { section, page } = self.current_page_ref();
-        if matches!(edit_key(input), EditKey::Backspace) && self.focus.text().is_empty() {
-            // Deleting goes through the async save path like every other
-            // edit, so a backspace never blocks the UI thread on fsyncs. If a
-            // save is already in flight, begin_save (inside
-            // save_current_section) leaves the section dirty and the debounce
-            // retries once it completes — no rename race, no lost delete.
-            if self.sections[section.index()]
-                .list_mut()
-                .delete_item(page, line)
-            {
-                self.sections[section.index()].mark_dirty();
-                self.last_edit = Instant::now();
-                self.save_current_section()?;
-            }
-            self.keep_section_page_visible(PageRef { section, page });
-            self.focus_line(line);
-            self.focus.set_cursor(0);
-            return Ok(None);
-        }
-
-        let layout = Self::line_layout(&self.font, line);
-        let outcome = self.focus.handle_key(input, clipboard_text, &layout);
-        if let TextEditOutcome::Handled { changed, copy } = outcome {
-            if changed {
-                let text = self.focus.text().to_string();
-                self.sections[section.index()]
-                    .list_mut()
-                    .item_mut(page, line)
-                    .set_text(text);
-                // Deferred save: an fsync per keystroke makes typing lag.
-                self.sections[section.index()].mark_dirty();
-                self.last_edit = Instant::now();
-                self.keep_section_page_visible(PageRef { section, page });
-            }
-            return Ok(copy);
-        }
-
-        match edit_key(input) {
-            EditKey::Enter => {
-                self.focus_line((line + 1).min(LINE_COUNT - 1));
-                self.focus.set_cursor_end();
-            }
-            EditKey::Escape => {
-                self.focus = Focus::None;
-            }
-            // No line-editing action for these: Tab (no focus navigation
-            // here) or an unrecognized/textless key press.
-            EditKey::Tab | EditKey::None => return Ok(None),
-            // `self.focus.handle_key` above always consumes these itself
-            // (returning `Handled`, which returns early before this match),
-            // so they can never actually reach here. Panicking rather than
-            // silently no-opping means a change that broke that invariant
-            // gets noticed immediately instead of just quietly dropping
-            // input.
-            EditKey::Left | EditKey::Right | EditKey::Insert(_) | EditKey::Backspace => {
-                unreachable!("TextEdit::handle_key already consumes Left/Right/Insert/Backspace")
-            }
-        }
-
-        Ok(None)
     }
 
     /// The text layout for todo `line` on the front page, in absolute
@@ -706,7 +504,7 @@ impl Toodle {
     /// `Focus`'s doc comment for why that pairing matters.
     fn focus_line(&mut self, line: usize) {
         let PageRef { section, page } = self.current_page_ref();
-        let mut field = TextField::new(usize::MAX, 2);
+        let mut field = TextField::new(TextField::NO_CHAR_LIMIT, TODO_MAX_LINES);
         field.set_text(self.list(section).item(page, line).text());
         self.focus = Focus::Line { line, field };
     }
@@ -721,7 +519,9 @@ impl Toodle {
         };
         let PageRef { section, page } = self.current_page_ref();
         let text = self.list(section).item(page, line).text().to_string();
-        self.focus.field_mut().set_text(&text);
+        if let Some((_, field)) = self.focus.line_and_field_mut() {
+            field.set_text(&text);
+        }
     }
 
     /// Blit just the front page's checkbox box for one line out of the combined
@@ -894,23 +694,23 @@ impl Toodle {
         self.keep_section_page_visible(current_page);
 
         if let Some(line) = self.focus.line() {
-            let text = self.focus.text();
-            let index = if text.is_empty() {
-                // A blank focused line has no identity to follow; any blank
-                // spot is as good as another, so stay put.
-                None
-            } else {
-                let old_index = current_page.page * LINE_COUNT + line;
-                self.list(current_page.section)
-                    .items
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| item.text() == text)
-                    .map(|(index, _)| index)
-                    // Several todos can share text; follow whichever match sits
-                    // closest to where focus used to be, preferring the earlier
-                    // one on a tie, rather than always snapping to the first.
-                    .min_by_key(|&index| (index as isize - old_index as isize).unsigned_abs())
+            // A blank (or absent) focused line has no identity to follow; any
+            // blank spot is as good as another, so stay put.
+            let index = match self.focus.field().map(TextField::text) {
+                None | Some("") => None,
+                Some(text) => {
+                    let old_index = current_page.page * LINE_COUNT + line;
+                    self.list(current_page.section)
+                        .items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, item)| item.text() == text)
+                        .map(|(index, _)| index)
+                        // Several todos can share text; follow whichever match sits
+                        // closest to where focus used to be, preferring the earlier
+                        // one on a tie, rather than always snapping to the first.
+                        .min_by_key(|&index| (index as isize - old_index as isize).unsigned_abs())
+                }
             };
             if let Some(index) = index {
                 // Follow the focused todo to wherever it landed.
@@ -992,11 +792,7 @@ impl Toodle {
             }
 
             let done_path = daily_done_path(section);
-            let mut done_text = if Path::new(&done_path).exists() {
-                fs::read_to_string(&done_path)?
-            } else {
-                String::new()
-            };
+            let mut done_text = read_or_empty(&done_path)?;
             if !done_text.is_empty() && !done_text.ends_with('\n') {
                 done_text.push('\n');
             }
@@ -1267,11 +1063,11 @@ impl Toodle {
     }
 
     fn focused_pencil_position(&self) -> Option<(usize, isize, isize, bool)> {
-        let line = self.focus.line()?;
+        let (line, field) = self.focus.line_and_field()?;
         let PageRef { section, page } = self.current_page_ref();
         let todo = self.list(section).item(page, line);
         let layout = Self::line_layout(&self.font, line);
-        let (cursor_x, cursor_y) = layout.cursor_position(todo.text(), self.focus.cursor());
+        let (cursor_x, cursor_y) = layout.cursor_position(todo.text(), field.cursor());
         // A cursor sitting in overflow text (wrapped past the two drawn
         // lines) would place the pencil inside the todo below; pin it to the
         // second line's row instead.
@@ -1340,19 +1136,41 @@ impl Toodle {
 
 impl crate::widget::Widget for Toodle {
     fn width(&self) -> usize {
-        self.width()
+        let stack_right =
+            PAGE_OFFSET_X + self.pages[0].width as isize + self.stack_offset() + SHADOW_X_OFFSET;
+        let dice_right =
+            PAGE_OFFSET_X + self.pages[0].width as isize + DICE_GAP + self.dice.width as isize;
+        stack_right.max(dice_right).max(0) as usize
     }
 
     fn height(&self) -> usize {
-        self.height()
+        (self.pages[0].height as isize + self.stack_offset() + SHADOW_Y_OFFSET).max(0) as usize
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
-        Self::render(self, fb, palette);
+        let (w, h) = (self.width(), self.height());
+        let key = self.page_art_key();
+        let stale = self
+            .page_art
+            .as_ref()
+            .is_none_or(|(art, art_key)| *art_key != key || art.width != w || art.height != h);
+        if stale {
+            let mut art = match self.page_art.take() {
+                Some((art, _)) if art.width == w && art.height == h => art,
+                _ => Framebuffer::new(w, h, self.fill_color(palette)),
+            };
+            self.build_page_art(&mut art, palette);
+            self.page_art = Some((art, key));
+        }
+
+        if let Some((art, _)) = &self.page_art {
+            fb.blit_from(art, 0, 0);
+        }
+        self.draw_front_overlay(fb, palette);
     }
 
     fn click(
@@ -1374,11 +1192,39 @@ impl crate::widget::Widget for Toodle {
     }
 
     fn hover(&mut self, x: isize, y: isize) -> bool {
-        Self::hover(self, x, y)
+        let was_hovered = self.eraser_hovered;
+        if x < 0 || y < 0 {
+            self.eraser_hovered = false;
+            return was_hovered;
+        }
+        self.eraser_hovered = self.eraser_at(x, y);
+        was_hovered != self.eraser_hovered
     }
 
+    /// Mirrors the hit-testing in `click`, without side effects.
     fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
-        self.cursor_at(x, y)
+        if self.eraser_at(x, y) || self.dice_at(x, y) {
+            return CursorKind::Hand;
+        }
+        let abs_x = x.max(0);
+        let abs_y = y.max(0);
+        let page_x = abs_x - PAGE_OFFSET_X;
+        if page_x < 0 {
+            return CursorKind::Pointer;
+        }
+        if page_x >= PAGE_CURL_X && abs_y >= PAGE_CURL_Y {
+            return CursorKind::Hand;
+        }
+        if let Some(line) = checkbox_at(page_x, abs_y)
+            && self.checkbox_clickable(line)
+        {
+            return CursorKind::Hand;
+        }
+        if line_at(abs_y).is_some() {
+            CursorKind::Text
+        } else {
+            CursorKind::Pointer
+        }
     }
 
     fn handle_key_press(
@@ -1386,7 +1232,86 @@ impl crate::widget::Widget for Toodle {
         input: &KeyInput,
         clipboard_text: Option<&str>,
     ) -> Result<Option<String>, Box<dyn Error>> {
-        Self::handle_key_press(self, input, clipboard_text)
+        let Some(line) = self.focus.line() else {
+            return Ok(None);
+        };
+
+        let PageRef { section, page } = self.current_page_ref();
+        if matches!(edit_key(input), EditKey::Backspace)
+            && self.focus.field().is_some_and(|field| field.text().is_empty())
+        {
+            // Deleting goes through the async save path like every other
+            // edit, so a backspace never blocks the UI thread on fsyncs. If a
+            // save is already in flight, begin_save (inside
+            // save_current_section) leaves the section dirty and the debounce
+            // retries once it completes — no rename race, no lost delete.
+            if self.sections[section.index()]
+                .list_mut()
+                .delete_item(page, line)
+            {
+                self.sections[section.index()].mark_dirty();
+                self.last_edit = Instant::now();
+                self.save_current_section()?;
+            }
+            self.keep_section_page_visible(PageRef { section, page });
+            self.focus_line(line);
+            if let Some(field) = self.focus.field_mut() {
+                field.set_cursor(0);
+            }
+            return Ok(None);
+        }
+
+        let layout = Self::line_layout(&self.font, line);
+        let Some(outcome) = self
+            .focus
+            .field_mut()
+            .map(|field| field.handle_key(input, clipboard_text, &layout))
+        else {
+            return Ok(None);
+        };
+        if let TextEditOutcome::Handled { changed, copy } = outcome {
+            if changed {
+                let Some(text) = self.focus.field().map(TextField::text) else {
+                    return Ok(copy);
+                };
+                let text = text.to_string();
+                self.sections[section.index()]
+                    .list_mut()
+                    .item_mut(page, line)
+                    .set_text(text);
+                // Deferred save: an fsync per keystroke makes typing lag.
+                self.sections[section.index()].mark_dirty();
+                self.last_edit = Instant::now();
+                self.keep_section_page_visible(PageRef { section, page });
+            }
+            return Ok(copy);
+        }
+
+        match edit_key(input) {
+            EditKey::Enter => {
+                self.focus_line((line + 1).min(LINE_COUNT - 1));
+                if let Some(field) = self.focus.field_mut() {
+                    field.set_cursor_end();
+                }
+            }
+            EditKey::Escape => {
+                self.focus = Focus::None;
+            }
+            // No line-editing action for these: Tab (no focus navigation
+            // here) or an unrecognized/textless key press.
+            EditKey::Tab | EditKey::None => return Ok(None),
+            // The `field.handle_key` call above always consumes these itself
+            // (returning `Handled`, which returns early before this match),
+            // so they can never actually reach here. Panicking rather than
+            // silently no-opping means a change that broke that invariant
+            // gets noticed immediately instead of just quietly dropping
+            // input.
+            EditKey::Left | EditKey::Right | EditKey::Insert(_) | EditKey::Backspace => {
+                unreachable!("TextEdit::handle_key already consumes Left/Right/Insert/Backspace")
+            }
+        }
+
+        Ok(None)
     }
 
     fn wants_clipboard(&self, input: &KeyInput) -> bool {
@@ -1394,11 +1319,26 @@ impl crate::widget::Widget for Toodle {
     }
 
     fn drag_text(&mut self, x: isize, y: isize) -> bool {
-        Self::drag_text(self, x, y)
+        let Some(line) = self.focus.line() else {
+            return false;
+        };
+        let layout = Self::line_layout(&self.font, line);
+        let abs_x = x.max(0);
+        let abs_y = y.max(0);
+        let Some(field) = self.focus.field_mut() else {
+            return false;
+        };
+        if !field.is_dragging() {
+            return false;
+        }
+        let cursor = field.index_at(&layout, abs_x, abs_y);
+        field.drag_to(cursor)
     }
 
     fn end_text_drag(&mut self) {
-        Self::end_text_drag(self);
+        if let Some(field) = self.focus.field_mut() {
+            field.end_drag();
+        }
     }
 }
 
@@ -1527,11 +1467,11 @@ const BLUE_PAGE_REMAP: [Index; 16] = {
     remap
 };
 
-/// Whether `(x, y)` (negative values clamped to 0) falls inside the rectangle at
-/// `(left, top)` of the given size.
+/// Whether `(x, y)` falls inside the rectangle at `(left, top)` of the given
+/// size. Negative coordinates are simply outside any rect anchored at a
+/// non-negative `left`/`top` (e.g. the eraser at `ERASER_X = 0`) — they are
+/// not clamped into range.
 fn point_in_rect(x: isize, y: isize, left: isize, top: isize, width: usize, height: usize) -> bool {
-    let x = x.max(0);
-    let y = y.max(0);
     (left..left + width as isize).contains(&x) && (top..top + height as isize).contains(&y)
 }
 

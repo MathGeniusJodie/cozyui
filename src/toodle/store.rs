@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -43,16 +42,7 @@ const ARCHIVE_TRANSACTION_NAME: &str = "toodle_archive_transaction.json";
 pub(super) fn toodle_root() -> &'static str {
     static ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
-        let configured = fs::read_to_string(crate::paths::config_file(TOODLE_CONF_FILE))
-            .ok()
-            .and_then(|text| {
-                text.lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty() && !line.starts_with('#'))
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| DEFAULT_TOODLE_ROOT.to_owned());
-        let expanded = crate::paths::expand_tilde(&configured);
+        let expanded = crate::paths::config_first_line(TOODLE_CONF_FILE, DEFAULT_TOODLE_ROOT);
         expanded.trim_end_matches('/').to_owned()
     })
 }
@@ -139,39 +129,35 @@ pub(super) const fn section_tag(section: Priority) -> &'static str {
     PRIORITY_TAGS[section.index()]
 }
 
-/// Identity of one on-disk file version. The inode is included so an atomic
-/// rename-over (how sync tools and we ourselves write) is always detected even
-/// if size and mtime happen to match.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub(super) struct Fingerprint {
-    ino: u64,
-    size: u64,
-    mtime_s: i64,
-    mtime_ns: i64,
-}
-
-/// The file's current fingerprint, or `None` if it does not exist.
-fn fingerprint(path: &str) -> io::Result<Option<Fingerprint>> {
-    match fs::metadata(path) {
-        Ok(meta) => Ok(Some(Fingerprint {
-            ino: meta.ino(),
-            size: meta.size(),
-            mtime_s: meta.mtime(),
-            mtime_ns: meta.mtime_nsec(),
-        })),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err),
-    }
-}
+pub(super) use crate::util::{fingerprint, Fingerprint};
 
 /// Read the whole file, treating a missing file as empty (files can vanish
 /// between a stat and the read when another program rewrites them).
-fn read_or_empty(path: &str) -> io::Result<String> {
+pub(super) fn read_or_empty(path: &str) -> io::Result<String> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(text),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(String::new()),
         Err(err) => Err(err),
     }
+}
+
+/// Count of completed todos in a done file: trimmed lines that are non-empty
+/// and don't start with `#` (done files can carry a leading markdown heading,
+/// e.g. from a template or an external edit, which isn't a completed todo).
+/// A missing file counts as zero rather than erroring, both because a
+/// priority with nothing archived yet has no done file at all and because the
+/// file can vanish between being staged for a read and the read itself (see
+/// `read_or_empty`). Shared by toodle's own gold-star tally
+/// (`DoneCounts::refresh`) and the weekly stats chart so the two never
+/// disagree about what counts as "done".
+pub(crate) fn count_done_lines(path: &str) -> io::Result<usize> {
+    Ok(read_or_empty(path)?
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
+        .count())
 }
 
 /// One line of a todo file: either a plain line kept verbatim (e.g. a
@@ -628,13 +614,7 @@ impl DoneCounts {
             if path == state.path && fingerprint == state.fingerprint {
                 continue;
             }
-            let count = read_or_empty(&path)?
-                .lines()
-                .filter(|line| {
-                    let trimmed = line.trim();
-                    !trimmed.is_empty() && !trimmed.starts_with('#')
-                })
-                .count();
+            let count = count_done_lines(&path)?;
             changed |= count != state.count;
             *state = DoneFile {
                 path,
@@ -853,6 +833,17 @@ pub(super) fn recover_archive_transaction(marker_path: &str) -> Result<(), Box<d
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn count_done_lines_ignores_blank_and_heading_lines() {
+        let dir = std::env::temp_dir().join(format!("cozyui-store-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("count.txt");
+        fs::write(&path, "# Heading\na\n\nb\n  \n# another\nc\n").unwrap();
+        assert_eq!(count_done_lines(path.to_str().unwrap()).unwrap(), 3);
+        assert_eq!(count_done_lines("/no/such/store/file").unwrap(), 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn todo_item_round_trips_checked_items() {

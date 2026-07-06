@@ -112,7 +112,6 @@ pub(crate) const CURSOR_KIND_COUNT: usize = CursorKind::Disabled as usize + 1;
 const WHEEL_UP: u8 = 4;
 const WHEEL_DOWN: u8 = 5;
 
-const SHOW_FWENDS: bool = true;
 /// Cut the desk background out of the window with the X SHAPE extension so
 /// whatever is underneath shows through (no compositor needed). The holes are
 /// fully click-through.
@@ -155,14 +154,6 @@ impl WidgetId {
         Self::Hunger,
         Self::Gauges,
     ];
-
-    fn visible() -> impl Iterator<Item = Self> {
-        Self::ALL.into_iter().filter(|widget| widget.is_visible())
-    }
-
-    fn is_visible(self) -> bool {
-        SHOW_FWENDS || self != Self::Fwends
-    }
 }
 
 /// What the mouse is doing after a press, until the matching release.
@@ -304,7 +295,7 @@ impl App {
 
     fn width(&self) -> usize {
         let mut width = self.desk.width;
-        for widget in WidgetId::visible() {
+        for widget in WidgetId::ALL {
             let rect = self.rect_for(widget);
             let right_edge = (rect.x + rect.w as isize).max(0) as usize;
             width = width.max(right_edge);
@@ -355,7 +346,7 @@ impl App {
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
         self.render_background(fb, palette);
-        for widget in WidgetId::visible() {
+        for widget in WidgetId::ALL {
             self.render_widget(fb, palette, widget);
         }
     }
@@ -380,9 +371,6 @@ impl App {
         palette: &Palette,
         widget: WidgetId,
     ) -> Result<(), Box<dyn Error>> {
-        if !widget.is_visible() {
-            return Ok(());
-        }
         let rect = self.rect_for(widget);
         self.render_rect(fb, palette, rect);
         xwin.draw_rect(fb, rect)
@@ -390,7 +378,7 @@ impl App {
 
     fn render_rect(&mut self, fb: &mut Framebuffer, palette: &Palette, rect: Rect) {
         self.render_background_rect(fb, palette, rect);
-        for widget in WidgetId::visible() {
+        for widget in WidgetId::ALL {
             if layout::rects_intersect(self.rect_for(widget), rect) {
                 self.render_widget(fb, palette, widget);
             }
@@ -452,7 +440,7 @@ impl App {
     }
 
     fn drain_replies(&mut self) -> bool {
-        SHOW_FWENDS && self.widgets.fwends.drain_reply()
+        self.widgets.fwends.drain_reply()
     }
 
     fn handle_key_press(
@@ -460,9 +448,6 @@ impl App {
         input: &text::KeyInput,
         clipboard_text: Option<&str>,
     ) -> Result<Option<String>, Box<dyn Error>> {
-        if !self.focus.is_visible() {
-            return Ok(None);
-        }
         self.widgets
             .get_mut(self.focus)
             .handle_key_press(input, clipboard_text)
@@ -471,7 +456,7 @@ impl App {
     /// Whether this key press needs the clipboard fetched for the focused
     /// widget (it is that widget's paste shortcut).
     fn wants_clipboard(&self, input: &text::KeyInput) -> bool {
-        self.focus.is_visible() && self.widgets.get(self.focus).wants_clipboard(input)
+        self.widgets.get(self.focus).wants_clipboard(input)
     }
 
     /// Returns text the clicked widget wants copied to the clipboard.
@@ -549,7 +534,7 @@ impl App {
         // widget drawn on top.
         let hovered = self.widget_at(x, y);
         let mut changed = None;
-        for widget in WidgetId::visible() {
+        for widget in WidgetId::ALL {
             let (hover_x, hover_y) = match hovered {
                 Some((hit, local_x, local_y)) if hit == widget => (local_x, local_y),
                 _ => (-1, -1),
@@ -588,13 +573,12 @@ impl App {
         self.widgets.get(widget).cursor_at(x, y)
     }
 
-    /// The topmost visible widget under `(x, y)`: paint order reversed, so
+    /// The topmost widget under `(x, y)`: paint order reversed, so
     /// hit-testing always agrees with what is drawn on top.
     fn widget_at(&self, x: isize, y: isize) -> Option<(WidgetId, isize, isize)> {
         WidgetId::ALL
             .into_iter()
             .rev()
-            .filter(|widget| widget.is_visible())
             .find_map(|widget| {
                 let rect = self.rect_for(widget);
                 rect.contains(x, y).then(|| {
@@ -742,7 +726,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
-        for widget in WidgetId::visible() {
+        for widget in WidgetId::ALL {
             if log_widget_err(|| format!("{widget:?} update"), app.update_widget(widget)) {
                 app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
                 drew_frame = true;

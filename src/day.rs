@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::app_color;
 use crate::localtime::{self, local_time};
 use crate::palette_color;
-use crate::text::BitmapFont;
+use crate::text::{BitmapFont, draw_text_centered, draw_text_centered_tight};
 use crate::{Caps, Framebuffer, Index, Palette, Rect, Sprite, TRANSPARENT, draw_filled_circle};
 
 // The background art (`assets/days.png`) is natively `BASE_WIDTH` wide; the
@@ -138,29 +138,14 @@ impl Day {
         })
     }
 
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn width(&self) -> usize {
-        WIDTH + SHADOW_X_OFFSET
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn height(&self) -> usize {
-        HEIGHT + SHADOW_Y_OFFSET
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        TRANSPARENT
-    }
-
     /// Left edge and width of whichever card is actually on screen: the
     /// full, 9-sliced `WIDTH` in calendar mode (the week-number column only
     /// exists there), or the plain, unstretched `BASE_WIDTH` card (inset by
     /// `PLAIN_CARD_X`) in single-date mode, so both modes' cards share the
     /// same right edge and the widget's on-screen footprint never has to
-    /// change size when `calendar_mode` toggles. `render` and `centered_x`
-    /// both key off this single source of truth so they can't drift apart
-    /// on which card is drawn where.
+    /// change size when `calendar_mode` toggles. `render` and the text-drawing
+    /// helpers that center within this card both key off this single source
+    /// of truth so they can't drift apart on which card is drawn where.
     const fn card_geometry(&self) -> (usize, usize) {
         if self.calendar_mode {
             (0, WIDTH)
@@ -227,20 +212,62 @@ impl Day {
         let crimson = palette_color::CRIMSON;
         let purple = palette_color::PURPLE;
         let rose = palette_color::ROSE;
+        let (card_x, card_w) = self.card_geometry();
+        let card_x = card_x as isize;
         let year_h = self.tight_height(&self.label_font, year);
         let weekday_h = self.tight_height(&self.label_font, weekday);
         let day_h = self.tight_height(&self.number_font, day);
         let mut y = TOP_GAP;
 
-        self.draw_centered_tight(fb, &self.label_font, year, y as isize - 1, purple);
-        self.draw_centered_tight(fb, &self.label_font, year, y as isize + 1, rose);
-        self.draw_centered_tight(fb, &self.label_font, year, y as isize, cream);
+        draw_text_centered_tight(
+            fb,
+            &self.label_font,
+            year,
+            card_x,
+            card_w,
+            y as isize - 1,
+            purple,
+        );
+        draw_text_centered_tight(
+            fb,
+            &self.label_font,
+            year,
+            card_x,
+            card_w,
+            y as isize + 1,
+            rose,
+        );
+        draw_text_centered_tight(fb, &self.label_font, year, card_x, card_w, y as isize, cream);
         y += year_h + LABEL_GAP;
-        self.draw_centered_tight(fb, &self.label_font, weekday, y as isize, black);
+        draw_text_centered_tight(
+            fb,
+            &self.label_font,
+            weekday,
+            card_x,
+            card_w,
+            y as isize,
+            black,
+        );
         y += weekday_h + NUMBER_GAP;
-        self.draw_centered_tight(fb, &self.number_font, day, y as isize, crimson);
+        draw_text_centered_tight(
+            fb,
+            &self.number_font,
+            day,
+            card_x,
+            card_w,
+            y as isize,
+            crimson,
+        );
         y += day_h + MONTH_GAP;
-        self.draw_centered_tight(fb, &self.label_font, month, y as isize, black);
+        draw_text_centered_tight(
+            fb,
+            &self.label_font,
+            month,
+            card_x,
+            card_w,
+            y as isize,
+            black,
+        );
     }
 
     fn render_calendar(&self, fb: &mut Framebuffer, _palette: &Palette, date: &DateParts) {
@@ -248,8 +275,17 @@ impl Day {
         let cream = palette_color::CREAM;
         let crimson = palette_color::CRIMSON;
         let title = format!("{} {}", short_month_name(date.month_index), date.year_num);
+        let (card_x, card_w) = self.card_geometry();
 
-        self.draw_centered(fb, &self.calendar_font, &title, CALENDAR_TITLE_Y, cream);
+        draw_text_centered(
+            fb,
+            &self.calendar_font,
+            &title,
+            card_x as isize,
+            card_w,
+            CALENDAR_TITLE_Y,
+            cream,
+        );
 
         for (weekday, label) in WEEKDAY_LABELS.iter().enumerate() {
             self.draw_calendar_cell(fb, label, weekday, CALENDAR_WEEKDAY_Y, black);
@@ -258,7 +294,7 @@ impl Day {
         let first_day_epoch =
             localtime::days_from_civil(date.year_num, date.month_index as i32 + 1, 1);
         let first_weekday = weekday_of(first_day_epoch);
-        let days = days_in_month(date.year_num, date.month_index);
+        let days = localtime::days_in_month(date.year_num, date.month_index as i32 + 1);
         for day in 1..=days {
             let index = first_weekday + day as usize - 1;
             let col = index % 7;
@@ -315,61 +351,6 @@ impl Day {
             .map_or_else(|| font.cell_h(), |bounds| bounds.height())
     }
 
-    /// Horizontal centering position for `text_width`-wide text within
-    /// whichever card `card_geometry` says is actually on screen.
-    fn centered_x(&self, text_width: usize) -> isize {
-        let (card_x, card_w) = self.card_geometry();
-        (card_x + card_w.saturating_sub(text_width) / 2) as isize
-    }
-
-    /// Shared implementation for `draw_centered_tight`/`draw_centered`: center
-    /// `text` horizontally and draw it at `y`. When `tight` is set, both axes
-    /// are centered on the glyphs' actual ink bounds rather than the font's
-    /// nominal advance/cell metrics (skips drawing if `text` has no ink).
-    fn draw_centered_impl(
-        &self,
-        fb: &mut Framebuffer,
-        font: &BitmapFont,
-        text: &str,
-        y: isize,
-        color: Index,
-        tight: bool,
-    ) {
-        if tight {
-            let Some(bounds) = font.text_ink_bounds(text) else {
-                return;
-            };
-            let x = self.centered_x(bounds.width()) - bounds.min_x;
-            let draw_y = (y - bounds.min_y as isize).max(0);
-            font.draw_text(fb, text, x, draw_y, color);
-        } else {
-            let x = self.centered_x(font.text_width(text));
-            font.draw_text(fb, text, x, y, color);
-        }
-    }
-
-    fn draw_centered_tight(
-        &self,
-        fb: &mut Framebuffer,
-        font: &BitmapFont,
-        text: &str,
-        y: isize,
-        color: Index,
-    ) {
-        self.draw_centered_impl(fb, font, text, y, color, true);
-    }
-
-    fn draw_centered(
-        &self,
-        fb: &mut Framebuffer,
-        font: &BitmapFont,
-        text: &str,
-        y: isize,
-        color: Index,
-    ) {
-        self.draw_centered_impl(fb, font, text, y, color, false);
-    }
-
     fn draw_calendar_cell(
         &self,
         fb: &mut Framebuffer,
@@ -402,9 +383,7 @@ impl Day {
         y: isize,
         color: Index,
     ) {
-        let text_x =
-            cell_x + (col_w.saturating_sub(self.calendar_font.text_width(text)) / 2) as isize;
-        self.calendar_font.draw_text(fb, text, text_x, y, color);
+        draw_text_centered(fb, &self.calendar_font, text, cell_x, col_w, y, color);
     }
 
     fn calendar_cell_center(&self, col: usize, y: isize) -> (isize, isize) {
@@ -464,18 +443,6 @@ fn calendar_row_week(first_day_epoch: i64, days: i32, row: usize) -> Option<i32>
     Some(localtime::iso_week_number(first_day_epoch + monday_day - 1))
 }
 
-/// Number of days in `month_index`'s month (0-based), via the day count
-/// between its 1st and the following month's 1st.
-fn days_in_month(year: i32, month_index: usize) -> i32 {
-    let (next_year, next_month) = if month_index == 11 {
-        (year + 1, 1)
-    } else {
-        (year, month_index as i32 + 2)
-    };
-    (localtime::days_from_civil(next_year, next_month, 1)
-        - localtime::days_from_civil(year, month_index as i32 + 1, 1)) as i32
-}
-
 const fn short_month_name(month_index: usize) -> &'static str {
     match month_index {
         0 => "JAN",
@@ -497,15 +464,15 @@ const fn short_month_name(month_index: usize) -> &'static str {
 
 impl crate::widget::Widget for Day {
     fn width(&self) -> usize {
-        self.width()
+        WIDTH + SHADOW_X_OFFSET
     }
 
     fn height(&self) -> usize {
-        self.height()
+        HEIGHT + SHADOW_Y_OFFSET
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
@@ -534,19 +501,8 @@ impl crate::widget::Widget for Day {
 
 #[cfg(test)]
 mod tests {
-    use super::{calendar_row_week, days_in_month};
+    use super::calendar_row_week;
     use crate::localtime;
-
-    #[test]
-    fn february_has_28_days_in_non_leap_years() {
-        assert_eq!(days_in_month(2026, 1), 28);
-        assert_eq!(days_in_month(2024, 1), 29); // leap
-        assert_eq!(days_in_month(2100, 1), 28); // century non-leap
-        assert_eq!(days_in_month(2000, 1), 29); // 400-year leap
-        assert_eq!(days_in_month(2026, 0), 31); // january
-        assert_eq!(days_in_month(2026, 3), 30); // april
-        assert_eq!(days_in_month(2026, 11), 31); // december
-    }
 
     #[test]
     fn trailing_lone_sunday_row_has_no_week_label() {

@@ -1,10 +1,38 @@
 //! Small helpers shared across widgets.
 
 use std::fs;
-use std::io::{self, Write as _};
+use std::io::{self, ErrorKind, Write as _};
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+/// Identity of one on-disk file version. The inode is included so an atomic
+/// rename-over (how sync tools and we ourselves write) is always detected even
+/// if size and mtime happen to match.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub(crate) struct Fingerprint {
+    pub(crate) ino: u64,
+    pub(crate) size: u64,
+    pub(crate) mtime_s: i64,
+    pub(crate) mtime_ns: i64,
+}
+
+/// The file's current fingerprint, or `None` if it does not exist.
+pub(crate) fn fingerprint(path: &str) -> io::Result<Option<Fingerprint>> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(Some(Fingerprint {
+            ino: meta.ino(),
+            size: meta.size(),
+            mtime_s: meta.mtime(),
+            mtime_ns: meta.mtime_nsec(),
+        })),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
 
 /// Directory for per-user runtime files (sockets, request bodies):
 /// `$XDG_RUNTIME_DIR` when set (per-user, mode 0700) so files there can't be

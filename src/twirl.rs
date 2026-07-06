@@ -7,9 +7,24 @@ use std::time::Instant;
 use crate::app_color;
 use crate::palette_color;
 use crate::text::BitmapFont;
+use crate::widget::Widget;
 use crate::{CursorKind, Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
-const TOTAL_PATH: &str = "~/Desktop/RemoteVault/frogpoints.md";
+/// Config file naming the frogpoints markdown file that stores the wheel's
+/// running total. The first non-blank, non-comment line is the path (`~`
+/// expands to `$HOME`). Looked up in `$XDG_CONFIG_HOME/cozyui/` first, then
+/// the source checkout.
+const TWIRL_CONF_FILE: &str = "twirl.conf";
+/// Path used when `twirl.conf` is missing or blank.
+const DEFAULT_TOTAL_PATH: &str = "~/Desktop/RemoteVault/frogpoints.md";
+
+/// Path to the frogpoints markdown file, configurable via `twirl.conf`.
+/// Resolved once and cached; falls back to [`DEFAULT_TOTAL_PATH`] when the
+/// config is missing or contains no usable path.
+fn total_path() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| crate::paths::config_first_line(TWIRL_CONF_FILE, DEFAULT_TOTAL_PATH))
+}
 
 const SHADOW_X_OFFSET: isize = 1;
 const SHADOW_Y_OFFSET: isize = 4;
@@ -85,7 +100,7 @@ impl Twirl {
             spin: Spin::Idle,
             last_update: Instant::now(),
             last_click_segment: 0,
-            total: load_total(&crate::paths::expand_tilde(TOTAL_PATH))?,
+            total: load_total(total_path())?,
             pixel_base_angle,
         })
     }
@@ -104,25 +119,12 @@ impl Twirl {
         angles
     }
 
-    pub(crate) const fn width(&self) -> usize {
-        self.wheel.width + SHADOW_X_OFFSET as usize
-    }
-
-    pub(crate) const fn height(&self) -> usize {
-        self.wheel.height + SHADOW_Y_OFFSET as usize
-    }
-
     /// Center of the wheel's circular face. The face is a `wheel.width`-diameter
     /// circle anchored at the top of the (taller) sprite, so its center sits at
     /// `wheel.width / 2` from the top rather than at the sprite's mid-height.
     fn wheel_center(&self) -> (f32, f32) {
         let radius = self.wheel.width as f32 / 2.0;
         (radius, radius)
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        TRANSPARENT
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -153,39 +155,6 @@ impl Twirl {
         self.draw_total(fb, palette);
     }
 
-    pub(crate) fn update(&mut self) -> Result<bool, Box<dyn Error>> {
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_update);
-        self.last_update = now;
-
-        let Spin::Spinning(mut speed) = self.spin else {
-            return Ok(false);
-        };
-
-        let previous_segment = self.pointer_segment();
-        self.angle = normalize_angle(speed.mul_add(dt.as_secs_f32(), self.angle));
-        speed *= FRICTION_PER_SECOND.powf(dt.as_secs_f32());
-
-        let current_segment = self.pointer_segment();
-        if current_segment != previous_segment && current_segment != self.last_click_segment {
-            self.last_click_segment = current_segment;
-            play_click();
-        }
-
-        if speed < STOP_SPEED {
-            self.spin = Spin::Idle;
-            if let Err(err) = self.add_landed_value() {
-                eprintln!("twirl save failed: {err}");
-            } else {
-                play_jingle();
-            }
-        } else {
-            self.spin = Spin::Spinning(speed);
-        }
-
-        Ok(true)
-    }
-
     /// Whether `(x, y)` (already known to be inside the widget) falls within
     /// the spinnable wheel's circle. Shared by `click` and `cursor_at` so the
     /// clickable region and the hand cursor can never drift apart.
@@ -194,20 +163,6 @@ impl Twirl {
         let dx = x as f32 + 0.5 - center_x;
         let dy = y as f32 + 0.5 - center_y;
         dx * dx + dy * dy <= center_x.min(center_y).powi(2)
-    }
-
-    /// Hand inside the spinnable wheel, mirroring the `click` hit-test.
-    pub(crate) fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
-        if x < 0 || y < 0 {
-            return CursorKind::Pointer;
-        }
-        let x = x as usize;
-        let y = y as usize;
-        if x >= self.width() || y >= self.height() || !self.wheel_contains(x, y) {
-            CursorKind::Pointer
-        } else {
-            CursorKind::Hand
-        }
     }
 
     pub(crate) fn click(&mut self, x: isize, y: isize) {
@@ -283,7 +238,7 @@ impl Twirl {
 
     fn add_segment_value(&mut self, segment: usize) -> Result<(), Box<dyn Error>> {
         self.total = self.total.saturating_add(SEGMENT_VALUES[segment]);
-        save_total(&crate::paths::expand_tilde(TOTAL_PATH), self.total)
+        save_total(total_path(), self.total)
     }
 
     fn pointer_segment(&self) -> usize {
@@ -310,12 +265,10 @@ fn normalize_angle(angle: f32) -> f32 {
 }
 
 fn load_total(path: &str) -> Result<u64, Box<dyn Error>> {
-    if !std::path::Path::new(path).exists() {
-        return Ok(0);
-    }
-
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
+        // Missing file just means nothing has been recorded yet.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(err) => {
             eprintln!("twirl: failed to read {path}: {err}");
             return Ok(0);
@@ -458,15 +411,15 @@ fn wav_bytes(samples: &[i16]) -> Vec<u8> {
 
 impl crate::widget::Widget for Twirl {
     fn width(&self) -> usize {
-        self.width()
+        self.wheel.width + SHADOW_X_OFFSET as usize
     }
 
     fn height(&self) -> usize {
-        self.height()
+        self.wheel.height + SHADOW_Y_OFFSET as usize
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
@@ -474,7 +427,36 @@ impl crate::widget::Widget for Twirl {
     }
 
     fn update(&mut self) -> Result<bool, Box<dyn Error>> {
-        Self::update(self)
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_update);
+        self.last_update = now;
+
+        let Spin::Spinning(mut speed) = self.spin else {
+            return Ok(false);
+        };
+
+        let previous_segment = self.pointer_segment();
+        self.angle = normalize_angle(speed.mul_add(dt.as_secs_f32(), self.angle));
+        speed *= FRICTION_PER_SECOND.powf(dt.as_secs_f32());
+
+        let current_segment = self.pointer_segment();
+        if current_segment != previous_segment && current_segment != self.last_click_segment {
+            self.last_click_segment = current_segment;
+            play_click();
+        }
+
+        if speed < STOP_SPEED {
+            self.spin = Spin::Idle;
+            if let Err(err) = self.add_landed_value() {
+                eprintln!("twirl save failed: {err}");
+            } else {
+                play_jingle();
+            }
+        } else {
+            self.spin = Spin::Spinning(speed);
+        }
+
+        Ok(true)
     }
 
     fn click(
@@ -487,8 +469,18 @@ impl crate::widget::Widget for Twirl {
         Ok(crate::widget::ClickOutcome::default())
     }
 
+    /// Hand inside the spinnable wheel, mirroring the `click` hit-test.
     fn cursor_at(&self, x: isize, y: isize) -> crate::CursorKind {
-        self.cursor_at(x, y)
+        if x < 0 || y < 0 {
+            return CursorKind::Pointer;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        if x >= self.width() || y >= self.height() || !self.wheel_contains(x, y) {
+            CursorKind::Pointer
+        } else {
+            CursorKind::Hand
+        }
     }
 }
 

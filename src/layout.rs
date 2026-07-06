@@ -75,9 +75,6 @@ pub(super) fn required_screen_height(
 ) -> usize {
     let mut needed = (desk_h as isize + DESK_Y).max(0) as usize;
     for widget in WidgetId::ALL {
-        if !widget.is_visible() {
-            continue;
-        }
         let (_, y) = widget_xy(widget);
         let h = heights[widget.index()] as isize;
         needed = needed.max((h + y).max(0) as usize);

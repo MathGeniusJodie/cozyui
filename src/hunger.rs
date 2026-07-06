@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::localtime;
 use crate::palette_color;
-use crate::text::BitmapFont;
+use crate::text::{BitmapFont, draw_text_centered};
 use crate::{Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
 /// Where the last-eaten meal time is persisted so an "eaten" acknowledgement
@@ -136,19 +136,6 @@ impl Hunger {
         })
     }
 
-    pub(crate) const fn width(&self) -> usize {
-        self.width
-    }
-
-    pub(crate) const fn height(&self) -> usize {
-        self.height
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        TRANSPARENT
-    }
-
     pub(crate) fn update(&mut self) -> bool {
         let (target, span) = (self.target, self.span);
         self.view.refresh(REFRESH, || {
@@ -197,9 +184,8 @@ impl Hunger {
         } else {
             palette_color::CREAM
         };
-        let text_x = (self.width.saturating_sub(self.font.text_width(&view.label)) / 2) as isize;
         let text_y = (self.apple_100.height + BAR_TEXT_GAP) as isize;
-        self.font.draw_text(fb, &view.label, text_x, text_y, color);
+        draw_text_centered(fb, &self.font, &view.label, 0, self.width, text_y, color);
     }
 }
 
@@ -350,15 +336,15 @@ fn fmt_countdown(secs: f64) -> String {
 
 impl crate::widget::Widget for Hunger {
     fn width(&self) -> usize {
-        self.width()
+        self.width
     }
 
     fn height(&self) -> usize {
-        self.height()
+        self.height
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {

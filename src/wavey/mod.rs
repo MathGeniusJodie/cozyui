@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::localtime::local_time;
 use crate::palette_color;
-use crate::text::BitmapFont;
+use crate::text::{BitmapFont, draw_text_centered};
 use crate::{CursorKind, Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
 mod player;
@@ -106,6 +106,7 @@ impl Playback {
 pub struct Wavey {
     image: Sprite,
     font: BitmapFont,
+    /// Never empty: `player::load_stations` falls back to `default_stations`.
     stations: Vec<player::Station>,
     station: usize,
     volume: u8,
@@ -162,21 +163,6 @@ impl Wavey {
             pushed_volume: crate::util::Refresh::new(50),
         };
         Ok(wavey)
-    }
-
-    pub(crate) const fn width(&self) -> usize {
-        self.image.width
-    }
-
-    pub(crate) fn height(&self) -> usize {
-        self.image
-            .height
-            .max(TITLE_Y + self.font.cell_h() + TITLE_BOX_PAD)
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        TRANSPARENT
     }
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, palette: &Palette) {
@@ -296,26 +282,6 @@ impl Wavey {
         None
     }
 
-    /// Hand over everything clickable: media buttons, clock, volume knob,
-    /// tuner, and the copyable title.
-    pub(crate) fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
-        if x < 0 || y < 0 {
-            return CursorKind::Pointer;
-        }
-        let x = x as usize;
-        let y = y as usize;
-        if media_button_at(x, y).is_some()
-            || self.clock_contains(x, y)
-            || self.knob_contains(x, y)
-            || self.tuner_contains(x, y)
-            || self.title_contains(x, y)
-        {
-            CursorKind::Hand
-        } else {
-            CursorKind::Pointer
-        }
-    }
-
     fn title_contains(&self, x: usize, y: usize) -> bool {
         !self.playback.title().is_empty()
             && (TITLE_X.saturating_sub(TITLE_BOX_PAD)..TITLE_X + TITLE_W + TITLE_BOX_PAD)
@@ -340,15 +306,6 @@ impl Wavey {
             self.push_volume(true);
         }
         was_dragging
-    }
-
-    pub(crate) fn motion(&mut self, x: isize, y: isize) -> bool {
-        if !self.dragging_knob || x < 0 || y < 0 {
-            return false;
-        }
-
-        self.set_volume_from_point(x as usize, y as usize, true);
-        true
     }
 
     pub(crate) fn scroll_up(&mut self, x: isize, y: isize) -> bool {
@@ -387,10 +344,6 @@ impl Wavey {
     }
 
     fn station_at(&self, x: usize) -> usize {
-        if self.stations.is_empty() {
-            return 0;
-        }
-
         let rel = x.saturating_sub(TUNER_X).min(TUNER_W.saturating_sub(1));
         (rel * self.stations.len() / TUNER_W).min(self.stations.len() - 1)
     }
@@ -470,14 +423,17 @@ impl Wavey {
         }
         let script_opts =
             crate::util::shell_quote(&format!("cozyui-wavey-station={}", self.station));
-        // Only glob tokens (containing `*`) are left unquoted so the shell can
-        // expand them, since mpv doesn't glob-expand its own arguments;
-        // everything else stays single-quoted so a station's config line
-        // can't smuggle in shell metacharacters (`;`, `|`, backticks, ...).
+        // Tokens containing `*` are left unquoted so the shell can glob-expand
+        // them, since mpv doesn't glob-expand its own arguments. That is only
+        // safe when the token is made up entirely of characters that can't
+        // form shell metacharacters, so `is_safe_glob_token` restricts the
+        // exception to a conservative allowlist; anything else (even if it
+        // contains `*`) falls back to single-quoting, which just means the
+        // glob won't expand rather than reopening shell injection.
         let quoted_args = mpv_args
             .split_whitespace()
             .map(|token| {
-                if token.contains('*') {
+                if is_safe_glob_token(token) {
                     token.to_string()
                 } else {
                     crate::util::shell_quote(token)
@@ -540,10 +496,6 @@ impl Wavey {
     }
 
     fn draw_tuner(&self, fb: &mut Framebuffer, _palette: &Palette) {
-        if self.stations.is_empty() {
-            return;
-        }
-
         let text = palette_color::LAVENDER;
         let count = self.stations.len();
         for (index, station) in self.stations.iter().enumerate() {
@@ -596,9 +548,15 @@ impl Wavey {
         let cream = palette_color::CREAM;
         let text_w = self.font.text_width(title);
         if text_w <= TITLE_W {
-            let x = TITLE_X + (TITLE_W - text_w) / 2;
-            self.font
-                .draw_text(fb, title, x as isize, y as isize, cream);
+            draw_text_centered(
+                fb,
+                &self.font,
+                title,
+                TITLE_X as isize,
+                TITLE_W,
+                y as isize,
+                cream,
+            );
             return;
         }
 
@@ -619,15 +577,17 @@ impl Wavey {
 
 impl crate::widget::Widget for Wavey {
     fn width(&self) -> usize {
-        self.width()
+        self.image.width
     }
 
     fn height(&self) -> usize {
-        self.height()
+        self.image
+            .height
+            .max(TITLE_Y + self.font.cell_h() + TITLE_BOX_PAD)
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
@@ -651,7 +611,12 @@ impl crate::widget::Widget for Wavey {
     }
 
     fn motion(&mut self, x: isize, y: isize) -> bool {
-        Self::motion(self, x, y)
+        if !self.dragging_knob || x < 0 || y < 0 {
+            return false;
+        }
+
+        self.set_volume_from_point(x as usize, y as usize, true);
+        true
     }
 
     fn scroll(&mut self, x: isize, y: isize, direction: crate::widget::ScrollDirection) -> bool {
@@ -661,8 +626,24 @@ impl crate::widget::Widget for Wavey {
         }
     }
 
+    /// Hand over everything clickable: media buttons, clock, volume knob,
+    /// tuner, and the copyable title.
     fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
-        self.cursor_at(x, y)
+        if x < 0 || y < 0 {
+            return CursorKind::Pointer;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        if media_button_at(x, y).is_some()
+            || self.clock_contains(x, y)
+            || self.knob_contains(x, y)
+            || self.tuner_contains(x, y)
+            || self.title_contains(x, y)
+        {
+            CursorKind::Hand
+        } else {
+            CursorKind::Pointer
+        }
     }
 }
 
@@ -926,4 +907,48 @@ fn clock_text(clock_24h: bool) -> String {
 fn local_hour_minute() -> Option<(u8, u8)> {
     let tm = local_time()?;
     Some((tm.tm_hour as u8, tm.tm_min as u8))
+}
+
+/// Whether `token` is safe to pass unquoted to the shell so a `*` in it can
+/// glob-expand. Requires both that the token contains a `*` (otherwise there
+/// is nothing to expand and quoting it is strictly safer) and that every
+/// character is drawn from a conservative allowlist (ASCII alphanumerics
+/// plus `*`, `/`, `.`, `_`, `-`, `~`) that cannot form shell metacharacters,
+/// so a station config line can never smuggle in `;`, `|`, backticks,
+/// `$(...)`, quotes, whitespace, etc. by hiding them behind an unrelated `*`.
+fn is_safe_glob_token(token: &str) -> bool {
+    token.contains('*')
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'*' | b'/' | b'.' | b'_' | b'-' | b'~'))
+}
+
+#[cfg(test)]
+mod glob_token_tests {
+    use super::is_safe_glob_token;
+
+    #[test]
+    fn plain_url_token_is_not_safe_glob() {
+        assert!(!is_safe_glob_token("https://example.com/stream"));
+    }
+
+    #[test]
+    fn home_relative_glob_stays_raw() {
+        assert!(is_safe_glob_token("~/Music/*.mp3"));
+    }
+
+    #[test]
+    fn glob_with_semicolon_is_rejected() {
+        assert!(!is_safe_glob_token("*;rm"));
+    }
+
+    #[test]
+    fn glob_with_command_substitution_is_rejected() {
+        assert!(!is_safe_glob_token("*$(x)"));
+    }
+
+    #[test]
+    fn glob_with_quote_is_rejected() {
+        assert!(!is_safe_glob_token("*'a'"));
+    }
 }

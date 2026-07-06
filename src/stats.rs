@@ -4,15 +4,11 @@
 //! urgent and 3 snail todos draws half crimson, half blue).
 
 use std::error::Error;
-use std::fs;
-use std::io::ErrorKind;
-use std::os::unix::fs::MetadataExt;
-use std::path::Path;
 use std::time::Duration;
 
 use crate::localtime::{civil_from_days, days_from_civil};
 use crate::palette_color;
-use crate::text::BitmapFont;
+use crate::text::{BitmapFont, draw_text_centered};
 use crate::{Framebuffer, Index, Palette};
 
 const DAYS: usize = 7;
@@ -49,20 +45,10 @@ struct WeekCounts {
     counts: [[usize; PRIORITY_COUNT]; DAYS],
 }
 
-/// Identity of one done file's on-disk version, so the periodic refresh only
-/// re-reads a file whose stat changed (same scheme as toodle's `DoneCounts`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct FileId {
-    ino: u64,
-    size: u64,
-    mtime_s: i64,
-    mtime_ns: i64,
-}
-
 /// One day+priority done file with its cached line count.
 struct DayFile {
     path: String,
-    id: Option<FileId>,
+    id: Option<crate::util::Fingerprint>,
     count: usize,
 }
 
@@ -137,21 +123,6 @@ impl Stats {
         Ok(stats)
     }
 
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn width(&self) -> usize {
-        WIDTH
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn height(&self) -> usize {
-        HEIGHT
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        palette_color::BLACK
-    }
-
     /// Re-read the done files periodically; returns whether the view changed.
     pub(crate) fn update(&mut self) -> bool {
         if !self.throttle.ready(REFRESH) {
@@ -203,7 +174,7 @@ impl Stats {
                 let (id, count) = if path == file.path && id == file.id {
                     (id, file.count)
                 } else {
-                    let count = done_line_count(&path)?;
+                    let count = crate::toodle::count_done_lines(&path)?;
                     changed |= count != file.count;
                     (id, count)
                 };
@@ -218,11 +189,12 @@ impl Stats {
 
     pub(crate) fn render(&self, fb: &mut Framebuffer, _palette: &Palette) {
         let title = "DONE THIS WEEK";
-        let title_x = WIDTH.saturating_sub(self.font.text_width(title)) / 2;
-        self.font.draw_text(
+        draw_text_centered(
             fb,
+            &self.font,
             title,
-            title_x as isize,
+            0,
+            WIDTH,
             TOP_GAP as isize,
             palette_color::CREAM,
         );
@@ -273,23 +245,25 @@ impl Stats {
             // Total count, centered just above the top of the bar.
             if total > 0 {
                 let count_text = total.to_string();
-                let count_x = bar_x + bar_w.saturating_sub(self.font.text_width(&count_text)) / 2;
                 let count_y = y.saturating_sub(self.font.cell_h() + COUNT_GAP);
-                self.font.draw_text(
+                draw_text_centered(
                     fb,
+                    &self.font,
                     &count_text,
-                    count_x as isize,
+                    bar_x as isize,
+                    bar_w,
                     count_y as isize,
                     palette_color::CREAM,
                 );
             }
 
             let label = WEEKDAY_INITIALS[col % 7];
-            let label_x = bar_x + bar_w.saturating_sub(self.font.text_width(label)) / 2;
-            self.font.draw_text(
+            draw_text_centered(
                 fb,
+                &self.font,
                 label,
-                label_x as isize,
+                bar_x as isize,
+                bar_w,
                 (chart_bottom + LABEL_GAP) as isize,
                 palette_color::CREAM,
             );
@@ -305,18 +279,13 @@ static METADATA_READ_FAILING: crate::util::FailureLog = crate::util::FailureLog:
 
 /// The file's current stat identity, or `None` if it does not exist or its
 /// metadata could not be read.
-fn file_id(path: &str) -> Option<FileId> {
-    match fs::metadata(path) {
-        Ok(meta) => {
+fn file_id(path: &str) -> Option<crate::util::Fingerprint> {
+    match crate::util::fingerprint(path) {
+        Ok(id @ Some(_)) => {
             METADATA_READ_FAILING.record_ok(|| "stats: metadata reads recovered".to_string());
-            Some(FileId {
-                ino: meta.ino(),
-                size: meta.size(),
-                mtime_s: meta.mtime(),
-                mtime_ns: meta.mtime_nsec(),
-            })
+            id
         }
-        Err(err) if err.kind() == ErrorKind::NotFound => None,
+        Ok(None) => None,
         Err(err) => {
             METADATA_READ_FAILING.record_err(|| {
                 format!("stats: failed to read metadata for {path}: {err} (suppressing repeats)")
@@ -326,27 +295,17 @@ fn file_id(path: &str) -> Option<FileId> {
     }
 }
 
-fn done_line_count(path: &str) -> Result<usize, Box<dyn Error>> {
-    if !Path::new(path).exists() {
-        return Ok(0);
-    }
-    Ok(fs::read_to_string(path)?
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count())
-}
-
 impl crate::widget::Widget for Stats {
     fn width(&self) -> usize {
-        self.width()
+        WIDTH
     }
 
     fn height(&self) -> usize {
-        self.height()
+        HEIGHT
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        palette_color::BLACK
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {
@@ -368,17 +327,6 @@ mod tests {
         assert_eq!(civil_from_days(days), (2026, 6, 28));
         // Day before is the 27th.
         assert_eq!(civil_from_days(days - 1), (2026, 6, 27));
-    }
-
-    #[test]
-    fn done_line_count_ignores_blank_lines() {
-        let dir = std::env::temp_dir().join(format!("cozyui-stats-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("count.txt");
-        fs::write(&path, "a\n\nb\n  \nc\n").unwrap();
-        assert_eq!(done_line_count(path.to_str().unwrap()).unwrap(), 3);
-        assert_eq!(done_line_count("/no/such/stats/file").unwrap(), 0);
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

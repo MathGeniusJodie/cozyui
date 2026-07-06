@@ -91,6 +91,15 @@ pub(crate) const fn civil_from_days(z: i64) -> (i32, i32, i32) {
     ((y + if m <= 2 { 1 } else { 0 }) as i32, m as i32, d as i32)
 }
 
+/// Number of days in `month` (1-based) of `year`, via the day count between
+/// its 1st and the following month's 1st. Deriving this from
+/// `days_from_civil` (rather than a hand-rolled leap-year rule) keeps it
+/// automatically consistent with the rest of the civil-date math.
+pub(crate) const fn days_in_month(year: i32, month: i32) -> i32 {
+    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    (days_from_civil(next_year, next_month, 1) - days_from_civil(year, month, 1)) as i32
+}
+
 /// ISO-8601 week number (1..=53) for the week containing `epoch_day` (days
 /// since 1970-01-01, as returned by `days_from_civil`). ISO weeks run
 /// Monday-Sunday and belong to whichever year contains their Thursday, so
@@ -108,7 +117,18 @@ pub(crate) fn iso_week_number(epoch_day: i64) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, iso_week_number};
+    use super::{days_from_civil, days_in_month, iso_week_number};
+
+    #[test]
+    fn february_has_28_days_in_non_leap_years() {
+        assert_eq!(days_in_month(2026, 2), 28);
+        assert_eq!(days_in_month(2024, 2), 29); // leap
+        assert_eq!(days_in_month(2100, 2), 28); // century non-leap
+        assert_eq!(days_in_month(2000, 2), 29); // 400-year leap
+        assert_eq!(days_in_month(2026, 1), 31); // january
+        assert_eq!(days_in_month(2026, 4), 30); // april
+        assert_eq!(days_in_month(2026, 12), 31); // december
+    }
 
     #[test]
     fn iso_week_number_matches_known_dates() {

@@ -61,19 +61,6 @@ impl Fizzle {
         })
     }
 
-    pub(crate) const fn width(&self) -> usize {
-        self.width
-    }
-
-    pub(crate) const fn height(&self) -> usize {
-        self.height
-    }
-
-    #[allow(clippy::unused_self)]
-    pub(crate) const fn fill_color(&self, _palette: &Palette) -> Index {
-        TRANSPARENT
-    }
-
     pub(crate) fn update(&mut self) -> bool {
         if !self.throttle.ready(REFRESH) {
             return false;
@@ -194,15 +181,15 @@ fn battery_dir() -> Option<PathBuf> {
 
 impl crate::widget::Widget for Fizzle {
     fn width(&self) -> usize {
-        self.width()
+        self.width
     }
 
     fn height(&self) -> usize {
-        self.height()
+        self.height
     }
 
-    fn fill_color(&self, palette: &Palette) -> Index {
-        self.fill_color(palette)
+    fn fill_color(&self, _palette: &Palette) -> Index {
+        TRANSPARENT
     }
 
     fn render(&mut self, fb: &mut Framebuffer, palette: &Palette) {

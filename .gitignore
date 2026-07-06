@@ -13,3 +13,5 @@ toodle_done/*
 /budgit.conf
 /toodle.conf
 /hunger.txt
+.scrooge/dirty
+/twirl.conf
