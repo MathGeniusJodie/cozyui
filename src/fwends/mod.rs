@@ -5,7 +5,10 @@ use crate::text::{
     BitmapFont, EditKey, KeyInput, LinePlacement, TextEditOutcome, TextField, TextLayout, edit_key,
 };
 use crate::widget::Widget;
-use crate::{Caps, CursorKind, Framebuffer, Index, Palette, Rect, Sprite, Swap, TRANSPARENT};
+use crate::{
+    Caps, CursorKind, Framebuffer, Index, Paint, Palette, PaletteIndex, Rect, Sprite, Swap,
+    TRANSPARENT,
+};
 
 mod chat;
 
@@ -942,6 +945,8 @@ fn lamp_shadow_color(
     palette.resolve_index(mapped, x, y)
 }
 
+/// The shadow art's LIME (lifted-line) and ROSE (page-tint) pixels both
+/// become PEACH on the yellow input sticky; everything else passes through.
 fn draw_yellow_pencil_shadow(
     fb: &mut Framebuffer,
     image: &Sprite,
@@ -949,28 +954,12 @@ fn draw_yellow_pencil_shadow(
     dest_y: isize,
     palette: &Palette,
 ) {
-    fb.draw_sprite_swapped(
-        image,
-        dest_x,
-        dest_y,
-        palette,
-        &Swap::from_indices(&PENCIL_SHADOW_REMAP),
-    );
+    let peach = Paint::Solid(PaletteIndex::new(palette_color::PEACH));
+    let swap = Swap::identity()
+        .set(palette_color::LIME, peach)
+        .set(palette_color::ROSE, peach);
+    fb.draw_sprite_swapped(image, dest_x, dest_y, palette, &swap);
 }
-
-const PALETTE_COLOR_COUNT: usize = 16;
-
-const PENCIL_SHADOW_REMAP: [Index; PALETTE_COLOR_COUNT] = {
-    let mut remap = [0; PALETTE_COLOR_COUNT];
-    let mut i = 0;
-    while i < PALETTE_COLOR_COUNT {
-        remap[i] = i as Index;
-        i += 1;
-    }
-    remap[palette_color::LIME as usize] = palette_color::PEACH;
-    remap[palette_color::ROSE as usize] = palette_color::PEACH;
-    remap
-};
 
 #[derive(Clone)]
 struct MessageLayout {

@@ -1396,11 +1396,27 @@ fn draw_pencil_shadow(
 
 fn page_swap(page_color: PageColor, pencil_on_second_line: bool) -> Swap {
     let remap = page_remap(page_color);
-    let mut indices = *remap;
-    if pencil_on_second_line {
-        indices[palette_color::LIME as usize] = remap[palette_color::ROSE as usize];
+    let mut swap = Swap::identity();
+    for &(from, to) in remap {
+        swap = swap.set(from, Paint::Solid(PaletteIndex::new(to)));
     }
-    Swap::from_indices(&indices)
+    if pencil_on_second_line {
+        // The pencil-shadow art marks its on-the-lifted-line pixels LIME;
+        // recolor them the same way this page recolors ROSE (unchanged when
+        // the page leaves ROSE alone, e.g. pink).
+        let rose_to = remapped(remap, palette_color::ROSE);
+        swap = swap.set(palette_color::LIME, Paint::Solid(PaletteIndex::new(rose_to)));
+    }
+    swap
+}
+
+/// What `remap` maps `index` to; `index` itself when unlisted, matching
+/// `Swap`'s pass-through semantics.
+fn remapped(remap: &[(Index, Index)], index: Index) -> Index {
+    remap
+        .iter()
+        .find_map(|&(from, to)| (from == index).then_some(to))
+        .unwrap_or(index)
 }
 
 const fn section_color(section: Priority) -> PageColor {
@@ -1412,73 +1428,41 @@ const fn section_color(section: Priority) -> PageColor {
     }
 }
 
-const fn page_remap(page_color: PageColor) -> &'static [Index; 16] {
+/// `(source, replacement)` palette pairs recoloring the page art for each
+/// section; indices not listed pass through unchanged, per `Swap`'s
+/// semantics.
+const fn page_remap(page_color: PageColor) -> &'static [(Index, Index)] {
     match page_color {
-        PageColor::Pink => &PINK_PAGE_REMAP,
-        PageColor::Yellow => &YELLOW_PAGE_REMAP,
-        PageColor::Green => &GREEN_PAGE_REMAP,
-        PageColor::Blue => &BLUE_PAGE_REMAP,
+        PageColor::Pink => &[
+            (palette_color::LIME, palette_color::CRIMSON),
+            (palette_color::PINE, palette_color::ROSE),
+        ],
+        PageColor::Yellow => &[
+            (palette_color::LAVENDER, palette_color::CYAN),
+            (palette_color::PEACH, palette_color::CREAM),
+            (palette_color::LIME, palette_color::CRIMSON),
+            (palette_color::CRIMSON, palette_color::BROWN),
+            (palette_color::ROSE, palette_color::ORANGE),
+            (palette_color::PINE, palette_color::ROSE),
+        ],
+        PageColor::Green => &[
+            (palette_color::PEACH, palette_color::LIME),
+            (palette_color::LIME, palette_color::GUNMETAL),
+            (palette_color::ORANGE, palette_color::GREEN),
+            (palette_color::CRIMSON, palette_color::PINE),
+            (palette_color::ROSE, palette_color::GREEN),
+            (palette_color::PINE, palette_color::BROWN),
+        ],
+        PageColor::Blue => &[
+            (palette_color::PEACH, palette_color::CYAN),
+            (palette_color::LIME, palette_color::BLUE),
+            (palette_color::ORANGE, palette_color::PINE),
+            (palette_color::CRIMSON, palette_color::PINE),
+            (palette_color::ROSE, palette_color::BLUE),
+            (palette_color::PINE, palette_color::GUNMETAL),
+        ],
     }
 }
-
-const IDENTITY_PAGE_REMAP: [Index; 16] = [
-    palette_color::LAVENDER,
-    palette_color::GUNMETAL,
-    palette_color::PLUM,
-    palette_color::BROWN,
-    palette_color::PEACH,
-    palette_color::CREAM,
-    palette_color::LIME,
-    palette_color::GREEN,
-    palette_color::ORANGE,
-    palette_color::CRIMSON,
-    palette_color::ROSE,
-    palette_color::PURPLE,
-    palette_color::CYAN,
-    palette_color::BLUE,
-    palette_color::PINE,
-    palette_color::BLACK,
-];
-
-const PINK_PAGE_REMAP: [Index; 16] = {
-    let mut remap = IDENTITY_PAGE_REMAP;
-    remap[palette_color::LIME as usize] = palette_color::CRIMSON;
-    remap[palette_color::PINE as usize] = palette_color::ROSE;
-    remap
-};
-
-const YELLOW_PAGE_REMAP: [Index; 16] = {
-    let mut remap = IDENTITY_PAGE_REMAP;
-    remap[palette_color::LAVENDER as usize] = palette_color::CYAN;
-    remap[palette_color::PEACH as usize] = palette_color::CREAM;
-    remap[palette_color::LIME as usize] = palette_color::CRIMSON;
-    remap[palette_color::CRIMSON as usize] = palette_color::BROWN;
-    remap[palette_color::ROSE as usize] = palette_color::ORANGE;
-    remap[palette_color::PINE as usize] = palette_color::ROSE;
-    remap
-};
-
-const GREEN_PAGE_REMAP: [Index; 16] = {
-    let mut remap = IDENTITY_PAGE_REMAP;
-    remap[palette_color::PEACH as usize] = palette_color::LIME;
-    remap[palette_color::LIME as usize] = palette_color::GUNMETAL;
-    remap[palette_color::ORANGE as usize] = palette_color::GREEN;
-    remap[palette_color::CRIMSON as usize] = palette_color::PINE;
-    remap[palette_color::ROSE as usize] = palette_color::GREEN;
-    remap[palette_color::PINE as usize] = palette_color::BROWN;
-    remap
-};
-
-const BLUE_PAGE_REMAP: [Index; 16] = {
-    let mut remap = IDENTITY_PAGE_REMAP;
-    remap[palette_color::PEACH as usize] = palette_color::CYAN;
-    remap[palette_color::LIME as usize] = palette_color::BLUE;
-    remap[palette_color::ORANGE as usize] = palette_color::PINE;
-    remap[palette_color::CRIMSON as usize] = palette_color::PINE;
-    remap[palette_color::ROSE as usize] = palette_color::BLUE;
-    remap[palette_color::PINE as usize] = palette_color::GUNMETAL;
-    remap
-};
 
 /// Whether `(x, y)` falls inside the rectangle at `(left, top)` of the given
 /// size. Negative coordinates are simply outside any rect anchored at a
