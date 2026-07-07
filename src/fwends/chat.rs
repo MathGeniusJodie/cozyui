@@ -421,9 +421,16 @@ impl PendingReply {
 
     /// Best-effort signal: SIGTERMs the in-flight curl, if its pid has been
     /// recorded yet. Safe to call even if curl already exited between the
-    /// pid check and the kill.
+    /// pid check and the kill: `post_raw` holds the child unreaped (a
+    /// zombie) until it clears the slot, so the pid can never be recycled
+    /// while this lock sees it as `Some`. Holding the guard across the kill
+    /// (instead of copying the pid out and dropping the lock first)
+    /// serializes us against that clear: either we see the pid and the
+    /// child is still a zombie (a SIGTERM to it is a harmless no-op if it's
+    /// already dead), or the slot is already `None` and we signal nothing.
     fn signal_cancel(&self) {
-        if let Some(pid) = *self.pid_slot.lock().unwrap() {
+        let guard = self.pid_slot.lock().unwrap();
+        if let Some(pid) = *guard {
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         }
     }

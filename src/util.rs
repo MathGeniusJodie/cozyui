@@ -238,7 +238,11 @@ impl FailureLog {
 /// `Some` result down the returned channel, sleeping `interval` after each
 /// call (so a slow `poll` never overlaps the next). Ticks where `poll`
 /// returns `None` are skipped (no send) but still wait out the interval.
-/// The thread exits once the receiver is dropped.
+/// The thread exits on the first send attempted after the receiver is
+/// dropped; a `poll` that never returns `Some` never attempts a send, so
+/// the thread runs for the process lifetime instead. That's fine for the
+/// current callers, which either always send or are themselves meant to
+/// live as long as the process.
 pub(crate) fn spawn_poller<T: Send + 'static>(
     interval: Duration,
     mut poll: impl FnMut() -> Option<T> + Send + 'static,

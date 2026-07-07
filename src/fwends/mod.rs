@@ -163,8 +163,14 @@ impl Fwends {
             return false;
         }
 
+        // A user reading scrollback keeps their place across a resize.
+        let was_at_bottom = self.scroll_y >= self.max_scroll();
         self.height = height;
-        self.scroll_to_bottom();
+        if was_at_bottom {
+            self.scroll_to_bottom();
+        } else {
+            self.scroll_y = self.scroll_y.min(self.max_scroll());
+        }
         true
     }
 
@@ -199,15 +205,7 @@ impl Fwends {
             return;
         }
 
-        // While a reply is pending the sticky shows "wait a sec..." instead
-        // of the input text, so clicks would select against invisible text.
-        let input_x = self.input_sticky_x();
-        if !self.state.is_awaiting()
-            && x >= input_x
-            && x < input_x + self.input_sticky_w() as isize
-            && y >= self.input_y()
-            && y < self.input_y() + self.input_sticky_h() as isize
-        {
+        if self.input_contains(x, y) {
             self.focused = true;
             let cursor = self.input.index_at(&self.input_layout(&self.font), x, y);
             self.input.begin_drag(cursor);
@@ -244,10 +242,7 @@ impl Fwends {
                 return None;
             }
             EditKey::Left if !input.shift() && !input_editable => {
-                self.selected_model = self
-                    .selected_model
-                    .checked_sub(1)
-                    .unwrap_or(chat::MODELS.len() - 1);
+                self.select_prev_model();
                 return None;
             }
             _ => {}
@@ -271,6 +266,13 @@ impl Fwends {
 
     const fn select_next_model(&mut self) {
         self.selected_model = (self.selected_model + 1) % chat::MODELS.len();
+    }
+
+    fn select_prev_model(&mut self) {
+        self.selected_model = self
+            .selected_model
+            .checked_sub(1)
+            .unwrap_or(chat::MODELS.len() - 1);
     }
 
     pub(crate) fn drain_reply(&mut self) -> bool {
@@ -751,6 +753,18 @@ impl Fwends {
         self.height.saturating_sub(INPUT_BOTTOM_PAD + INPUT_EXTRA_H) as isize
     }
 
+    /// Whether `(x, y)` lands on the editable input sticky. Excludes the
+    /// awaiting-reply state, when the sticky shows "wait a sec..." instead of
+    /// the input text and clicks would select against invisible text.
+    fn input_contains(&self, x: isize, y: isize) -> bool {
+        let input_x = self.input_sticky_x();
+        !self.state.is_awaiting()
+            && x >= input_x
+            && x < input_x + self.input_sticky_w() as isize
+            && y >= self.input_y()
+            && y < self.input_y() + self.input_sticky_h() as isize
+    }
+
     const fn chat_h(&self) -> usize {
         max_isize(self.input_y() - (CHAT_Y + CHAT_INPUT_GAP), 0) as usize
     }
@@ -818,13 +832,7 @@ impl crate::widget::Widget for Fwends {
         {
             return CursorKind::Hand;
         }
-        let input_x = self.input_sticky_x();
-        if !self.state.is_awaiting()
-            && x >= input_x
-            && x < input_x + self.input_sticky_w() as isize
-            && y >= self.input_y()
-            && y < self.input_y() + self.input_sticky_h() as isize
-        {
+        if self.input_contains(x, y) {
             return CursorKind::Text;
         }
         CursorKind::Pointer

@@ -408,15 +408,16 @@ fn current_date_parts() -> Option<DateParts> {
         .get(tm.tm_wday.clamp(0, 6) as usize)
         .unwrap_or(&"SUNDAY")
         .to_string();
+    let day_num = tm.tm_mday.clamp(1, 31);
 
     Some(DateParts {
         year: year.to_string(),
         weekday,
-        day: tm.tm_mday.clamp(1, 31).to_string(),
+        day: day_num.to_string(),
         month,
         year_num: year,
         month_index,
-        day_num: tm.tm_mday.clamp(1, 31),
+        day_num,
     })
 }
 

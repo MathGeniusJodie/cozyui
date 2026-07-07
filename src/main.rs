@@ -512,35 +512,39 @@ impl App {
         None
     }
 
-    fn motion(&mut self, x: isize, y: isize) -> Option<WidgetId> {
+    /// Updates drag/focus state and hover state for pointer motion, returning
+    /// the (deduplicated) widgets that need a repaint. The hover-broadcast
+    /// loop always runs, even during a text drag or focus-consumed motion, so
+    /// hover state elsewhere never goes stale mid-drag.
+    fn motion(&mut self, x: isize, y: isize) -> Vec<WidgetId> {
+        let mut changed = Vec::new();
+
         if let PointerAction::TextDrag(widget) = self.pointer_action {
             let (local_x, local_y) = self.rect_for(widget).local(x, y);
-            return self
-                .widgets
-                .get_mut(widget)
-                .drag_text(local_x, local_y)
-                .then_some(widget);
-        }
-
-        // Focus-follow motion (puter text selection, wavey knob drag).
-        let (local_x, local_y) = self.rect_for(self.focus).local(x, y);
-        if self.widgets.get_mut(self.focus).motion(local_x, local_y) {
-            return Some(self.focus);
+            if self.widgets.get_mut(widget).drag_text(local_x, local_y) {
+                changed.push(widget);
+            }
+        } else {
+            // Focus-follow motion (puter text selection, wavey knob drag).
+            let (local_x, local_y) = self.rect_for(self.focus).local(x, y);
+            if self.widgets.get_mut(self.focus).motion(local_x, local_y) {
+                changed.push(self.focus);
+            }
         }
 
         // Hover effects: the topmost widget under the pointer gets the local
         // position; every other widget is told the pointer is elsewhere, so a
         // stale hover can't stick when the pointer moves onto an overlapping
-        // widget drawn on top.
+        // widget drawn on top. This runs unconditionally, even mid-drag, so
+        // hover in other widgets doesn't go stale while one widget is dragging.
         let hovered = self.widget_at(x, y);
-        let mut changed = None;
         for widget in WidgetId::ALL {
             let (hover_x, hover_y) = match hovered {
                 Some((hit, local_x, local_y)) if hit == widget => (local_x, local_y),
                 _ => (-1, -1),
             };
-            if self.widgets.get_mut(widget).hover(hover_x, hover_y) {
-                changed = Some(widget);
+            if self.widgets.get_mut(widget).hover(hover_x, hover_y) && !changed.contains(&widget) {
+                changed.push(widget);
             }
         }
         changed
@@ -749,7 +753,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             drew_frame = true;
         }
 
-        let mut pending_motion_widget = None;
+        let mut pending_motion_widgets: Vec<WidgetId> = Vec::new();
         // Coalesce input redraws: key auto-repeat and rapid clicks can deliver
         // many events in a single drain. Repainting per event piles up frames
         // faster than they display and makes typing lag. We update state for
@@ -812,16 +816,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                         && let Some(widget) =
                             app.release(event.event_x.into(), event.event_y.into())
                     {
-                        pending_motion_widget =
-                            pending_motion_widget.filter(|pending| *pending != widget);
+                        pending_motion_widgets.retain(|pending| *pending != widget);
                         app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
                         drew_frame = true;
                     }
                 }
                 XEvent::MotionNotify(event) => {
                     xwin.set_cursor(app.cursor_at(event.event_x.into(), event.event_y.into()))?;
-                    if let Some(widget) = app.motion(event.event_x.into(), event.event_y.into()) {
-                        pending_motion_widget = Some(widget);
+                    for widget in app.motion(event.event_x.into(), event.event_y.into()) {
+                        if !pending_motion_widgets.contains(&widget) {
+                            pending_motion_widgets.push(widget);
+                        }
                     }
                 }
                 XEvent::SelectionRequest(event) => xwin.handle_selection_request(event)?,
@@ -847,7 +852,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             redraw_after_input(&mut app, &mut fb, &mut xwin, &palette)?;
             drew_frame = true;
         }
-        if let Some(widget) = pending_motion_widget {
+        for widget in pending_motion_widgets {
             app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
             drew_frame = true;
         }

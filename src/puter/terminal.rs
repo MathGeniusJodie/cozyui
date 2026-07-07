@@ -160,11 +160,15 @@ impl Terminal {
         } else if is_copy_shortcut(input) {
             self.selection_to_clipboard()
         } else if input.is_paste_shortcut() {
+            // Read the mode before locking `clipboard` so we never hold both
+            // locks at once (avoids any chance of lock-order deadlock with
+            // other code that takes `term` and `clipboard` separately).
+            let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
             let fallback = self.clipboard.lock();
             let text =
                 clipboard_text.or_else(|| (!fallback.is_empty()).then_some(fallback.as_str()))?;
             self.scroll(Scroll::Bottom);
-            self.send_pty(Msg::Input(Cow::Owned(text.as_bytes().to_vec())));
+            self.send_pty(Msg::Input(Cow::Owned(paste_bytes(bracketed, text))));
             None
         } else if let Some(bytes) = key_bytes(input) {
             self.scroll(Scroll::Bottom);
@@ -259,6 +263,40 @@ impl Terminal {
     }
 }
 
+/// What to actually write to the pty for a paste, given whether the
+/// application enabled bracketed-paste mode (`DECSET 2004`).
+///
+/// Bracketed paste tells the shell/editor "this text arrived from a paste,
+/// not typing", which lets it, e.g., disable auto-indent in vim or avoid
+/// treating pasted newlines as "run this line now" in a shell; we honor it
+/// by wrapping the text in `ESC[200~`/`ESC[201~`. ESC and ETX are filtered
+/// out of the pasted text first so a hostile/corrupted clipboard can't
+/// smuggle its own bytes past the bracket (e.g. close it early with `ESC[201~`
+/// and then inject arbitrary escape sequences or a Ctrl-C).
+///
+/// If the application never asked for bracketed paste, we fall back to what
+/// terminals did before that mode existed: pasted newlines become carriage
+/// returns (so a pasted multi-line snippet is fed to the shell a line at a
+/// time, as if typed), and other C0 control bytes -- ESC in particular -- are
+/// stripped so they can't be misread as an escape sequence.
+fn paste_bytes(bracketed: bool, text: &str) -> Vec<u8> {
+    if bracketed {
+        let filtered: String = text.chars().filter(|&c| c != '\x1b' && c != '\x03').collect();
+        let mut bytes = Vec::with_capacity(filtered.len() + 12);
+        bytes.extend_from_slice(b"\x1b[200~");
+        bytes.extend_from_slice(filtered.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        bytes
+    } else {
+        text.replace("\r\n", "\n")
+            .replace('\n', "\r")
+            .chars()
+            .filter(|&c| c == '\r' || c == '\t' || !c.is_control())
+            .collect::<String>()
+            .into_bytes()
+    }
+}
+
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn screen_point(x: isize, y: isize, size: &WindowSize) -> Option<Point> {
     if x < 0 || y < 0 {
@@ -300,4 +338,33 @@ fn cell_at(x: usize, y: usize, screen_x: usize, screen_y: usize, size: &WindowSi
     let line = ((y - screen_y) / size.cell_height as usize)
         .min((size.num_lines as usize).saturating_sub(1));
     Point::new(Line(line as i32), Column(column))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bracketed_paste_wraps_text_in_bracket_markers() {
+        let bytes = paste_bytes(true, "echo hi");
+        assert_eq!(bytes, b"\x1b[200~echo hi\x1b[201~");
+    }
+
+    #[test]
+    fn bracketed_paste_filters_esc_and_etx_so_clipboard_cant_escape_bracket() {
+        let bytes = paste_bytes(true, "a\x1bb\x03c");
+        assert_eq!(bytes, b"\x1b[200~abc\x1b[201~");
+    }
+
+    #[test]
+    fn unbracketed_paste_converts_newlines_to_carriage_returns_and_strips_esc() {
+        let bytes = paste_bytes(false, "line1\r\nline2\nline3\x1b[31m");
+        assert_eq!(bytes, b"line1\rline2\rline3[31m");
+    }
+
+    #[test]
+    fn unbracketed_paste_keeps_tabs() {
+        let bytes = paste_bytes(false, "a\tb");
+        assert_eq!(bytes, b"a\tb");
+    }
 }

@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -18,6 +19,10 @@ use std::sync::{Arc, Mutex};
 /// Shared slot a caller can use to record the pid of the in-flight curl
 /// child so it can be killed (e.g. `libc::kill(pid, libc::SIGTERM)`) to
 /// cancel a request early instead of waiting out the request timeout.
+///
+/// While a pid is recorded here, `post_raw` guarantees the child has not
+/// been reaped yet (it stays a zombie after exiting), so the pid can never
+/// be recycled by the OS out from under a canceller that reads this slot.
 pub type PidSlot = Arc<Mutex<Option<u32>>>;
 
 const URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -92,40 +97,75 @@ fn post_raw(body: &[u8], timeout_secs: u64, pid_slot: Option<&PidSlot>) -> Resul
     if let Err(err) = write_result {
         // Without this, an early write failure (e.g. curl exiting before it
         // reads the config) would drop the Child unwaited, leaking a zombie,
-        // and leave a dead pid in the slot for a canceller to kill.
+        // and leave a dead pid in the slot for a canceller to kill. Clear the
+        // slot before the reaping `wait()` below, for the same
+        // zombie-holds-the-pid reason as the main path: a killed-but-unreaped
+        // child is still a zombie, so its pid can't be recycled while the
+        // slot still names it.
         let _ = child.kill();
-        let _ = child.wait();
         if let Some(slot) = pid_slot {
             *slot.lock().unwrap() = None;
         }
+        let _ = child.wait();
         return Err(err);
     }
-    let output = child.wait_with_output();
-    // Clear the slot before inspecting the result: from here the pid is dead
-    // (or the wait failed), so a canceller must never signal it again.
+
+    // Never reap the child (via `wait`/`wait_with_output`) while the slot
+    // still holds its pid: an exited-but-unreaped child stays a zombie, and
+    // zombie pids can't be recycled by the OS, so a concurrent canceller's
+    // `libc::kill` is safe (a no-op at worst) right up until we clear the
+    // slot below. Read stdout/stderr to completion first (stderr on a
+    // helper thread, since curl may block writing one pipe while we drain
+    // the other), then clear the slot, and only then reap with `wait()`.
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| "curl stderr was not available".to_string())?;
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let mut stdout = Vec::new();
+    let stdout_result = child
+        .stdout
+        .take()
+        .ok_or_else(|| "curl stdout was not available".to_string())
+        .and_then(|mut pipe| {
+            pipe.read_to_end(&mut stdout)
+                .map_err(|err| format!("curl stdout read failed: {err}"))
+        });
+
+    // Clear the slot before inspecting the result: from here the pid must
+    // never be signaled again (it's about to be reaped).
     if let Some(slot) = pid_slot {
         *slot.lock().unwrap() = None;
     }
-    let output = output.map_err(|err| format!("curl failed: {err}"))?;
 
-    if !output.status.success() {
+    let status = child.wait();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    stdout_result?;
+    let status = status.map_err(|err| format!("curl failed: {err}"))?;
+
+    if !status.success() {
         // With --fail-with-body, curl still writes the error response body to
         // stdout (it just also exits non-zero), so try to surface the API's
         // own error message before falling back to stderr/exit status.
-        if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&output.stdout)
+        if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&stdout)
             && let Some(message) = map.get("error").and_then(|error| error.get("message"))
             && let Some(message) = message.as_str()
         {
             return Err(message.to_string());
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&stderr);
         return Err(if stderr.trim().is_empty() {
-            format!("OpenRouter request failed with status {}", output.status)
+            format!("OpenRouter request failed with status {status}")
         } else {
             stderr.trim().to_string()
         });
     }
-    Ok(output.stdout)
+    Ok(stdout)
 }
 
 fn curl_config_escape(text: &str) -> String {

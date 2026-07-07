@@ -305,8 +305,14 @@ fn play_jingle() {
 
 fn play_wav(name: &str, samples: Vec<i16>) {
     // Unique path per playback: a fixed name in shared /tmp is race-able, and
-    // the file must survive until the player has read it anyway.
-    let Some(base) = std::env::temp_dir().join(name).to_str().map(str::to_owned) else {
+    // the file must survive until the player has read it anyway. The runtime
+    // dir keeps these out of shared /tmp, consistent with the rest of the
+    // codebase.
+    let Some(base) = crate::util::runtime_dir()
+        .join(name)
+        .to_str()
+        .map(str::to_owned)
+    else {
         return;
     };
     let path = crate::util::unique_temp_path(&base);

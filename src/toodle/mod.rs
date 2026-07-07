@@ -79,6 +79,11 @@ const TODO_MAX_LINES: usize = 2;
 const PENULTIMATE_LINE_SHADOW_MAX_CHARS: usize = 17;
 const LAST_LINE_SHADOW_MAX_CHARS: usize = 14;
 const LINE_CLICK_OFFSET_Y: isize = 9;
+/// How far a line's click band extends above its `LINE_Y` baseline (less than
+/// the 22px line pitch, so it doesn't overlap the line above).
+const LINE_HIT_ABOVE: isize = 17;
+/// How far a line's click band extends below its `LINE_Y` baseline.
+const LINE_HIT_BELOW: isize = 4;
 const PENCIL_TIP_X: isize = 0;
 const PENCIL_TIP_Y: isize = 24;
 const MAX_TEXT_WIDTH: usize = MAX_TEXT_CHARS * 6;
@@ -329,7 +334,7 @@ impl Toodle {
         } else {
             text_color
         };
-        for (line, _) in LINE_Y.iter().enumerate().take(LINE_COUNT) {
+        for line in 0..LINE_COUNT {
             let todo = self.list(section).item(page, line);
             if todo.renders_checkbox(focused_line == Some(line)) {
                 self.draw_checkbox_box(fb, palette, line);
@@ -455,6 +460,12 @@ impl Toodle {
             if checked && self.highlighted == Some(todo_ref) {
                 self.highlighted = None;
             }
+            // If a save is already in flight, begin_save (inside
+            // save_current_section) is a no-op, so mark the section dirty and
+            // bump last_edit so the debounce retries once it completes —
+            // otherwise the toggle would be silently lost.
+            self.sections[section.index()].mark_dirty();
+            self.last_edit = Instant::now();
             self.save_current_section()?;
             return Ok(checked && self.twirl_on_check_page());
         }
@@ -894,18 +905,18 @@ impl Toodle {
     }
 
     fn priority_icon(&self) -> Option<&Sprite> {
-        match section_color(self.current_page_ref().section) {
-            PageColor::Pink => Some(&self.priority_urgent),
-            PageColor::Yellow => None,
-            PageColor::Green => Some(&self.priority_frog),
-            PageColor::Blue => Some(&self.priority_snail),
+        match self.current_page_ref().section {
+            Priority::Urgent => Some(&self.priority_urgent),
+            Priority::Normal => None,
+            Priority::Frog => Some(&self.priority_frog),
+            Priority::Snail => Some(&self.priority_snail),
         }
     }
 
     fn twirl_on_check_page(&self) -> bool {
         matches!(
-            section_color(self.current_page_ref().section),
-            PageColor::Pink | PageColor::Green
+            self.current_page_ref().section,
+            Priority::Urgent | Priority::Frog
         )
     }
 
@@ -1289,6 +1300,8 @@ impl crate::widget::Widget for Toodle {
 
         match edit_key(input) {
             EditKey::Enter => {
+                // Enter moves focus to the next line; on the page's last line it
+                // deliberately stays put rather than flipping to the next page.
                 self.focus_line((line + 1).min(LINE_COUNT - 1));
                 if let Some(field) = self.focus.field_mut() {
                     field.set_cursor_end();
@@ -1483,8 +1496,8 @@ fn checkbox_at(x: isize, y: isize) -> Option<usize> {
 
 fn line_at(y: isize) -> Option<usize> {
     LINE_Y.iter().position(|&line_y| {
-        let low = (line_y - 17 + LINE_CLICK_OFFSET_Y).max(0);
-        y >= low && y < line_y + 4 + LINE_CLICK_OFFSET_Y
+        let low = (line_y - LINE_HIT_ABOVE + LINE_CLICK_OFFSET_Y).max(0);
+        y >= low && y < line_y + LINE_HIT_BELOW + LINE_CLICK_OFFSET_Y
     })
 }
 

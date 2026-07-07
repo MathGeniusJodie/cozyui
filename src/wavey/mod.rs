@@ -894,13 +894,14 @@ fn clock_text(clock_24h: bool) -> String {
     let Some((hour, minute)) = local_hour_minute() else {
         return "00:00".to_string();
     };
-    if !clock_24h {
-        let hour = match hour % 12 {
+    let hour = if !clock_24h {
+        match hour % 12 {
             0 => 12,
             hour => hour,
-        };
-        return format!("{hour:02}:{minute:02}");
-    }
+        }
+    } else {
+        hour
+    };
     format!("{hour:02}:{minute:02}")
 }
 
