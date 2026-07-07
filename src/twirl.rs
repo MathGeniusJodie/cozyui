@@ -84,6 +84,11 @@ pub struct Twirl {
     /// render hot loop only needs to add `self.angle` instead of calling
     /// `atan2` per pixel per frame.
     pixel_base_angle: Vec<f32>,
+    /// Total saves run here so their fsyncs never hitch the UI thread —
+    /// `add_segment_value` fires from `update` (the frame the wheel stops)
+    /// and from a mid-spin re-click. Flushed on shutdown (see
+    /// `flush_saves`).
+    saver: crate::util::BackgroundWriter,
 }
 
 impl Twirl {
@@ -102,6 +107,7 @@ impl Twirl {
             last_click_segment: 0,
             total: load_total(total_path())?,
             pixel_base_angle,
+            saver: crate::util::BackgroundWriter::spawn("twirl"),
         })
     }
 
@@ -182,10 +188,8 @@ impl Twirl {
         // Spinning while already spinning shouldn't discard the in-progress
         // spin, but awarding the current pointer segment would let players time
         // their re-spin to pick a result. Award a random segment instead.
-        if matches!(self.spin, Spin::Spinning(_))
-            && let Err(err) = self.add_random_value()
-        {
-            eprintln!("twirl save failed: {err}");
+        if matches!(self.spin, Spin::Spinning(_)) {
+            self.add_random_value();
         }
         self.spin =
             Spin::Spinning(crate::util::random_unit().mul_add(START_SPEED_RANGE, START_SPEED_MIN));
@@ -227,18 +231,26 @@ impl Twirl {
             .draw_text(fb, &total, x as isize, y as isize, palette_color::CREAM);
     }
 
-    fn add_landed_value(&mut self) -> Result<(), Box<dyn Error>> {
-        self.add_segment_value(self.pointer_segment())
+    fn add_landed_value(&mut self) {
+        self.add_segment_value(self.pointer_segment());
     }
 
-    fn add_random_value(&mut self) -> Result<(), Box<dyn Error>> {
+    fn add_random_value(&mut self) {
         let segment = (crate::util::random_unit() * SEGMENT_COUNT as f32) as usize % SEGMENT_COUNT;
-        self.add_segment_value(segment)
+        self.add_segment_value(segment);
     }
 
-    fn add_segment_value(&mut self, segment: usize) -> Result<(), Box<dyn Error>> {
+    fn add_segment_value(&mut self, segment: usize) {
         self.total = self.total.saturating_add(SEGMENT_VALUES[segment]);
-        save_total(total_path(), self.total)
+        self.saver
+            .write(total_path().to_string(), format!("{}\n", self.total));
+    }
+
+    /// Wait out any queued total saves (shutdown); without this a spin that
+    /// finished just before quitting could be silently dropped, since the
+    /// writer thread's queue doesn't survive process exit.
+    pub(crate) fn flush_saves(&self) {
+        self.saver.flush();
     }
 
     fn pointer_segment(&self) -> usize {
@@ -288,11 +300,6 @@ fn load_total(path: &str) -> Result<u64, Box<dyn Error>> {
             Ok(0)
         }
     }
-}
-
-fn save_total(path: &str, total: u64) -> Result<(), Box<dyn Error>> {
-    crate::util::atomic_write(path, format!("{total}\n"))?;
-    Ok(())
 }
 
 fn play_click() {
@@ -453,11 +460,8 @@ impl crate::widget::Widget for Twirl {
 
         if speed < STOP_SPEED {
             self.spin = Spin::Idle;
-            if let Err(err) = self.add_landed_value() {
-                eprintln!("twirl save failed: {err}");
-            } else {
-                play_jingle();
-            }
+            self.add_landed_value();
+            play_jingle();
         } else {
             self.spin = Spin::Spinning(speed);
         }

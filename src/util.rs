@@ -261,6 +261,63 @@ pub(crate) fn spawn_poller<T: Send + 'static>(
     rx
 }
 
+/// One queued [`BackgroundWriter`] job: a file to write, or a flush
+/// rendezvous (the worker acks once every earlier write has hit disk).
+enum WriteJob {
+    Write { path: String, contents: Vec<u8> },
+    Flush(mpsc::Sender<()>),
+}
+
+/// Runs [`atomic_write`] jobs on a single background thread, in submission
+/// order, so its fsyncs never run on (and never hitch) the UI thread.
+/// Fire-and-forget: failures are logged with the owner's name rather than
+/// returned, since by the time the write runs the caller has moved on. The
+/// single worker keeps writes to the same path ordered, so a stale value can
+/// never rename over a newer one. The thread exits when the writer is
+/// dropped.
+pub(crate) struct BackgroundWriter {
+    jobs: mpsc::Sender<WriteJob>,
+}
+
+impl BackgroundWriter {
+    /// `owner` names the owning widget in failure logs (e.g. "twirl").
+    pub(crate) fn spawn(owner: &'static str) -> Self {
+        let (jobs, rx) = mpsc::channel::<WriteJob>();
+        std::thread::spawn(move || {
+            for job in rx {
+                match job {
+                    WriteJob::Write { path, contents } => {
+                        if let Err(err) = atomic_write(&path, contents) {
+                            eprintln!("{owner}: background save to {path} failed: {err}");
+                        }
+                    }
+                    WriteJob::Flush(ack) => {
+                        let _ = ack.send(());
+                    }
+                }
+            }
+        });
+        Self { jobs }
+    }
+
+    pub(crate) fn write(&self, path: String, contents: impl Into<Vec<u8>>) {
+        let _ = self.jobs.send(WriteJob::Write {
+            path,
+            contents: contents.into(),
+        });
+    }
+
+    /// Block until every previously queued write has hit disk. For shutdown:
+    /// a non-main thread's queued work is silently abandoned on process exit,
+    /// so without this a save queued just before quitting would be lost.
+    pub(crate) fn flush(&self) {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if self.jobs.send(WriteJob::Flush(ack_tx)).is_ok() {
+            let _ = ack_rx.recv();
+        }
+    }
+}
+
 /// Write `contents` to `path` atomically: write to a unique temp file in the
 /// same directory, fsync, rename over the destination, then fsync the
 /// directory (without which a crash shortly after can revert the rename).
