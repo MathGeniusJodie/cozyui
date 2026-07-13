@@ -20,7 +20,7 @@ use alacritty_terminal::tty;
 
 use super::keys::{is_copy_shortcut, key_bytes, key_scroll};
 use super::{
-    GLYPH_H, GLYPH_W, PressState, SCREEN_H, SCREEN_SOURCE_X, SCREEN_SOURCE_Y, SCREEN_W, SHIFT_MASK,
+    GLYPH_H, GLYPH_W, PressState, SCREEN_H, SCREEN_SOURCE_X, SCREEN_SOURCE_Y, SCREEN_W,
     art_x, art_y,
 };
 use crate::text::KeyInput;
@@ -183,13 +183,13 @@ impl Terminal {
     /// mouse-down escape to the pty's SGR mouse mode. The two are mutually
     /// exclusive: a forwarded mouse-down never starts a selection.
     #[allow(clippy::significant_drop_tightening)]
-    pub(super) fn mouse_press(&self, x: isize, y: isize, state: u16) -> PressState {
+    pub(super) fn mouse_press(&self, x: isize, y: isize, shift: bool) -> PressState {
         let Some(point) = screen_point(x, y, &self.window_size) else {
             return PressState::None;
         };
 
         let mouse_mode = self.term.lock().mode().intersects(TermMode::MOUSE_MODE);
-        if mouse_mode && state & SHIFT_MASK == 0 {
+        if mouse_mode && !shift {
             self.send_mouse(point, 0, true);
             return PressState::ForwardedMouse;
         }

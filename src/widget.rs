@@ -48,7 +48,7 @@ pub(crate) trait Widget {
     fn update(&mut self) -> Result<bool, Box<dyn Error>> {
         Ok(false)
     }
-    fn click(&mut self, _x: isize, _y: isize, _state: u16) -> Result<ClickOutcome, Box<dyn Error>> {
+    fn click(&mut self, _x: isize, _y: isize, _shift: bool) -> Result<ClickOutcome, Box<dyn Error>> {
         Ok(ClickOutcome::default())
     }
     /// Focus moved to another widget; drop any focus-only visuals (cursors,

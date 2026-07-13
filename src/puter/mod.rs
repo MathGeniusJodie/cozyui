@@ -18,7 +18,6 @@ use terminal::Terminal;
 
 const GLYPH_W: usize = 6;
 const GLYPH_H: usize = 12;
-const SHIFT_MASK: u16 = 1;
 
 const SCREEN_SOURCE_X: usize = 49;
 const SCREEN_SOURCE_Y: usize = 49;
@@ -103,12 +102,12 @@ impl Puter {
         })
     }
 
-    pub(crate) fn press_button(&mut self, x: isize, y: isize, state: u16) {
+    pub(crate) fn press_button(&mut self, x: isize, y: isize, shift: bool) {
         self.press_state = match button_at(x, y) {
             Some(index) => PressState::Chrome(index),
             None => self
                 .terminal()
-                .map_or(PressState::None, |term| term.mouse_press(x, y, state)),
+                .map_or(PressState::None, |term| term.mouse_press(x, y, shift)),
         };
     }
 
@@ -219,9 +218,9 @@ impl crate::widget::Widget for Puter {
         &mut self,
         x: isize,
         y: isize,
-        state: u16,
+        shift: bool,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
-        self.press_button(x, y, state);
+        self.press_button(x, y, shift);
         Ok(crate::widget::ClickOutcome::default())
     }
 

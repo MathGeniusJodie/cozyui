@@ -473,7 +473,7 @@ impl crate::widget::Widget for Twirl {
         &mut self,
         x: isize,
         y: isize,
-        _state: u16,
+        _shift: bool,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         Self::click(self, x, y);
         Ok(crate::widget::ClickOutcome::default())

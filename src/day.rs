@@ -488,7 +488,7 @@ impl crate::widget::Widget for Day {
         &mut self,
         _x: isize,
         _y: isize,
-        _state: u16,
+        _shift: bool,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         self.toggle_mode();
         Ok(crate::widget::ClickOutcome::default())

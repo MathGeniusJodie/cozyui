@@ -24,8 +24,17 @@ use clipboard::ClipboardAtoms;
 use present::ShmBacking;
 
 use crate::text::input as text_input;
+use crate::window::UiEvent;
 use crate::{CURSOR_KIND_COUNT, CursorKind};
 use pixel_graphics::PresentLut;
+
+/// X core button numbers for the scroll wheel.
+const WHEEL_UP: u8 = 4;
+const WHEEL_DOWN: u8 = 5;
+/// The Shift bit in a core event's `state` field.
+const SHIFT_MASK: u16 = 1;
+/// Left mouse button (`ButtonIndex::M1`).
+const BUTTON_LEFT: u8 = 1;
 
 pub struct XWindow {
     pub(crate) conn: XCBConnection,
@@ -175,24 +184,67 @@ impl XWindow {
     }
 
     /// The main loop's event source: replays events buffered during a
-    /// clipboard wait before polling the connection, and records input
-    /// timestamps for ICCCM-correct selection requests.
-    pub(crate) fn poll_event(&mut self) -> Result<Option<XEvent>, Box<dyn Error>> {
+    /// clipboard wait before polling the connection, records input timestamps
+    /// for ICCCM-correct selection requests, and translates the X vocabulary
+    /// into backend-neutral `UiEvent`s. Protocol-internal events (SHM
+    /// completions, selection traffic, xkb release bookkeeping) are consumed
+    /// here without surfacing.
+    pub(crate) fn poll_event(&mut self) -> Result<Option<UiEvent>, Box<dyn Error>> {
         loop {
             let event = match self.pending_events.pop_front() {
                 Some(event) => Some(event),
                 None => self.conn.poll_for_event()?,
             };
-            // SHM completions are internal bookkeeping, not app events.
-            if let Some(XEvent::ShmCompletion(completion)) = &event {
-                let seg: Seg = completion.shmseg;
-                self.shm_completed(seg);
-                continue;
+            let Some(event) = event else {
+                return Ok(None);
+            };
+            self.note_event_time(&event);
+            match event {
+                // SHM completions are internal bookkeeping, not app events.
+                XEvent::ShmCompletion(completion) => {
+                    let seg: Seg = completion.shmseg;
+                    self.shm_completed(seg);
+                }
+                XEvent::KeyPress(e) => {
+                    let input = self.keyboard.press(e.detail, e.state.into());
+                    return Ok(Some(UiEvent::Key(input)));
+                }
+                XEvent::KeyRelease(e) => self.keyboard.release(e.detail),
+                XEvent::ButtonPress(e) => {
+                    let (x, y) = (isize::from(e.event_x), isize::from(e.event_y));
+                    match e.detail {
+                        WHEEL_UP => return Ok(Some(UiEvent::ScrollUp { x, y })),
+                        WHEEL_DOWN => return Ok(Some(UiEvent::ScrollDown { x, y })),
+                        BUTTON_LEFT => {
+                            let shift = u16::from(e.state) & SHIFT_MASK != 0;
+                            return Ok(Some(UiEvent::Press { x, y, shift }));
+                        }
+                        _ => {}
+                    }
+                }
+                XEvent::ButtonRelease(e) if e.detail == BUTTON_LEFT => {
+                    return Ok(Some(UiEvent::Release {
+                        x: isize::from(e.event_x),
+                        y: isize::from(e.event_y),
+                    }));
+                }
+                XEvent::MotionNotify(e) => {
+                    return Ok(Some(UiEvent::Motion {
+                        x: isize::from(e.event_x),
+                        y: isize::from(e.event_y),
+                    }));
+                }
+                XEvent::SelectionRequest(e) => self.handle_selection_request(e)?,
+                XEvent::SelectionClear(e) => self.handle_selection_clear(e),
+                XEvent::ConfigureNotify(e) => {
+                    return Ok(Some(UiEvent::Resized {
+                        width: e.width as usize,
+                        height: e.height as usize,
+                    }));
+                }
+                XEvent::DestroyNotify(_) => return Ok(Some(UiEvent::Closed)),
+                _ => {}
             }
-            if let Some(event) = &event {
-                self.note_event_time(event);
-            }
-            return Ok(event);
         }
     }
 

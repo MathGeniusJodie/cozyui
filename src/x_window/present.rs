@@ -22,7 +22,8 @@ use x11rb::protocol::xproto::{
 use x11rb::xcb_ffi::XCBConnection;
 
 use super::XWindow;
-use crate::{Framebuffer, Palette, Rect, TRANSPARENT};
+use crate::window::{opaque_bands, row_runs_into};
+use crate::{Framebuffer, Palette, Rect};
 
 pub(super) struct ShmImage {
     pub(super) seg: Seg,
@@ -418,26 +419,15 @@ impl XWindow {
 /// Cover every non-`TRANSPARENT` pixel with rectangles from the cached
 /// per-row runs, with identical consecutive rows merged into taller bands.
 fn rects_from_rows(rows: &[Vec<(usize, usize)>]) -> Vec<Rectangle> {
-    let empty: Vec<(usize, usize)> = Vec::new();
-    let mut rects = Vec::new();
-    let mut band_runs = &empty;
-    let mut band_start = 0;
-    for y in 0..=rows.len() {
-        let runs = rows.get(y).unwrap_or(&empty);
-        if runs != band_runs {
-            for &(x, w) in band_runs {
-                rects.push(Rectangle {
-                    x: x as i16,
-                    y: band_start as i16,
-                    width: w as u16,
-                    height: (y - band_start) as u16,
-                });
-            }
-            band_runs = runs;
-            band_start = y;
-        }
-    }
-    rects
+    opaque_bands(rows)
+        .into_iter()
+        .map(|(x, y, w, h)| Rectangle {
+            x: x as i16,
+            y: y as i16,
+            width: w as u16,
+            height: h as u16,
+        })
+        .collect()
 }
 
 /// `Rectangle` doesn't derive `PartialEq`, so compare fields directly.
@@ -446,28 +436,6 @@ fn rects_equal(a: &[Rectangle], b: &[Rectangle]) -> bool {
         && a.iter()
             .zip(b)
             .all(|(p, q)| p.x == q.x && p.y == q.y && p.width == q.width && p.height == q.height)
-}
-
-/// (x, width) spans of non-`TRANSPARENT` pixels in one row, written into
-/// `out` (which is cleared first). Reusing a scratch buffer across calls
-/// avoids allocating a fresh `Vec` for every row scanned on every partial
-/// redraw.
-fn row_runs_into(row: &[u8], out: &mut Vec<(usize, usize)>) {
-    out.clear();
-    let mut start = None;
-    for (x, &index) in row.iter().enumerate() {
-        match (index != TRANSPARENT, start) {
-            (true, None) => start = Some(x),
-            (false, Some(s)) => {
-                out.push((s, x - s));
-                start = None;
-            }
-            _ => {}
-        }
-    }
-    if let Some(s) = start {
-        out.push((s, row.len() - s));
-    }
 }
 
 use clipped_rect::{ClippedRect, clip_to_fb};

@@ -602,7 +602,7 @@ impl crate::widget::Widget for Wavey {
         &mut self,
         x: isize,
         y: isize,
-        _state: u16,
+        _shift: bool,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         Ok(crate::widget::ClickOutcome {
             copy_text: Self::click(self, x, y),

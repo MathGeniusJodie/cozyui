@@ -8,9 +8,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use x11rb::protocol::Event as XEvent;
-use x11rb::protocol::xproto::ButtonIndex;
-
 mod assets;
 #[cfg(test)]
 mod bench;
@@ -32,14 +29,16 @@ mod toodle;
 mod twirl;
 mod util;
 mod wavey;
+mod wayland_window;
 mod widget;
+mod window;
 mod x_window;
 
 pub(crate) use pixel_graphics::{
     Caps, Framebuffer, Index, Paint, Palette, PaletteIndex, Rect, Rgb, Sprite, Swap, TRANSPARENT,
 };
 use widget::{ScrollDirection, Widget};
-use x_window::XWindow;
+use window::{UiEvent, Window};
 
 pub(crate) mod palette_color {
     use crate::Index;
@@ -108,9 +107,6 @@ pub(crate) enum CursorKind {
 }
 
 pub(crate) const CURSOR_KIND_COUNT: usize = CursorKind::Disabled as usize + 1;
-
-const WHEEL_UP: u8 = 4;
-const WHEEL_DOWN: u8 = 5;
 
 /// Cut the desk background out of the window with the X SHAPE extension so
 /// whatever is underneath shows through (no compositor needed). The holes are
@@ -367,7 +363,7 @@ impl App {
     fn render_and_draw_widget(
         &mut self,
         fb: &mut Framebuffer,
-        xwin: &mut XWindow,
+        xwin: &mut Window,
         palette: &Palette,
         widget: WidgetId,
     ) -> Result<(), Box<dyn Error>> {
@@ -460,7 +456,7 @@ impl App {
     }
 
     /// Returns text the clicked widget wants copied to the clipboard.
-    fn click(&mut self, x: isize, y: isize, state: u16) -> Result<Option<String>, Box<dyn Error>> {
+    fn click(&mut self, x: isize, y: isize, shift: bool) -> Result<Option<String>, Box<dyn Error>> {
         self.pointer_action = PointerAction::None;
         let Some((widget, x, y)) = self.widget_at(x, y) else {
             return Ok(None);
@@ -470,7 +466,7 @@ impl App {
             self.blurred = Some(self.focus);
         }
         self.focus = widget;
-        let outcome = self.widgets.get_mut(widget).click(x, y, state)?;
+        let outcome = self.widgets.get_mut(widget).click(x, y, shift)?;
         if outcome.spin_twirl {
             self.widgets.twirl.spin();
         }
@@ -695,10 +691,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let width = app.width();
     let height = app.height();
     let mut fb = Framebuffer::new(width, height, app_color::BACKGROUND);
-    let mut xwin = XWindow::open(width, height, TRANSPARENT_BACKGROUND)?;
+    let mut xwin = Window::open(width, height, TRANSPARENT_BACKGROUND)?;
     xwin.set_palette(&palette);
     xwin.load_cursors(&palette)?;
-    app.start(u64::from(xwin.window))?;
+    app.start(xwin.terminal_window_id())?;
     app.render(&mut fb, &palette);
     xwin.draw(&fb)?;
 
@@ -762,8 +758,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut needs_input_redraw = false;
         while let Some(event) = xwin.poll_event()? {
             match event {
-                XEvent::KeyPress(event) => {
-                    let input = xwin.keyboard.press(event.detail, event.state.into());
+                UiEvent::Key(input) => {
                     let paste_text = if app.wants_clipboard(&input) {
                         xwin.clipboard_text()?
                     } else {
@@ -777,63 +772,43 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     needs_input_redraw = true;
                 }
-                XEvent::KeyRelease(event) => {
-                    xwin.keyboard.release(event.detail);
+                UiEvent::ScrollUp { x, y } => {
+                    if let Some(widget) = app.scroll_up(x, y) {
+                        app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
+                        drew_frame = true;
+                    }
                 }
-                XEvent::ButtonPress(event) => match event.detail {
-                    WHEEL_UP => {
-                        if let Some(widget) =
-                            app.scroll_up(event.event_x.into(), event.event_y.into())
-                        {
-                            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
-                            drew_frame = true;
-                        }
+                UiEvent::ScrollDown { x, y } => {
+                    if let Some(widget) = app.scroll_down(x, y) {
+                        app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
+                        drew_frame = true;
                     }
-                    WHEEL_DOWN => {
-                        if let Some(widget) =
-                            app.scroll_down(event.event_x.into(), event.event_y.into())
-                        {
-                            app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
-                            drew_frame = true;
-                        }
-                    }
-                    detail if detail == u8::from(ButtonIndex::M1) => {
-                        if let Some(copy_text) = log_widget_err(
-                            || "click".to_string(),
-                            app.click(
-                                event.event_x.into(),
-                                event.event_y.into(),
-                                event.state.into(),
-                            ),
-                        ) {
-                            xwin.set_clipboard_text(copy_text)?;
-                        }
-                        needs_input_redraw = true;
-                    }
-                    _ => {}
-                },
-                XEvent::ButtonRelease(event) => {
-                    if event.detail == u8::from(ButtonIndex::M1)
-                        && let Some(widget) =
-                            app.release(event.event_x.into(), event.event_y.into())
+                }
+                UiEvent::Press { x, y, shift } => {
+                    if let Some(copy_text) =
+                        log_widget_err(|| "click".to_string(), app.click(x, y, shift))
                     {
+                        xwin.set_clipboard_text(copy_text)?;
+                    }
+                    needs_input_redraw = true;
+                }
+                UiEvent::Release { x, y } => {
+                    if let Some(widget) = app.release(x, y) {
                         pending_motion_widgets.retain(|pending| *pending != widget);
                         app.render_and_draw_widget(&mut fb, &mut xwin, &palette, widget)?;
                         drew_frame = true;
                     }
                 }
-                XEvent::MotionNotify(event) => {
-                    xwin.set_cursor(app.cursor_at(event.event_x.into(), event.event_y.into()))?;
-                    for widget in app.motion(event.event_x.into(), event.event_y.into()) {
+                UiEvent::Motion { x, y } => {
+                    xwin.set_cursor(app.cursor_at(x, y))?;
+                    for widget in app.motion(x, y) {
                         if !pending_motion_widgets.contains(&widget) {
                             pending_motion_widgets.push(widget);
                         }
                     }
                 }
-                XEvent::SelectionRequest(event) => xwin.handle_selection_request(event)?,
-                XEvent::SelectionClear(event) => xwin.handle_selection_clear(event),
-                XEvent::ConfigureNotify(event) => {
-                    if app.set_min_size(event.width as usize, event.height as usize) {
+                UiEvent::Resized { width, height } => {
+                    if app.set_min_size(width, height) {
                         app.sync_dynamic_layout(&palette);
                         fb = Framebuffer::new(app.width(), app.height(), app_color::BACKGROUND);
                         xwin.resize_backing(fb.width, fb.height)?;
@@ -842,8 +817,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         drew_frame = true;
                     }
                 }
-                XEvent::DestroyNotify(_) => running = false,
-                _ => {}
+                UiEvent::Closed => running = false,
             }
         }
         if app.quit_requested || shutdown_requested.load(Ordering::Relaxed) {
@@ -885,7 +859,7 @@ fn log_widget_err<T: Default>(op: impl FnOnce() -> String, result: Result<T, Box
 fn redraw_after_input(
     app: &mut App,
     fb: &mut Framebuffer,
-    xwin: &mut XWindow,
+    xwin: &mut Window,
     palette: &Palette,
 ) -> Result<(), Box<dyn Error>> {
     let blurred = app.take_blurred();
@@ -906,7 +880,7 @@ fn redraw_after_input(
 fn sync_window_layout(
     app: &mut App,
     fb: &mut Framebuffer,
-    xwin: &mut XWindow,
+    xwin: &mut Window,
     palette: &Palette,
 ) -> Result<bool, Box<dyn Error>> {
     if !app.sync_dynamic_layout(palette) {

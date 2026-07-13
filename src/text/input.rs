@@ -24,6 +24,17 @@ pub struct KeyInput {
 }
 
 impl KeyInput {
+    /// Built by the windowing backends, which each resolve their platform's
+    /// key events through xkb before handing them to the app.
+    pub(crate) fn new(sym: xkb::Keysym, text: String, ctrl: bool, shift: bool) -> Self {
+        Self {
+            sym,
+            text,
+            ctrl,
+            shift,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn new_for_test(sym: u32, text: impl Into<String>, state: u16) -> Self {
         Self {

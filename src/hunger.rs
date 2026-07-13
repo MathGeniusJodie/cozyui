@@ -359,7 +359,7 @@ impl crate::widget::Widget for Hunger {
         &mut self,
         _x: isize,
         _y: isize,
-        _state: u16,
+        _shift: bool,
     ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
         Self::click(self);
         Ok(crate::widget::ClickOutcome::default())
