@@ -20,6 +20,16 @@ pub(crate) struct Fingerprint {
     pub(crate) mtime_ns: i64,
 }
 
+/// Read the whole file, treating a missing file as empty (files can vanish
+/// between a stat and the read when another program rewrites them).
+pub(crate) fn read_or_empty(path: &str) -> io::Result<String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(err),
+    }
+}
+
 /// The file's current fingerprint, or `None` if it does not exist.
 pub(crate) fn fingerprint(path: &str) -> io::Result<Option<Fingerprint>> {
     match fs::metadata(path) {
@@ -261,67 +271,70 @@ pub(crate) fn spawn_poller<T: Send + 'static>(
     rx
 }
 
-/// One queued [`BackgroundWriter`] job: a file to write, or a flush
-/// rendezvous (the worker acks once every earlier write has hit disk).
-enum WriteJob {
-    Write { path: String, contents: Vec<u8> },
-    Flush(mpsc::Sender<()>),
+/// One queued [`SaveWorker`] job: a file to write atomically.
+struct SaveJob<K> {
+    key: K,
+    path: String,
+    contents: Vec<u8>,
 }
 
-/// Runs [`atomic_write`] jobs on a single background thread, in submission
-/// order, so its fsyncs never run on (and never hitch) the UI thread.
-/// Fire-and-forget: failures are logged with the owner's name rather than
-/// returned, since by the time the write runs the caller has moved on. The
-/// single worker keeps writes to the same path ordered, so a stale value can
-/// never rename over a newer one. The thread exits when the writer is
-/// dropped.
-pub(crate) struct BackgroundWriter {
-    jobs: mpsc::Sender<WriteJob>,
+/// Background writer running [`atomic_write`] jobs (write, fsync, rename,
+/// directory fsync) off the UI thread; done inline, the fsyncs cause visible
+/// frame hitches on slow disks. Jobs and results both carry a caller-chosen
+/// key (`()` for a single file, a section id for several) so results can be
+/// routed back; the single worker thread keeps saves to the same path
+/// ordered, so a stale value can never rename over a newer one. Each result
+/// carries the written file's [`Fingerprint`], letting the owner adopt its
+/// own write as the synced disk version instead of later mistaking it for an
+/// external change. The thread exits when the worker is dropped.
+pub(crate) struct SaveWorker<K> {
+    jobs: mpsc::Sender<SaveJob<K>>,
+    results: mpsc::Receiver<(K, Result<Fingerprint, String>)>,
 }
 
-impl BackgroundWriter {
-    /// `owner` names the owning widget in failure logs (e.g. "twirl").
-    pub(crate) fn spawn(owner: &'static str) -> Self {
-        let (jobs, rx) = mpsc::channel::<WriteJob>();
+impl<K: Send + 'static> SaveWorker<K> {
+    pub(crate) fn spawn() -> Self {
+        let (jobs, job_rx) = mpsc::channel::<SaveJob<K>>();
+        let (result_tx, results) = mpsc::channel();
         std::thread::spawn(move || {
-            for job in rx {
-                match job {
-                    WriteJob::Write { path, contents } => {
-                        if let Err(err) = atomic_write(&path, contents) {
-                            eprintln!("{owner}: background save to {path} failed: {err}");
-                        }
-                    }
-                    WriteJob::Flush(ack) => {
-                        let _ = ack.send(());
-                    }
+            // Exits when the owner (and with it the job sender) is dropped.
+            while let Ok(job) = job_rx.recv() {
+                let result = atomic_write(&job.path, job.contents).map_err(|err| err.to_string());
+                if result_tx.send((job.key, result)).is_err() {
+                    return;
                 }
             }
         });
-        Self { jobs }
+        Self { jobs, results }
     }
 
-    pub(crate) fn write(&self, path: String, contents: impl Into<Vec<u8>>) {
-        let _ = self.jobs.send(WriteJob::Write {
+    pub(crate) fn submit(&self, key: K, path: String, contents: impl Into<Vec<u8>>) {
+        let _ = self.jobs.send(SaveJob {
+            key,
             path,
             contents: contents.into(),
         });
     }
 
-    /// Block until every previously queued write has hit disk. For shutdown:
-    /// a non-main thread's queued work is silently abandoned on process exit,
-    /// so without this a save queued just before quitting would be lost.
-    pub(crate) fn flush(&self) {
-        let (ack_tx, ack_rx) = mpsc::channel();
-        if self.jobs.send(WriteJob::Flush(ack_tx)).is_ok() {
-            let _ = ack_rx.recv();
-        }
+    pub(crate) fn try_result(&self) -> Option<(K, Result<Fingerprint, String>)> {
+        self.results.try_recv().ok()
+    }
+
+    /// Blocking receive, for the flush paths that must not proceed while a
+    /// save is still in flight.
+    pub(crate) fn wait_result(&self) -> Option<(K, Result<Fingerprint, String>)> {
+        self.results.recv().ok()
     }
 }
 
 /// Write `contents` to `path` atomically: write to a unique temp file in the
 /// same directory, fsync, rename over the destination, then fsync the
 /// directory (without which a crash shortly after can revert the rename).
-pub(crate) fn atomic_write(path: &str, contents: impl AsRef<[u8]>) -> io::Result<()> {
+/// Returns the resulting file's fingerprint, taken from the temp file
+/// *before* the rename (which preserves inode and mtime): statting the final
+/// path afterwards could race with an external writer and adopt a foreign
+/// version's fingerprint as our own, masking that change forever.
+pub(crate) fn atomic_write(path: &str, contents: impl AsRef<[u8]>) -> io::Result<Fingerprint> {
     let temp_path = unique_temp_path(path);
     let result = (|| {
         let mut file = fs::OpenOptions::new()
@@ -330,8 +343,12 @@ pub(crate) fn atomic_write(path: &str, contents: impl AsRef<[u8]>) -> io::Result
             .open(&temp_path)?;
         file.write_all(contents.as_ref())?;
         file.sync_all()?;
+        let written = fingerprint(&temp_path)?.ok_or_else(|| {
+            io::Error::new(ErrorKind::NotFound, "staged temp file vanished")
+        })?;
         fs::rename(&temp_path, path)?;
-        sync_parent_dir(path)
+        sync_parent_dir(path)?;
+        Ok(written)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp_path);

@@ -188,7 +188,7 @@ pub struct Toodle {
     done_counts: DoneCounts,
     // Runs section saves (write + fsync + rename) off the UI thread; results
     // are folded back in by maintain().
-    save_worker: SaveWorker,
+    save_worker: SaveWorker<Priority>,
     page: usize,
     // Which line (if any) is focused for editing, paired with its live
     // text-edit buffer; see `Focus`'s doc comment.

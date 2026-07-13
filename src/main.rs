@@ -600,7 +600,9 @@ impl App {
         if let Err(err) = self.widgets.toodle.flush_saves() {
             eprintln!("toodle save failed on shutdown: {err}");
         }
-        self.widgets.twirl.flush_saves();
+        if let Err(err) = self.widgets.twirl.flush_saves() {
+            eprintln!("twirl save failed on shutdown: {err}");
+        }
         self.widgets.wavey.shutdown();
         self.widgets.puter.shutdown_terminal();
         self.widgets.fwends.shutdown();

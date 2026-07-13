@@ -10,7 +10,6 @@ use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::Path;
-use std::sync::mpsc;
 
 use serde::{Deserialize, Serialize};
 
@@ -129,17 +128,7 @@ pub(super) const fn section_tag(section: Priority) -> &'static str {
     PRIORITY_TAGS[section.index()]
 }
 
-pub(super) use crate::util::{fingerprint, Fingerprint};
-
-/// Read the whole file, treating a missing file as empty (files can vanish
-/// between a stat and the read when another program rewrites them).
-pub(super) fn read_or_empty(path: &str) -> io::Result<String> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(text),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(String::new()),
-        Err(err) => Err(err),
-    }
-}
+pub(super) use crate::util::{fingerprint, read_or_empty, Fingerprint, SaveWorker};
 
 /// Count of completed todos in a done file: trimmed lines that are non-empty
 /// and don't start with `#` (done files can carry a leading markdown heading,
@@ -694,58 +683,6 @@ impl AtomicWrite {
         // file to its previous version on some filesystems.
         crate::util::sync_parent_dir(&self.path)?;
         Ok(written)
-    }
-}
-
-/// Background writer running section saves (write, fsync, rename, directory
-/// fsync) off the UI thread; done inline from the input path, the fsyncs
-/// caused visible frame hitches on slow disks. Jobs and results both carry
-/// the section, the single worker thread keeps saves ordered.
-pub(super) struct SaveWorker {
-    jobs: mpsc::Sender<SaveJob>,
-    results: mpsc::Receiver<(Priority, Result<Fingerprint, String>)>,
-}
-
-struct SaveJob {
-    section: Priority,
-    path: String,
-    text: String,
-}
-
-impl SaveWorker {
-    pub(super) fn spawn() -> Self {
-        let (jobs, job_rx) = mpsc::channel::<SaveJob>();
-        let (result_tx, results) = mpsc::channel();
-        std::thread::spawn(move || {
-            // Exits when the Toodle (and with it the job sender) is dropped.
-            while let Ok(job) = job_rx.recv() {
-                let result = AtomicWrite::stage(&job.path, job.text.as_bytes())
-                    .and_then(AtomicWrite::commit)
-                    .map_err(|err| err.to_string());
-                if result_tx.send((job.section, result)).is_err() {
-                    return;
-                }
-            }
-        });
-        Self { jobs, results }
-    }
-
-    pub(super) fn submit(&self, section: Priority, path: String, text: String) {
-        let _ = self.jobs.send(SaveJob {
-            section,
-            path,
-            text,
-        });
-    }
-
-    pub(super) fn try_result(&self) -> Option<(Priority, Result<Fingerprint, String>)> {
-        self.results.try_recv().ok()
-    }
-
-    /// Blocking receive, for the flush paths that must not proceed while a
-    /// save is still in flight.
-    pub(super) fn wait_result(&self) -> Option<(Priority, Result<Fingerprint, String>)> {
-        self.results.recv().ok()
     }
 }
 
