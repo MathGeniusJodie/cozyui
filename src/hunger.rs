@@ -28,9 +28,9 @@ const BAR_TEXT_GAP: usize = 5;
 
 const REFRESH: Duration = Duration::from_secs(1);
 
-/// Eating window, in minutes from local midnight: 7:00 AM to 8:00 PM.
-const WINDOW_START_MIN: i64 = 7 * 60;
-const WINDOW_END_MIN: i64 = 20 * 60;
+/// Eating window, in minutes from local midnight: 8:00 AM to 9:00 PM.
+const WINDOW_START_MIN: i64 = 8 * 60;
+const WINDOW_END_MIN: i64 = 21 * 60;
 /// Five meals spread across the window (including both endpoints).
 const MEALS_PER_DAY: i64 = 5;
 
@@ -246,8 +246,8 @@ fn civil_day_midnight(day_offset: i64) -> Option<f64> {
 }
 
 /// All meal times (Unix seconds) for the day `day_offset` days from today.
-/// Each meal's wall-clock minutes resolve through `mktime`, so 7:00 means
-/// 7:00 on the local clock even on the day a DST transition inserts or
+/// Each meal's wall-clock minutes resolve through `mktime`, so 8:00 means
+/// 8:00 on the local clock even on the day a DST transition inserts or
 /// removes an hour before the window opens (adding fixed seconds to
 /// midnight would shift every meal by the DST delta on that day).
 fn meals_for_day(day_offset: i64) -> impl Iterator<Item = f64> {
@@ -387,8 +387,8 @@ mod tests {
         let midnight = today_midnight();
         let m = meals();
         assert_eq!(m.len(), 5);
-        assert_eq!(m[0], midnight + (7 * 3600) as f64); // 7:00
-        assert_eq!(m[4], midnight + (20 * 3600) as f64); // 20:00
+        assert_eq!(m[0], midnight + (8 * 3600) as f64); // 8:00
+        assert_eq!(m[4], midnight + (21 * 3600) as f64); // 21:00
         // Evenly spaced 3h15m apart.
         assert_eq!(m[1] - m[0], 3.25 * 3600.0);
     }
@@ -428,7 +428,7 @@ mod tests {
         // Regression: next_meal/prev_meal must work when called with a meal
         // timestamp rather than the current instant. The two meals either side
         // of a meal time should be a clean window apart, not garbage.
-        let meal = meals_for_day(0).nth(1).unwrap(); // 10:15 today
+        let meal = meals_for_day(0).nth(1).unwrap(); // 11:15 today
         assert_eq!(prev_meal(meal), meal);
         let after = next_meal(meal);
         assert_eq!(after - meal, 3.25 * 3600.0);
