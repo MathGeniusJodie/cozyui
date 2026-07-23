@@ -921,6 +921,29 @@ impl crate::widget::Widget for Budgit {
     fn update(&mut self) -> Result<bool, Box<dyn Error>> {
         Ok(Self::update(self))
     }
+
+    /// A click anywhere on the widget opens the ledger for editing; the
+    /// `DISK_POLL` watcher picks up the save automatically.
+    fn click(
+        &mut self,
+        _x: isize,
+        _y: isize,
+        _shift: bool,
+    ) -> Result<crate::widget::ClickOutcome, Box<dyn Error>> {
+        let path = crate::paths::config_file(LEDGER_FILE);
+        // Ensure the file exists so the editor opens at the right path on a
+        // fresh install instead of xdg-open failing on a missing file.
+        if !std::path::Path::new(&path).exists() {
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(&path, "title,amount,date\n");
+        }
+        if let Err(err) = crate::util::spawn_and_reap(Command::new("xdg-open").arg(&path)) {
+            eprintln!("budgit.csv: failed to open editor: {err}");
+        }
+        Ok(crate::widget::ClickOutcome::default())
+    }
 }
 
 #[cfg(test)]
