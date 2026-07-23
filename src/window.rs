@@ -17,16 +17,35 @@ pub(crate) enum UiEvent {
     /// A key press, fully resolved through xkb (sym, text, modifiers).
     Key(KeyInput),
     /// Left-button press. `shift` feeds the terminal's mouse-mode override.
-    Press { x: isize, y: isize, shift: bool },
+    Press {
+        x: isize,
+        y: isize,
+        shift: bool,
+    },
     /// Left-button release.
-    Release { x: isize, y: isize },
-    Motion { x: isize, y: isize },
-    ScrollUp { x: isize, y: isize },
-    ScrollDown { x: isize, y: isize },
+    Release {
+        x: isize,
+        y: isize,
+    },
+    Motion {
+        x: isize,
+        y: isize,
+    },
+    ScrollUp {
+        x: isize,
+        y: isize,
+    },
+    ScrollDown {
+        x: isize,
+        y: isize,
+    },
     /// The window's actual size changed (compositor/WM-initiated); the
     /// backing buffers are NOT resized yet — the caller decides the new
     /// layout and calls `resize_backing`.
-    Resized { width: usize, height: usize },
+    Resized {
+        width: usize,
+        height: usize,
+    },
     /// The window is gone or the compositor asked us to stop.
     Closed,
 }
@@ -97,7 +116,11 @@ impl Window {
                 transparent,
             )?)))
         } else {
-            Ok(Self::X(Box::new(XWindow::open(width, height, transparent)?)))
+            Ok(Self::X(Box::new(XWindow::open(
+                width,
+                height,
+                transparent,
+            )?)))
         }
     }
 

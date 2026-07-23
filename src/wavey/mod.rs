@@ -628,9 +628,9 @@ impl crate::widget::Widget for Wavey {
 
     /// Hand over everything clickable: media buttons, clock, volume knob,
     /// tuner, and the copyable title.
-    fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
+    fn hit_test(&self, x: isize, y: isize) -> Option<CursorKind> {
         if x < 0 || y < 0 {
-            return CursorKind::Pointer;
+            return None;
         }
         let x = x as usize;
         let y = y as usize;
@@ -640,9 +640,9 @@ impl crate::widget::Widget for Wavey {
             || self.tuner_contains(x, y)
             || self.title_contains(x, y)
         {
-            CursorKind::Hand
+            Some(CursorKind::Hand)
         } else {
-            CursorKind::Pointer
+            None
         }
     }
 }
@@ -919,9 +919,9 @@ fn local_hour_minute() -> Option<(u8, u8)> {
 /// `$(...)`, quotes, whitespace, etc. by hiding them behind an unrelated `*`.
 fn is_safe_glob_token(token: &str) -> bool {
     token.contains('*')
-        && token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'*' | b'/' | b'.' | b'_' | b'-' | b'~'))
+        && token.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'*' | b'/' | b'.' | b'_' | b'-' | b'~')
+        })
 }
 
 #[cfg(test)]

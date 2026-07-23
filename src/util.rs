@@ -343,9 +343,8 @@ pub(crate) fn atomic_write(path: &str, contents: impl AsRef<[u8]>) -> io::Result
             .open(&temp_path)?;
         file.write_all(contents.as_ref())?;
         file.sync_all()?;
-        let written = fingerprint(&temp_path)?.ok_or_else(|| {
-            io::Error::new(ErrorKind::NotFound, "staged temp file vanished")
-        })?;
+        let written = fingerprint(&temp_path)?
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "staged temp file vanished"))?;
         fs::rename(&temp_path, path)?;
         sync_parent_dir(path)?;
         Ok(written)

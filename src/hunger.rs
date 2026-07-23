@@ -366,8 +366,8 @@ impl crate::widget::Widget for Hunger {
     }
 
     // Clicking anywhere logs a meal.
-    fn cursor_at(&self, _x: isize, _y: isize) -> crate::CursorKind {
-        crate::CursorKind::Hand
+    fn hit_test(&self, _x: isize, _y: isize) -> Option<crate::CursorKind> {
+        Some(crate::CursorKind::Hand)
     }
 }
 

@@ -825,20 +825,20 @@ impl crate::widget::Widget for Fwends {
     }
 
     /// Mirrors the hit-testing in `click`, without side effects.
-    fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
+    fn hit_test(&self, x: isize, y: isize) -> Option<CursorKind> {
         if x < 0 || y < 0 {
-            return CursorKind::Pointer;
+            return None;
         }
         if self.eraser_contains(x, y)
             || self.lamp_contains(x, y)
             || self.selected_fwend_rect().contains_point(x, y)
         {
-            return CursorKind::Hand;
+            return Some(CursorKind::Hand);
         }
         if self.input_contains(x, y) {
-            return CursorKind::Text;
+            return Some(CursorKind::Text);
         }
-        CursorKind::Pointer
+        None
     }
 
     fn handle_key_press(

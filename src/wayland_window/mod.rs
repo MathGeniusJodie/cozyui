@@ -40,8 +40,8 @@ use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_keyboard, wl_output, wl_pointer, wl_region, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
 
-use crate::window::UiEvent;
 use crate::CursorKind;
+use crate::window::UiEvent;
 use input::{CursorSprites, KeyRepeat};
 use pixel_graphics::PresentLut;
 
@@ -340,7 +340,11 @@ impl LayerShellHandler for State {
     ) {
         let (w, h) = configure.new_size;
         // 0 means "you decide": keep the requested width / current height.
-        let width = if w == 0 { self.requested_width } else { w as usize };
+        let width = if w == 0 {
+            self.requested_width
+        } else {
+            w as usize
+        };
         let height = if h == 0 { self.height } else { h as usize };
         self.configured = true;
         if width == self.width && height == self.height {

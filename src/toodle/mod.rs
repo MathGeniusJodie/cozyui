@@ -1213,28 +1213,28 @@ impl crate::widget::Widget for Toodle {
     }
 
     /// Mirrors the hit-testing in `click`, without side effects.
-    fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
+    fn hit_test(&self, x: isize, y: isize) -> Option<CursorKind> {
         if self.eraser_at(x, y) || self.dice_at(x, y) {
-            return CursorKind::Hand;
+            return Some(CursorKind::Hand);
         }
         let abs_x = x.max(0);
         let abs_y = y.max(0);
         let page_x = abs_x - PAGE_OFFSET_X;
         if page_x < 0 {
-            return CursorKind::Pointer;
+            return None;
         }
         if page_x >= PAGE_CURL_X && abs_y >= PAGE_CURL_Y {
-            return CursorKind::Hand;
+            return Some(CursorKind::Hand);
         }
         if let Some(line) = checkbox_at(page_x, abs_y)
             && self.checkbox_clickable(line)
         {
-            return CursorKind::Hand;
+            return Some(CursorKind::Hand);
         }
         if line_at(abs_y).is_some() {
-            CursorKind::Text
+            Some(CursorKind::Text)
         } else {
-            CursorKind::Pointer
+            None
         }
     }
 
@@ -1249,7 +1249,10 @@ impl crate::widget::Widget for Toodle {
 
         let PageRef { section, page } = self.current_page_ref();
         if matches!(edit_key(input), EditKey::Backspace)
-            && self.focus.field().is_some_and(|field| field.text().is_empty())
+            && self
+                .focus
+                .field()
+                .is_some_and(|field| field.text().is_empty())
         {
             // Deleting goes through the async save path like every other
             // edit, so a backspace never blocks the UI thread on fsyncs. If a
@@ -1405,7 +1408,10 @@ fn page_swap(page_color: PageColor, pencil_on_second_line: bool) -> Swap {
         // recolor them the same way this page recolors ROSE (unchanged when
         // the page leaves ROSE alone, e.g. pink).
         let rose_to = remapped(remap, palette_color::ROSE);
-        swap = swap.set(palette_color::LIME, Paint::Solid(PaletteIndex::new(rose_to)));
+        swap = swap.set(
+            palette_color::LIME,
+            Paint::Solid(PaletteIndex::new(rose_to)),
+        );
     }
     swap
 }

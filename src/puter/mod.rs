@@ -251,10 +251,11 @@ impl crate::widget::Widget for Puter {
         true
     }
 
-    /// Hand over the front-panel buttons, text over the terminal screen.
-    fn cursor_at(&self, x: isize, y: isize) -> CursorKind {
+    /// Hand over the front-panel buttons, text over the terminal screen; the
+    /// case around them is inert.
+    fn hit_test(&self, x: isize, y: isize) -> Option<CursorKind> {
         if button_at(x, y).is_some() {
-            return CursorKind::Hand;
+            return Some(CursorKind::Hand);
         }
         if x >= 0 && y >= 0 {
             let x = x as usize;
@@ -263,10 +264,10 @@ impl crate::widget::Widget for Puter {
             let screen_y = art_y(SCREEN_SOURCE_Y);
             if x >= screen_x && x < screen_x + SCREEN_W && y >= screen_y && y < screen_y + SCREEN_H
             {
-                return CursorKind::Text;
+                return Some(CursorKind::Text);
             }
         }
-        CursorKind::Pointer
+        None
     }
 
     fn handle_key_press(

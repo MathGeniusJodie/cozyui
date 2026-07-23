@@ -237,7 +237,15 @@ impl Day {
             y as isize + 1,
             rose,
         );
-        draw_text_centered_tight(fb, &self.label_font, year, card_x, card_w, y as isize, cream);
+        draw_text_centered_tight(
+            fb,
+            &self.label_font,
+            year,
+            card_x,
+            card_w,
+            y as isize,
+            cream,
+        );
         y += year_h + LABEL_GAP;
         draw_text_centered_tight(
             fb,
@@ -495,8 +503,8 @@ impl crate::widget::Widget for Day {
     }
 
     // Clicking anywhere toggles the mode.
-    fn cursor_at(&self, _x: isize, _y: isize) -> crate::CursorKind {
-        crate::CursorKind::Hand
+    fn hit_test(&self, _x: isize, _y: isize) -> Option<crate::CursorKind> {
+        Some(crate::CursorKind::Hand)
     }
 }
 

@@ -9,10 +9,10 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::AsRawFd as _;
 use std::time::{Duration, Instant};
 
+use smithay_client_toolkit::data_device_manager::WritePipe;
 use smithay_client_toolkit::data_device_manager::data_device::DataDeviceHandler;
 use smithay_client_toolkit::data_device_manager::data_offer::{DataOfferHandler, DragOffer};
 use smithay_client_toolkit::data_device_manager::data_source::DataSourceHandler;
-use smithay_client_toolkit::data_device_manager::WritePipe;
 use wayland_client::protocol::wl_data_device::WlDataDevice;
 use wayland_client::protocol::wl_data_device_manager::DndAction;
 use wayland_client::protocol::wl_data_source::WlDataSource;

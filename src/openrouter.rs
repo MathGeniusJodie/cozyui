@@ -9,8 +9,8 @@
 use serde_json::{Value, json};
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::io::Read;
+use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

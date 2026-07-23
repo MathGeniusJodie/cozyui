@@ -96,7 +96,11 @@ pub(crate) const fn civil_from_days(z: i64) -> (i32, i32, i32) {
 /// `days_from_civil` (rather than a hand-rolled leap-year rule) keeps it
 /// automatically consistent with the rest of the civil-date math.
 pub(crate) const fn days_in_month(year: i32, month: i32) -> i32 {
-    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
     (days_from_civil(next_year, next_month, 1) - days_from_civil(year, month, 1)) as i32
 }
 

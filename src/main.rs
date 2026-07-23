@@ -466,6 +466,12 @@ impl App {
             self.blurred = Some(self.focus);
         }
         self.focus = widget;
+        if self.widgets.get(widget).hit_test(x, y).is_none() {
+            // Inert region: no click delivered, but the press still dismisses
+            // any inner focus (toodle's edited line, fwends' input field).
+            self.widgets.get_mut(widget).blur();
+            return Ok(None);
+        }
         let outcome = self.widgets.get_mut(widget).click(x, y, shift)?;
         if outcome.spin_twirl {
             self.widgets.twirl.spin();
@@ -570,22 +576,22 @@ impl App {
         let Some((widget, x, y)) = self.widget_at(x, y) else {
             return CursorKind::Pointer;
         };
-        self.widgets.get(widget).cursor_at(x, y)
+        self.widgets
+            .get(widget)
+            .hit_test(x, y)
+            .unwrap_or(CursorKind::Pointer)
     }
 
     /// The topmost widget under `(x, y)`: paint order reversed, so
     /// hit-testing always agrees with what is drawn on top.
     fn widget_at(&self, x: isize, y: isize) -> Option<(WidgetId, isize, isize)> {
-        WidgetId::ALL
-            .into_iter()
-            .rev()
-            .find_map(|widget| {
-                let rect = self.rect_for(widget);
-                rect.contains(x, y).then(|| {
-                    let (x, y) = rect.local(x, y);
-                    (widget, x, y)
-                })
+        WidgetId::ALL.into_iter().rev().find_map(|widget| {
+            let rect = self.rect_for(widget);
+            rect.contains(x, y).then(|| {
+                let (x, y) = rect.local(x, y);
+                (widget, x, y)
             })
+        })
     }
 
     /// Ticks one widget's periodic update; returns whether it needs a redraw.

@@ -20,8 +20,8 @@ use alacritty_terminal::tty;
 
 use super::keys::{is_copy_shortcut, key_bytes, key_scroll};
 use super::{
-    GLYPH_H, GLYPH_W, PressState, SCREEN_H, SCREEN_SOURCE_X, SCREEN_SOURCE_Y, SCREEN_W,
-    art_x, art_y,
+    GLYPH_H, GLYPH_W, PressState, SCREEN_H, SCREEN_SOURCE_X, SCREEN_SOURCE_Y, SCREEN_W, art_x,
+    art_y,
 };
 use crate::text::KeyInput;
 
@@ -281,7 +281,10 @@ impl Terminal {
 /// stripped so they can't be misread as an escape sequence.
 fn paste_bytes(bracketed: bool, text: &str) -> Vec<u8> {
     if bracketed {
-        let filtered: String = text.chars().filter(|&c| c != '\x1b' && c != '\x03').collect();
+        let filtered: String = text
+            .chars()
+            .filter(|&c| c != '\x1b' && c != '\x03')
+            .collect();
         let mut bytes = Vec::with_capacity(filtered.len() + 12);
         bytes.extend_from_slice(b"\x1b[200~");
         bytes.extend_from_slice(filtered.as_bytes());

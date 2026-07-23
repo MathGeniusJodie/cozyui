@@ -922,6 +922,11 @@ impl crate::widget::Widget for Budgit {
         Ok(Self::update(self))
     }
 
+    // Clicking anywhere opens the ledger.
+    fn hit_test(&self, _x: isize, _y: isize) -> Option<crate::CursorKind> {
+        Some(crate::CursorKind::Hand)
+    }
+
     /// A click anywhere on the widget opens the ledger for editing; the
     /// `DISK_POLL` watcher picks up the save automatically.
     fn click(

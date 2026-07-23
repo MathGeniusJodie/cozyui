@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::app_color;
 use crate::palette_color;
 use crate::text::BitmapFont;
-use crate::util::{fingerprint, read_or_empty, Fingerprint, SaveWorker};
+use crate::util::{Fingerprint, SaveWorker, fingerprint, read_or_empty};
 use crate::widget::Widget;
 use crate::{CursorKind, Framebuffer, Index, Palette, Sprite, TRANSPARENT};
 
@@ -673,17 +673,17 @@ impl crate::widget::Widget for Twirl {
         Ok(crate::widget::ClickOutcome::default())
     }
 
-    /// Hand inside the spinnable wheel, mirroring the `click` hit-test.
-    fn cursor_at(&self, x: isize, y: isize) -> crate::CursorKind {
+    /// Hand inside the spinnable wheel; the shadow margin is inert.
+    fn hit_test(&self, x: isize, y: isize) -> Option<crate::CursorKind> {
         if x < 0 || y < 0 {
-            return CursorKind::Pointer;
+            return None;
         }
         let x = x as usize;
         let y = y as usize;
-        if x >= self.width() || y >= self.height() || !self.wheel_contains(x, y) {
-            CursorKind::Pointer
+        if x < self.width() && y < self.height() && self.wheel_contains(x, y) {
+            Some(CursorKind::Hand)
         } else {
-            CursorKind::Hand
+            None
         }
     }
 }

@@ -304,6 +304,11 @@ impl crate::widget::Widget for Stats {
         HEIGHT
     }
 
+    // Not interactive; clicks land nowhere and the cursor stays an arrow.
+    fn hit_test(&self, _x: isize, _y: isize) -> Option<crate::CursorKind> {
+        None
+    }
+
     fn fill_color(&self, _palette: &Palette) -> Index {
         palette_color::BLACK
     }

@@ -48,7 +48,21 @@ pub(crate) trait Widget {
     fn update(&mut self) -> Result<bool, Box<dyn Error>> {
         Ok(false)
     }
-    fn click(&mut self, _x: isize, _y: isize, _shift: bool) -> Result<ClickOutcome, Box<dyn Error>> {
+    /// Pointer interactivity in one place: `Some(kind)` where `(x, y)` is on
+    /// an interactive region — the shell shows `kind` as the cursor there and
+    /// delivers `click`s only there — `None` where the widget is inert (arrow
+    /// cursor; a click just blurs). Required rather than defaulted so a
+    /// widget cannot gain a click handler while forgetting to say what the
+    /// pointer should show: clickability and cursor come from the same
+    /// answer and cannot disagree.
+    fn hit_test(&self, x: isize, y: isize) -> Option<CursorKind>;
+    /// Only called where `hit_test` returned `Some`.
+    fn click(
+        &mut self,
+        _x: isize,
+        _y: isize,
+        _shift: bool,
+    ) -> Result<ClickOutcome, Box<dyn Error>> {
         Ok(ClickOutcome::default())
     }
     /// Focus moved to another widget; drop any focus-only visuals (cursors,
@@ -70,9 +84,6 @@ pub(crate) trait Widget {
     /// Wheel scroll over the widget; returns whether it was handled.
     fn scroll(&mut self, _x: isize, _y: isize, _direction: ScrollDirection) -> bool {
         false
-    }
-    fn cursor_at(&self, _x: isize, _y: isize) -> CursorKind {
-        CursorKind::Pointer
     }
     /// Returns text to copy to the clipboard, if the key asked for a copy.
     fn handle_key_press(

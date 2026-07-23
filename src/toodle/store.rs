@@ -128,7 +128,7 @@ pub(super) const fn section_tag(section: Priority) -> &'static str {
     PRIORITY_TAGS[section.index()]
 }
 
-pub(super) use crate::util::{fingerprint, read_or_empty, Fingerprint, SaveWorker};
+pub(super) use crate::util::{Fingerprint, SaveWorker, fingerprint, read_or_empty};
 
 /// Count of completed todos in a done file: trimmed lines that are non-empty
 /// and don't start with `#` (done files can carry a leading markdown heading,
