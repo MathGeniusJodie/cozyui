@@ -39,7 +39,7 @@ const INPUT_BOX_RIGHT_PAD: usize = 11;
 const INPUT_EXTRA_W: usize = 40;
 const INPUT_EXTRA_H: usize = 4;
 const SELECTED_FWEND_GAP: usize = 4;
-const SELECTED_FWEND_Y_OFFSET: isize = 10;
+const SELECTED_FWEND_Y_OFFSET: isize = 30;
 const BUBBLE_PAD_X: usize = 14;
 const BUBBLE_PAD_TOP: usize = 8;
 const BUBBLE_PAD_BOTTOM: usize = 11;
@@ -69,7 +69,7 @@ const SMOL_ICON_Y_OFFSET: usize = 3;
 const PENCIL_TIP_X: usize = 0;
 const PENCIL_TIP_Y: usize = 24;
 const LAMP_RIGHT_PAD: usize = 140;
-const LAMP_Y_OFFSET: usize = 60;
+const LAMP_Y_OFFSET: usize = 40;
 const ERASER_RIGHT_PAD: usize = 0;
 
 pub struct Fwends {
