@@ -48,8 +48,8 @@ pub(super) struct Model {
 
 pub(super) const MODELS: [Model; 4] = [
     Model {
-        id: "anthropic/claude-haiku-4.5",
-        thinking_id: "anthropic/claude-opus-4.5",
+        id: "anthropic/claude-sonnet-5",
+        thinking_id: "anthropic/claude-opus-5",
         name: "Claude",
         icon_index: 2,
         avatar: crate::assets::claw,
@@ -63,14 +63,14 @@ pub(super) const MODELS: [Model; 4] = [
     },
     Model {
         id: "qwen/qwen3.6-35b-a3b",
-        thinking_id: "qwen/qwen3.7-plus",
+        thinking_id: "qwen/qwen3.7-max",
         name: "Qwen",
         icon_index: 0,
         avatar: crate::assets::qwen,
     },
     Model {
-        id: "moonshotai/kimi-k2.6",
-        thinking_id: "moonshotai/kimi-k2.6",
+        id: "moonshotai/kimi-k3",
+        thinking_id: "moonshotai/kimi-k3",
         name: "Kimi",
         icon_index: 3,
         avatar: crate::assets::kimi,
