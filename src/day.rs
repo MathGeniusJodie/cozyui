@@ -18,12 +18,20 @@ const BASE_WIDTH: usize = 116;
 // the "w" prefix (e.g. "w27"), plus 4px more of breathing room.
 pub(crate) const WEEK_COL_W: usize = CALENDAR_COL_W + 6 + 4;
 const WIDTH: usize = BASE_WIDTH + WEEK_COL_W;
-const HEIGHT: usize = 116;
+// Tall enough for a full `MAX_CALENDAR_ROWS`-row month plus a bottom margin,
+// derived from the grid's own geometry so the card can't be left too short
+// for the grid it has to hold (the art is natively 116 tall, which fits only
+// 5 rows; the extra height comes from the same 9-slice stretching as the
+// width). Six-row months are common — August 2026, for one.
+const CALENDAR_BOTTOM_MARGIN: usize = 9;
+const HEIGHT: usize =
+    CALENDAR_GRID_Y as usize + MAX_CALENDAR_ROWS * CALENDAR_ROW_H + CALENDAR_BOTTOM_MARGIN;
 // 9-slice caps for `background`: kept clear of the header's two rivets
 // (native x 15-22 and 90-97) and the right-edge stacked-page ridge (native x
 // 105-115), so stretching the card only widens the flat middle, not those
-// details. Top/bottom caps are unused in practice since the card never grows
-// taller, but must stay within the art's height.
+// details. The top cap likewise keeps the header band and the torn-paper edge
+// below it out of the vertical stretch, and the bottom cap the curled corner
+// and page stack, so only the blank middle of the page grows.
 const BG_LEFT_CAP: usize = 24;
 const BG_RIGHT_CAP: usize = 26;
 const BG_TOP_CAP: usize = 25;
@@ -36,8 +44,15 @@ const PLAIN_CARD_X: usize = WEEK_COL_W;
 const SHADOW_X_OFFSET: usize = 1;
 const SHADOW_Y_OFFSET: usize = 4;
 const DATE_REFRESH: Duration = Duration::from_secs(60);
+// The year sits on the card's header band, so this gap is fixed by the art
+// and must not follow the card's height.
 const TOP_GAP: usize = 10;
-const LABEL_GAP: usize = 26;
+// Distance from the year down to the weekday: the single-date view's page
+// text (weekday/number/month) hangs from here, and the card is taller than
+// that text needs because its height is set by the calendar grid (see
+// `HEIGHT`), so this gap absorbs the slack to keep the block centered on the
+// page rather than leaving it all below the month.
+const LABEL_GAP: usize = 32;
 const NUMBER_GAP: usize = 6;
 const MONTH_GAP: usize = 6;
 const CALENDAR_TITLE_Y: isize = 11;

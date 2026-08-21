@@ -32,7 +32,7 @@ const REFRESH: Duration = Duration::from_secs(1);
 const WINDOW_START_MIN: i64 = 8 * 60;
 const WINDOW_END_MIN: i64 = 21 * 60;
 /// Five meals spread across the window (including both endpoints).
-const MEALS_PER_DAY: i64 = 5;
+const MEALS_PER_DAY: i64 = 4;
 
 /// A validated "eaten through" timestamp: never later than the instant it was
 /// validated against. `meal_window` only searches a window of roughly

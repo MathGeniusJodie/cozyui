@@ -48,22 +48,22 @@ pub(super) struct Model {
 
 pub(super) const MODELS: [Model; 4] = [
     Model {
-        id: "anthropic/claude-sonnet-5",
-        thinking_id: "anthropic/claude-opus-5",
+        id: "anthropic/claude-opus-4.5",
+        thinking_id: "anthropic/claude-opus-4.5",
         name: "Claude",
         icon_index: 2,
         avatar: crate::assets::claw,
     },
     Model {
-        id: "deepseek/deepseek-v4-flash",
-        thinking_id: "deepseek/deepseek-v4-pro",
+        id: "deepseek/deepseek-v4-flash-0731",
+        thinking_id: "deepseek/deepseek-v4-pro-0813",
         name: "Deepseek",
         icon_index: 1,
         avatar: crate::assets::deep,
     },
     Model {
         id: "qwen/qwen3.6-35b-a3b",
-        thinking_id: "qwen/qwen3.7-max",
+        thinking_id: "qwen/qwen3.8-max",
         name: "Qwen",
         icon_index: 0,
         avatar: crate::assets::qwen,
